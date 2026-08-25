@@ -1,0 +1,88 @@
+@import "tailwindcss";
+
+/*
+ * VS Code Dark Modern + Dark+ palette.
+ *
+ * Every value is a real key from the theme, named in the comment beside it, so
+ * these can be checked against the source instead of eyeballed. Components
+ * reference the semantic name (bg-editor, text-syn-string) and never a hex, so
+ * swapping in Light Modern later is one block, not a sweep.
+ */
+@theme {
+  --font-mono: Consolas, "Cascadia Mono", "Courier New", monospace;
+  --font-sans: "Segoe UI", system-ui, -apple-system, sans-serif;
+
+  /* Surfaces */
+  --color-editor: #1f1f1f; /* editor.background */
+  --color-chrome: #181818; /* sideBar / activityBar / titleBar.background */
+  --color-input: #313131; /* input.background, button.secondaryBackground */
+  --color-raised: #3c3c3c; /* button.secondaryHoverBackground */
+  --color-hover: #2a2d2e; /* list.hoverBackground */
+  --color-active: #04395e; /* list.activeSelectionBackground */
+  --color-line: #2b2b2b; /* editorGroup.border */
+  --color-line-soft: #313131; /* panel.border */
+
+  /* Text */
+  --color-fg: #cccccc; /* editor.foreground */
+  --color-fg-muted: #9d9d9d; /* descriptionForeground */
+  --color-fg-dim: #6e7681; /* disabledForeground */
+
+  /* Accent */
+  --color-accent: #0078d4; /* button.background, focusBorder */
+  --color-accent-hover: #026ec1; /* button.hoverBackground */
+
+  /* Dark+ token colours, used to give the run stream the same reading rhythm
+     as the editor: tool names read as functions, their arguments as strings.
+     type / keyword / number are unused today and kept deliberately — they
+     complete the set, so the CodeMirror viewer in a later slice is a lookup
+     rather than another round of theme archaeology. */
+  --color-syn-comment: #6a9955;
+  --color-syn-string: #ce9178;
+  --color-syn-func: #dcdcaa;
+  --color-syn-var: #9cdcfe;
+  --color-syn-type: #4ec9b0;
+  --color-syn-keyword: #c586c0;
+  --color-syn-number: #b5cea8;
+
+  /* Status */
+  --color-ok: #89d185; /* charts.green, testing.iconPassed */
+  --color-err: #f14c4c; /* errorForeground, terminal brightRed */
+  --color-warn: #e2c08d; /* gitDecoration.modifiedResourceForeground */
+  --color-info: #3794ff; /* charts.blue, progressBar.background */
+
+  /* Diff */
+  --color-diff-add: #9bb95526; /* diffEditor.insertedLineBackground */
+  --color-diff-del: #ff000026; /* diffEditor.removedLineBackground */
+  --color-diff-add-fg: #81b88b; /* gitDecoration.addedResourceForeground */
+  --color-diff-del-fg: #c74e39; /* gitDecoration.deletedResourceForeground */
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  overscroll-behavior: none;
+  background: var(--color-editor);
+  color: var(--color-fg);
+}
+
+/* workbench scrollbars: thin, no track, only visible against content */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #79797966; /* scrollbarSlider.background */
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #646464b3; /* scrollbarSlider.hoverBackground */
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}

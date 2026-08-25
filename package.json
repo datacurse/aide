@@ -1,0 +1,14 @@
+{
+  "name": "aide",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm -r --parallel run dev",
+    "probe": "pnpm --filter @aide/daemon probe",
+    "daemon": "pnpm --filter @aide/daemon start",
+    "web": "pnpm --filter @aide/web dev",
+    "typecheck": "pnpm -r run typecheck",
+    "build": "pnpm --filter @aide/web build"
+  }
+}

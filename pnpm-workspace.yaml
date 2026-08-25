@@ -1,0 +1,6 @@
+packages:
+  - "packages/*"
+
+# tsx -> esbuild needs its postinstall to link the platform binary.
+allowBuilds:
+  esbuild: true
