@@ -3,6 +3,23 @@ import type { Project, RunEvent, Task } from "@aide/protocol"
 export type ProjectView = Project & { activeRuns: number }
 export type TaskView = Task & { activeRunId: string | null }
 
+/**
+ * Daemon lifecycle, served by the Vite dev server rather than the daemon — the
+ * one thing that must still answer when the daemon is down. In a built bundle
+ * these routes do not exist, and `daemonStatus()` resolves to null so the UI can
+ * drop the controls rather than show dead buttons.
+ */
+export type DaemonState = "stopped" | "starting" | "running" | "adopted"
+
+export interface DaemonStatus {
+  state: DaemonState
+  port: number
+  pid: number | null
+  managed: boolean
+  startedAt: number | null
+  lastExit: { code: number | null; signal: string | null; at: number } | null
+}
+
 export interface Health {
   ok: boolean
   taskModel: string
@@ -14,6 +31,27 @@ export interface DiffView {
   worktree: string
   diff: string
   status: string
+}
+
+export interface CommitDraft {
+  message: string
+  /** Which model wrote it, so the UI never has to guess. */
+  model: string
+}
+
+export interface CommitResult {
+  sha: string
+  /** Path relative to the project root, or null if the entry could not be written. */
+  journal: string | null
+  /** Set when the commit succeeded but something after it did not. */
+  warning: string | null
+}
+
+export interface LandResult {
+  sha: string
+  /** The branch the task was merged into. */
+  into: string
+  warning: string | null
 }
 
 async function call<T>(url: string, init?: RequestInit): Promise<T> {
@@ -28,8 +66,29 @@ async function call<T>(url: string, init?: RequestInit): Promise<T> {
   return res.status === 204 ? (undefined as T) : ((await res.json()) as T)
 }
 
+/** null when there is no dev-server control plane, as opposed to a real failure. */
+async function daemonCall(path: string, init?: RequestInit): Promise<unknown | null> {
+  const res = await fetch(`/__daemon${path}`, init)
+  if (res.status === 404) return null
+  // A static host serving the built bundle answers unknown paths with index.html
+  // and a cheerful 200. Parsing that as a status object leaves the UI reporting
+  // "starting…" forever, so anything that is not JSON means no control plane.
+  if (!(res.headers.get("content-type") ?? "").includes("application/json")) return null
+  const body = await res.json().catch(() => null)
+  if (body === null) return null
+  if (!res.ok) throw new Error((body as { message?: string }).message ?? `HTTP ${res.status}`)
+  return body
+}
+
 export const api = {
   health: () => call<Health>("/api/health"),
+
+  daemonStatus: () => daemonCall("/status") as Promise<DaemonStatus | null>,
+  daemonLog: () => daemonCall("/log") as Promise<{ lines: string[] } | null>,
+  daemonStart: () => daemonCall("/start", { method: "POST" }) as Promise<{ message: string } | null>,
+  daemonStop: () => daemonCall("/stop", { method: "POST" }) as Promise<{ message: string } | null>,
+  daemonRestart: () =>
+    daemonCall("/restart", { method: "POST" }) as Promise<{ message: string } | null>,
 
   projects: () => call<ProjectView[]>("/api/projects"),
   addProject: (path: string) =>
@@ -54,4 +113,17 @@ export const api = {
     call<RunEvent[]>(`/api/runs/${runId}/events?fromSeq=${fromSeq}`),
   diff: (projectId: string, taskId: string) =>
     call<DiffView>(`/api/projects/${projectId}/tasks/${taskId}/diff`),
+
+  branch: (projectId: string) => call<{ branch: string | null }>(`/api/projects/${projectId}/branch`),
+  draftCommit: (projectId: string, taskId: string) =>
+    call<CommitDraft>(`/api/projects/${projectId}/tasks/${taskId}/commit/draft`, {
+      method: "POST",
+    }),
+  commit: (projectId: string, taskId: string, message: string) =>
+    call<CommitResult>(`/api/projects/${projectId}/tasks/${taskId}/commit`, {
+      method: "POST",
+      body: JSON.stringify({ message }),
+    }),
+  land: (projectId: string, taskId: string) =>
+    call<LandResult>(`/api/projects/${projectId}/tasks/${taskId}/land`, { method: "POST" }),
 }

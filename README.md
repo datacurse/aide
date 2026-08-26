@@ -8,6 +8,9 @@ task → agent → verified diff. This repo is slice 1 of that: the runner.
 
 **What works today.** Add a git repo, write a task, watch Opus work it in an isolated
 worktree, read the diff. Interrupt it mid-run. Two run concurrently, the rest queue.
+Then accept it: Sonnet drafts a commit message from the diff, you edit it, aide commits
+to the task branch and writes a journal entry — and landing it into your branch is a
+second, separate button.
 
 ## Requirements
 
@@ -24,10 +27,21 @@ offer claude.ai login, so bring your own — that is the only supported setup.
 ```bash
 pnpm install
 pnpm probe     # verifies auth + model access for a few cents before anything else
-pnpm dev       # daemon on :4317, web on :5173
+pnpm smoke     # exercises the git plumbing against a throwaway repo, no model calls
+pnpm dev       # web on :5173, which starts the daemon on :4317
 ```
 
 Open http://localhost:5173, add a repo by absolute path, write a task, run it.
+
+The daemon is started, stopped and restarted from the header — a dev-only control
+plane the Vite server exposes at `/__daemon`. It has to live there rather than in the
+daemon: the browser reaches the daemon over HTTP, so a dead daemon is precisely the case
+with nobody left to receive "please start". Vite is already running, so Vite owns the
+process.
+
+That control plane exists only under `pnpm dev`. `pnpm daemon` still runs one standalone
+for anything real, and the dev server adopts a daemon started that way instead of
+fighting it for the port — it just cannot stop what it did not start.
 
 ## How it is put together
 
@@ -42,9 +56,11 @@ browser (Vite/React)  ──HTTP──▶  daemon (Fastify)  ──child process
   both ends compile from the same definitions, so the compiler already guards the wire.
   The one runtime check is on hand-edited task frontmatter, where a typo must fail loudly.
 - **`packages/daemon`** — project registry, task queue, worker supervision, event log.
-  Long-lived, so runs continue with the browser closed. `src/agent.ts` is the only file
-  that imports the Agent SDK.
-- **`packages/web`** — three panes: projects, tasks, live run.
+  Long-lived, so runs continue with the browser closed. Two files import the Agent SDK and
+  nothing else does: `src/agent.ts` for runs, `src/helper.ts` for one-shot calls with no
+  tools, such as drafting a commit message.
+- **`packages/web`** — three panes: projects, tasks, live run — plus `vite-daemon.ts`, the
+  dev-only plugin that owns the daemon process.
 
 State lives in files, not a database:
 
@@ -77,15 +93,44 @@ Each of these is a bug that has already been paid for once.
 - **Cost numbers are estimates.** `total_cost_usd` comes from a price table bundled into the
   SDK at build time. Good for a dashboard, never for billing. Read totals from
   `modelUsage`, which includes subagent spend; `usage` excludes it.
+- **Worktrees are ignored via `.git/info/exclude`, not `.gitignore`.** `.gitignore` is a
+  tracked file: appending to it leaves the project with an uncommitted change aide made
+  and nobody asked for — which then blocks the first land, because merging refuses to run
+  over a dirty tree. aide would have broken its own workflow on the first task.
+- **A failed merge is aborted, not left sitting.** Landing refuses up front if the target
+  is dirty, and runs `git merge --abort` on conflict. Without the abort, a failed land
+  strands the project half-merged in a state aide has no UI for.
+- **The daemon's health is polled, not checked once.** The daemon takes a second or two to
+  boot, so a single check at page load races it — and losing that race pinned the header to
+  "daemon offline" for the life of the page while every other request worked fine.
+- **Journal entries are assembled, not written by a model.** Every line comes from the run's
+  own event log — what the agent said, which tools it called, what it cost, what it was
+  denied. A narrated journal is indistinguishable from an invented one by the time anyone
+  needs it. The commit message is the one model-written part, and it is quoted as such.
+
+## The task lifecycle
+
+```
+queued → running → needs-review → committed → done
+                \→ failed | cancelled
+```
+
+Two human gates, not one. `needs-review` means the agent stopped and nobody has read the
+diff. `committed` means you read it and the work is on `aide/task-NNNN`, which is a safe
+resting state — nothing outside that branch has changed. `done` means it landed.
+
+The split is the point. Committing is recoverable; merging is what the rest of the repo
+has to live with. Every commit carries `Aide-Task` and `Aide-Run` trailers, so months
+later `git show` still says which task asked for the change and which run log explains it.
 
 ## Next
 
-1. Journal + Sonnet-written commit messages
-2. Intake pipeline: `inbox.md` → classify → **patch proposal** against specs → you accept or
+1. Intake pipeline: `inbox.md` → classify → **patch proposal** against specs → you accept or
    reject hunks → specs and roadmap regenerate. The human gate is the point: an agent that
    can silently edit a spec to match what it built makes the specs worthless.
-3. Spec drift detection on task completion
-4. Cross-project dashboard
+2. Spec drift detection on task completion
+3. Cross-project dashboard
+4. Resume runs across a daemon restart — today a restart orphans anything in flight
 5. SQLite, when run-history queries start to hurt
 6. CodeMirror 6 read-only viewer
 7. Git graph — last, most fun, least useful

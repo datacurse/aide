@@ -37,6 +37,7 @@ export async function listTasks(project: Project): Promise<Task[]> {
         branch: "",
         worktree: "",
         runs: [],
+        commits: [],
         created: new Date(0).toISOString(),
         prompt: "",
         file,
@@ -67,6 +68,7 @@ export async function createTask(
     branch: branchName(id),
     worktree: `${STATE_DIR}/worktrees/task-${id}`,
     runs: [],
+    commits: [],
     created: new Date().toISOString(),
     prompt,
     file: taskFileName(id, title),
@@ -92,7 +94,10 @@ export async function writeTask(project: Project, task: Task): Promise<Task> {
 export async function patchTask(
   project: Project,
   id: string,
-  patch: Partial<Pick<Task, "status" | "title" | "prompt">> & { addRun?: string },
+  patch: Partial<Pick<Task, "status" | "title" | "prompt">> & {
+    addRun?: string
+    addCommit?: string
+  },
 ): Promise<Task> {
   const task = await getTask(project, id)
   if (!task) throw new Error(`no such task: ${id}`)
@@ -103,6 +108,7 @@ export async function patchTask(
     ...(patch.title ? { title: patch.title } : {}),
     ...(patch.prompt !== undefined ? { prompt: patch.prompt } : {}),
     runs: patch.addRun ? [...task.runs, patch.addRun] : task.runs,
+    commits: patch.addCommit ? [...task.commits, patch.addCommit] : task.commits,
   }
   return writeTask(project, next)
 }

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import type { RunEvent, RunStatus } from "@aide/protocol"
-import { api, type DiffView, type TaskView } from "../api.js"
-import { Button, Empty, PaneHeader, money } from "../ui.js"
+import type { RunEvent, RunStatus, TaskStatus } from "@aide/protocol"
+import { api, type CommitResult, type DiffView, type TaskView } from "../api.js"
+import { Button, Empty, PaneHeader, STATUS_STYLE, money } from "../ui.js"
 import { useRunStream, type StreamState } from "../useRunStream.js"
 
 /** tool.start and tool.end arrive separately; pair them into one line per call. */
@@ -179,6 +179,165 @@ const STREAM_LABEL: Record<StreamState, string> = {
   connecting: "connecting…",
   live: "live",
   reconnecting: "reconnecting…",
+}
+
+/**
+ * Statuses whose worktree is worth offering to commit.
+ *
+ * `cancelled` and `failed` are in here deliberately. A run you interrupted, or
+ * one that died on turn nine, still leaves real work on disk — refusing to let
+ * you keep it would mean the only way to salvage a partial run is to leave aide
+ * and use git by hand.
+ */
+const ACCEPTABLE = new Set<TaskStatus>(["needs-review", "committed", "cancelled", "failed"])
+
+/**
+ * The last gate. A run stopping is not the same as its work being accepted, and
+ * this is where the difference gets resolved.
+ *
+ * Drafting is a separate step from committing on purpose: the message costs a
+ * model call and a few seconds, and it lands in a textarea rather than straight
+ * into a commit, because the human editing it is the review. Landing is a
+ * second button for the same reason — a commit on a task branch is recoverable,
+ * and a merge is what the rest of the repo has to live with.
+ */
+function AcceptBar({
+  projectId,
+  task,
+  onChanged,
+}: {
+  projectId: string
+  task: TaskView
+  onChanged: () => void
+}) {
+  const [draft, setDraft] = useState<string | null>(null)
+  const [drafter, setDrafter] = useState<string | null>(null)
+  const [branch, setBranch] = useState<string | null>(null)
+  const [result, setResult] = useState<CommitResult | null>(null)
+  const [busy, setBusy] = useState<"draft" | "commit" | "land" | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  // Switching tasks must not carry the previous task's draft across — it would
+  // read as a suggestion for work it was never written about.
+  useEffect(() => {
+    setDraft(null)
+    setResult(null)
+    setError(null)
+  }, [task.id])
+
+  useEffect(() => {
+    void api
+      .branch(projectId)
+      .then((r) => setBranch(r.branch))
+      .catch(() => setBranch(null))
+  }, [projectId])
+
+  const attempt = async (kind: "draft" | "commit" | "land", fn: () => Promise<void>) => {
+    setBusy(kind)
+    setError(null)
+    try {
+      await fn()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const sha = task.commits.at(-1)
+
+  return (
+    <div className="shrink-0 border-t border-line bg-chrome px-3 py-2 font-sans text-[11px]">
+      {task.status === "committed" ? (
+        <div className="flex items-center gap-3">
+          <span className="text-diff-add-fg">committed</span>
+          {sha && (
+            <code className="font-mono text-fg-muted" title={sha}>
+              {sha.slice(0, 8)}
+            </code>
+          )}
+          {result?.journal && <span className="truncate text-fg-dim">{result.journal}</span>}
+          <div className="ml-auto flex items-center gap-2">
+            <span className="text-fg-dim">
+              {branch ? `merges into ${branch}` : "merges into the checked-out branch"}
+            </span>
+            <Button
+              tone="primary"
+              disabled={busy !== null}
+              title="Merge the task branch with --no-ff and remove the worktree"
+              onClick={() =>
+                attempt("land", async () => {
+                  const landed = await api.land(projectId, task.id)
+                  if (landed.warning) setError(landed.warning)
+                  onChanged()
+                })
+              }
+            >
+              {busy === "land" ? "landing…" : `land${branch ? ` into ${branch}` : ""}`}
+            </Button>
+          </div>
+        </div>
+      ) : draft === null ? (
+        <div className="flex items-center gap-3">
+          <span className={STATUS_STYLE[task.status].text}>{STATUS_STYLE[task.status].label}</span>
+          <span className="text-fg-dim">
+            Read the diff, then write a commit message for it.
+          </span>
+          <div className="ml-auto">
+            <Button
+              disabled={busy !== null}
+              onClick={() =>
+                attempt("draft", async () => {
+                  const d = await api.draftCommit(projectId, task.id)
+                  setDrafter(d.model)
+                  setDraft(d.message)
+                })
+              }
+            >
+              {busy === "draft" ? "drafting…" : "write commit message"}
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            rows={Math.min(12, Math.max(4, draft.split(/\n/).length + 1))}
+            spellCheck={false}
+            className="w-full resize-y rounded border border-line-soft bg-input px-2 py-1 font-mono text-xs leading-relaxed outline-none focus:border-accent"
+          />
+          <div className="flex items-center gap-3">
+            <span className="text-fg-dim">
+              {drafter ? `drafted by ${drafter} — edit freely; ` : ""}
+              Aide-Task and Aide-Run trailers are appended on commit
+            </span>
+            <div className="ml-auto flex gap-1.5">
+              <Button disabled={busy !== null} onClick={() => setDraft(null)}>
+                discard
+              </Button>
+              <Button
+                tone="primary"
+                disabled={busy !== null || !draft.trim()}
+                onClick={() =>
+                  attempt("commit", async () => {
+                    const committed = await api.commit(projectId, task.id, draft)
+                    setResult(committed)
+                    setDraft(null)
+                    if (committed.warning) setError(committed.warning)
+                    onChanged()
+                  })
+                }
+              >
+                {busy === "commit" ? "committing…" : "commit"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+      {error && <p className="mt-2 whitespace-pre-wrap text-err">{error}</p>}
+    </div>
+  )
 }
 
 export function RunPane({
@@ -389,6 +548,10 @@ export function RunPane({
           </div>
         )}
       </div>
+
+      {projectId && !isActive && ACCEPTABLE.has(task.status) && (
+        <AcceptBar projectId={projectId} task={task} onChanged={onChanged} />
+      )}
 
       <footer className="flex h-[22px] shrink-0 items-center gap-4 border-t border-line bg-chrome px-3 font-sans text-[11px] text-fg-muted">
         {finished && outcome ? (

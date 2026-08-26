@@ -1,9 +1,13 @@
 /**
- * The ONLY file in aide that imports the Agent SDK.
+ * Where runs meet the Agent SDK.
  *
  * Everything above this line speaks `RunEventBody`; everything below speaks SDK
- * messages. Keeping the boundary in one file means the SDK's ~30-member message
- * union has exactly one place to be updated when it grows.
+ * messages. Keeping the boundary here means the SDK's ~30-member message union
+ * has exactly one place to be updated when it grows.
+ *
+ * `helper.ts` is the only other file that imports the SDK, and deliberately
+ * touches none of this: it makes one-shot text calls with no tools and returns a
+ * string, so it never sees a message union to normalize.
  */
 import { query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk"
 import type { ModelSpend, RunEventBody, RunStatus } from "@aide/protocol"

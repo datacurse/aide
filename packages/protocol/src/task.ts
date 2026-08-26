@@ -9,12 +9,26 @@ export const TASK_STATUSES = [
   "queued",
   "running",
   "needs-review",
+  "committed",
   "done",
   "failed",
   "cancelled",
 ] as const
 
 export type TaskStatus = (typeof TASK_STATUSES)[number]
+
+/**
+ * The lifecycle, in order:
+ *
+ *   queued -> running -> needs-review -> committed -> done
+ *                     \-> failed | cancelled
+ *
+ * Two human gates, not one. `needs-review` means the agent stopped and the diff
+ * is unread. `committed` means you read it and the work is on the task branch,
+ * which is a safe resting state: nothing has touched the main branch yet.
+ * `done` means it landed. Splitting the gates matters because committing is
+ * recoverable and merging is the step that changes what everyone else sees.
+ */
 
 /**
  * The one place aide does runtime validation, and the reason it needs no schema
@@ -43,6 +57,8 @@ export interface Task {
   worktree: string
   /** Run ids, oldest first. */
   runs: string[]
+  /** Commit shas on the task branch, oldest first. A re-run can add another. */
+  commits: string[]
   /** ISO 8601. */
   created: string
   /** The markdown body. This IS the prompt handed to the agent. */
@@ -85,6 +101,7 @@ export function parseTask(file: string, raw: string): Task {
     branch: data["branch"] ? asText(data["branch"], "branch") : branchName(id),
     worktree: asText(data["worktree"], "worktree"),
     runs: asStringArray(data["runs"]),
+    commits: asStringArray(data["commits"]),
     created: asText(data["created"], "created"),
     prompt: content.trim(),
     file,
@@ -100,6 +117,7 @@ export function serializeTask(task: Task): string {
     branch: task.branch,
     worktree: task.worktree,
     runs: task.runs,
+    commits: task.commits,
     created: task.created,
   })
 }

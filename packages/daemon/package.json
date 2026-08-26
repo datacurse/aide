@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "probe": "tsx src/probe.ts",
-    "dev": "tsx watch src/server.ts",
+    "smoke": "tsx src/smoke.ts",
+    "watch": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },

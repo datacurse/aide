@@ -4,11 +4,17 @@ import type { TaskStatus } from "@aide/protocol"
  * Status colours follow VS Code's own conventions rather than a fresh scheme:
  * blue for in-progress (progressBar), the git-decoration yellow for "modified,
  * needs your attention", green for settled, red for failed.
+ *
+ * `committed` borrows gitDecoration.addedResourceForeground — the muted green
+ * VS Code uses for staged-but-not-yet-in-history. It reads as adjacent to `done`
+ * without claiming to be it, which is exactly the distinction: the work is safe
+ * on its branch, and it has not landed.
  */
 export const STATUS_STYLE: Record<TaskStatus, { dot: string; text: string; label: string }> = {
   queued: { dot: "bg-fg-dim", text: "text-fg-dim", label: "queued" },
   running: { dot: "bg-info animate-pulse", text: "text-info", label: "running" },
   "needs-review": { dot: "bg-warn", text: "text-warn", label: "needs review" },
+  committed: { dot: "bg-diff-add-fg", text: "text-diff-add-fg", label: "committed" },
   done: { dot: "bg-ok", text: "text-ok", label: "done" },
   failed: { dot: "bg-err", text: "text-err", label: "failed" },
   cancelled: { dot: "bg-fg-dim/50", text: "text-fg-dim", label: "cancelled" },

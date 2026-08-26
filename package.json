@@ -4,8 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "pnpm -r --parallel run dev",
+    "dev": "pnpm --filter @aide/web dev",
     "probe": "pnpm --filter @aide/daemon probe",
+    "smoke": "pnpm --filter @aide/daemon smoke",
     "daemon": "pnpm --filter @aide/daemon start",
     "web": "pnpm --filter @aide/web dev",
     "typecheck": "pnpm -r run typecheck",

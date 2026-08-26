@@ -1,13 +1,25 @@
 import fastifyWebsocket from "@fastify/websocket"
-import Fastify from "fastify"
+import Fastify, { type FastifyReply } from "fastify"
 import type { ClientMessage, RunEvent, ServerMessage } from "@aide/protocol"
 import { worktreePath } from "@aide/protocol"
 import { CONFIG } from "./config.js"
 import { EventLog } from "./eventlog.js"
+import { draftCommitMessage } from "./helper.js"
+import { writeJournalEntry } from "./journal.js"
 import { addProject, getProject, listProjects, removeProject } from "./registry.js"
 import { Supervisor } from "./supervisor.js"
-import { createTask, deleteTask, getTask, listTasks } from "./tasks.js"
-import { worktreeDiff, worktreeStatus } from "./worktree.js"
+import { createTask, deleteTask, getTask, listTasks, patchTask, setStatus } from "./tasks.js"
+import {
+  commitWorktree,
+  currentBranch,
+  mergeTaskBranch,
+  recentSubjects,
+  removeWorktree,
+  withTrailers,
+  worktreeDiff,
+  worktreeDiffStat,
+  worktreeStatus,
+} from "./worktree.js"
 
 const log = new EventLog()
 const supervisor = new Supervisor(log)
@@ -131,6 +143,153 @@ app.get("/api/projects/:id/tasks/:taskId/diff", async (req, reply) => {
   const diff = await worktreeDiff(path)
   const status = await worktreeStatus(path)
   return { worktree: path, diff, status }
+})
+
+// ---------------------------------------------------------------------------
+// Accepting the work
+//
+// Two gates, deliberately. `commit` puts the diff on the task branch, which
+// changes nothing anyone else can see; `land` merges it, which does. Anything
+// that mutates the repo refuses while a run for that task is still in flight —
+// committing underneath a working agent races its next write.
+// ---------------------------------------------------------------------------
+
+const idle = async (taskId: string, reply: FastifyReply): Promise<boolean> => {
+  if (!supervisor.runIdForTask(taskId)) return true
+  await reply.code(409).send({ message: "a run is still in flight for this task" })
+  return false
+}
+
+/**
+ * Draft a commit message. Separate from committing because it costs money and
+ * takes a few seconds, and because the whole point is that a human reads it
+ * before it becomes a commit.
+ */
+app.post("/api/projects/:id/tasks/:taskId/commit/draft", async (req, reply) => {
+  const { id, taskId } = req.params as { id: string; taskId: string }
+  const project = await getProject(id)
+  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
+  const task = await getTask(project, taskId)
+  if (!task) return reply.code(404).send(notFound(`no task ${taskId}`))
+  if (!(await idle(taskId, reply))) return
+
+  const path = worktreePath(project.root, taskId)
+  // Sequential for the same reason as the diff route: worktreeDiffStat runs
+  // `add -A -N`, and a concurrent read races it.
+  const diffStat = await worktreeDiffStat(path)
+  const diff = await worktreeDiff(path)
+  if (!diff.trim()) {
+    return reply.code(409).send({ message: "nothing to commit — the worktree is unchanged" })
+  }
+
+  try {
+    const message = await draftCommitMessage({
+      model: CONFIG.helperModel,
+      title: task.title,
+      prompt: task.prompt,
+      diffStat,
+      diff,
+      recentSubjects: await recentSubjects(project.root),
+    })
+    return { message, model: CONFIG.helperModel }
+  } catch (err) {
+    return reply.code(502).send({
+      message: `could not draft a commit message: ${err instanceof Error ? err.message : String(err)}`,
+    })
+  }
+})
+
+/** Commit the worktree with the message the human approved, and journal it. */
+app.post("/api/projects/:id/tasks/:taskId/commit", async (req, reply) => {
+  const { id, taskId } = req.params as { id: string; taskId: string }
+  const { message } = (req.body ?? {}) as { message?: string }
+  if (!message?.trim()) return reply.code(400).send({ message: "body must include { message }" })
+
+  const project = await getProject(id)
+  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
+  const task = await getTask(project, taskId)
+  if (!task) return reply.code(404).send(notFound(`no task ${taskId}`))
+  if (!(await idle(taskId, reply))) return
+
+  const path = worktreePath(project.root, taskId)
+  // Captured before committing: `git diff` against a clean worktree is empty,
+  // so after the commit there is no file list left to journal.
+  const diffStat = await worktreeDiffStat(path)
+  const runId = task.runs.at(-1) ?? null
+  const final = withTrailers(message, task.id, runId)
+
+  let sha: string
+  try {
+    sha = await commitWorktree(path, final)
+  } catch (err) {
+    return reply.code(409).send({ message: err instanceof Error ? err.message : String(err) })
+  }
+
+  // The commit is the durable part and it already succeeded. A journal write
+  // that fails must not read as a failed commit, so it is reported alongside
+  // rather than thrown.
+  let journal: string | null = null
+  let warning: string | null = null
+  try {
+    journal = await writeJournalEntry({
+      project,
+      task,
+      events: runId ? log.read(runId) : [],
+      runId: runId ?? "",
+      sha,
+      message: final,
+      diffStat,
+    })
+  } catch (err) {
+    warning = `committed, but the journal entry failed: ${err instanceof Error ? err.message : String(err)}`
+  }
+
+  await patchTask(project, taskId, { status: "committed", addCommit: sha })
+  return { sha, journal, warning }
+})
+
+/** Merge the task branch into whatever the project has checked out. */
+app.post("/api/projects/:id/tasks/:taskId/land", async (req, reply) => {
+  const { id, taskId } = req.params as { id: string; taskId: string }
+  const project = await getProject(id)
+  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
+  const task = await getTask(project, taskId)
+  if (!task) return reply.code(404).send(notFound(`no task ${taskId}`))
+  if (!(await idle(taskId, reply))) return
+  if (task.commits.length === 0) {
+    return reply.code(409).send({ message: "nothing to land — this task has no commits yet" })
+  }
+
+  let merged: { sha: string; into: string }
+  try {
+    merged = await mergeTaskBranch(project.root, taskId, `Merge task ${task.id}: ${task.title}`)
+  } catch (err) {
+    return reply.code(409).send({ message: err instanceof Error ? err.message : String(err) })
+  }
+
+  // The merge is done and recorded. A worktree that will not go away is untidy,
+  // not a failed land, so it is reported and the task still closes.
+  let warning: string | null = null
+  try {
+    await removeWorktree(project.root, taskId)
+  } catch (err) {
+    warning = `merged, but the worktree is still there: ${err instanceof Error ? err.message : String(err)}`
+  }
+
+  await setStatus(project, taskId, "done")
+  return { ...merged, warning }
+})
+
+/** Where a land would put the work. Shown on the button so it is never a guess. */
+app.get("/api/projects/:id/branch", async (req, reply) => {
+  const { id } = req.params as { id: string }
+  const project = await getProject(id)
+  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
+  try {
+    return { branch: await currentBranch(project.root) }
+  } catch {
+    return { branch: null }
+  }
 })
 
 // ---------------------------------------------------------------------------

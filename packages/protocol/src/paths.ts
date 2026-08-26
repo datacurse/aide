@@ -18,8 +18,10 @@ export const tasksDir = (root: string) => join(stateDir(root), "tasks")
 export const worktreesDir = (root: string) => join(stateDir(root), "worktrees")
 /** `<project>/.aide/specs` — slice 3 */
 export const specsDir = (root: string) => join(stateDir(root), "specs")
-/** `<project>/.aide/journal` — slice 2 */
+/** `<project>/.aide/journal` — one entry per committed task */
 export const journalDir = (root: string) => join(stateDir(root), "journal")
+/** `<project>/.aide/journal/<file>` */
+export const journalEntryPath = (root: string, file: string) => join(journalDir(root), file)
 /** `<project>/.aide/decisions` — later */
 export const decisionsDir = (root: string) => join(stateDir(root), "decisions")
 

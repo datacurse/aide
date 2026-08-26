@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react"
 import { api, type Health, type ProjectView, type TaskView } from "./api.js"
+import { DaemonBar } from "./Daemon.js"
 import { RunPane } from "./panes/Run.js"
 import { Button, Empty, PaneHeader, StatusDot, STATUS_STYLE } from "./ui.js"
 
@@ -17,6 +18,15 @@ export function App() {
   const [draft, setDraft] = useState({ title: "", body: "" })
 
   const refresh = useCallback(async () => {
+    // Health is polled with everything else rather than fetched once at mount.
+    // The daemon takes a second or two to boot, so a single attempt races it and
+    // loses about half the time — and losing pinned the header to "daemon
+    // offline" for the life of the page even while every other request worked.
+    try {
+      setHealth(await api.health())
+    } catch {
+      setHealth(null)
+    }
     try {
       const next = await api.projects()
       setProjects(next)
@@ -26,10 +36,6 @@ export function App() {
       setError(err instanceof Error ? err.message : String(err))
     }
   }, [projectId])
-
-  useEffect(() => {
-    void api.health().then(setHealth).catch(() => setHealth(null))
-  }, [])
 
   useEffect(() => {
     void refresh()
@@ -71,14 +77,12 @@ export function App() {
 
   return (
     <div className="flex h-full flex-col bg-editor font-mono text-fg antialiased">
-      <header className="flex h-9 shrink-0 items-center justify-between border-b border-line bg-chrome px-4 font-sans">
+      <header className="flex h-9 shrink-0 items-center justify-between gap-4 border-b border-line bg-chrome px-4 font-sans">
         <div className="flex items-baseline gap-3">
           <span className="text-sm font-semibold tracking-tight text-fg">aide</span>
-          <span className="text-[11px] text-fg-dim">
-            {health ? `${health.taskModel} · ${health.maxConcurrentRuns} concurrent · ${health.maxBudgetUsd}$/run cap` : "daemon offline"}
-          </span>
         </div>
-        {error && <span className="truncate text-[11px] text-err">{error}</span>}
+        {error && <span className="min-w-0 flex-1 truncate text-[11px] text-err">{error}</span>}
+        <DaemonBar health={health} onChanged={() => void refresh()} />
       </header>
 
       <main className="flex min-h-0 flex-1">
