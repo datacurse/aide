@@ -43,7 +43,11 @@ function classify(cwd: string): { kind: ConversationSummary["kind"]; taskId: str
  * pass false "for parity with terminal /resume", which would hide every session
  * aide created, since aide is a programmatic consumer.
  */
-export async function listConversations(project: Project): Promise<ConversationSummary[]> {
+export async function listConversations(
+  project: Project,
+  /** Which conversations have a turn in flight. Injected so this file stays a reader. */
+  activeRunFor: (sessionId: string) => string | null = () => null,
+): Promise<ConversationSummary[]> {
   const sessions = await listSessions({ dir: project.root })
 
   return sessions
@@ -61,6 +65,7 @@ export async function listConversations(project: Project): Promise<ConversationS
         lastModified: s.lastModified,
         createdAt: s.createdAt ?? null,
         bytes: s.fileSize ?? 0,
+        activeRunId: activeRunFor(s.sessionId),
       } satisfies ConversationSummary
     })
     .sort((a, b) => b.lastModified - a.lastModified)
@@ -69,8 +74,11 @@ export async function listConversations(project: Project): Promise<ConversationS
 export async function getConversation(
   project: Project,
   sessionId: string,
+  activeRunFor: (sessionId: string) => string | null = () => null,
 ): Promise<{ summary: ConversationSummary; events: RunEvent[]; truncated: boolean; totalMessages: number } | null> {
-  const summary = (await listConversations(project)).find((c) => c.sessionId === sessionId)
+  const summary = (await listConversations(project, activeRunFor)).find(
+    (c) => c.sessionId === sessionId,
+  )
   if (!summary) return null
 
   const messages = await getSessionMessages(sessionId, { dir: project.root })

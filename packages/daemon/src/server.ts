@@ -95,6 +95,10 @@ app.addHook("onRequest", async (req, reply) => {
   if (refusal) return reply.code(403).send({ message: refusal })
 })
 
+/** Which conversation, if any, currently has a chat turn running. */
+const activeChatRun = (sessionId: string): string | null =>
+  chat.turnForSession(sessionId)?.runId ?? null
+
 const notFound = (msg: string) => ({ statusCode: 404, error: "Not Found", message: msg })
 
 // ---------------------------------------------------------------------------
@@ -392,7 +396,7 @@ app.get("/api/projects/:id/conversations", async (req, reply) => {
   const project = await getProject(id)
   if (!project) return reply.code(404).send(notFound(`no project ${id}`))
   try {
-    return await listConversations(project)
+    return await listConversations(project, activeChatRun)
   } catch (err) {
     return reply.code(502).send({
       message: `could not read the session store: ${err instanceof Error ? err.message : String(err)}`,
@@ -405,7 +409,7 @@ app.get("/api/projects/:id/conversations/:sessionId", async (req, reply) => {
   const project = await getProject(id)
   if (!project) return reply.code(404).send(notFound(`no project ${id}`))
   try {
-    const found = await getConversation(project, sessionId)
+    const found = await getConversation(project, sessionId, activeChatRun)
     if (!found) return reply.code(404).send(notFound(`no conversation ${sessionId} in this project`))
     return found
   } catch (err) {

@@ -177,6 +177,19 @@ export function ConversationPane({
     }
   }, [projectId, summary?.sessionId])
 
+  // Adopt a turn that was already running when this page loaded.
+  //
+  // `runId` lives in component state, so a reload loses it and the pane goes
+  // quiet while the daemon carries on — the only way to find out whether
+  // anything happened was to reload again. The daemon knows what is running;
+  // this asks.
+  useEffect(() => {
+    // The freshly fetched transcript is the more current of the two: `summary`
+    // came from a list that may have been fetched before this turn started.
+    const inFlight = view?.summary.activeRunId ?? summary?.activeRunId ?? null
+    if (inFlight && !runId) setRunId(inFlight)
+  }, [view?.summary.activeRunId, summary?.activeRunId, runId])
+
   // Fold the live stream into the accumulator. Keyed by runId+seq so the replay
   // a reconnect delivers lands on top of what is already there.
   useEffect(() => {
@@ -225,10 +238,25 @@ export function ConversationPane({
     return null
   }, [turnEvents])
 
-  const events = useMemo(
-    () => [...(view?.events ?? []), ...turnEvents],
-    [view?.events, turnEvents],
-  )
+  const events = useMemo(() => {
+    const history = view?.events ?? []
+    // The session file is written as the turn goes, so an adopted turn can
+    // already be partly present in the history we just read — and the event log
+    // replays the same turn in full. Trim the history at the user message this
+    // turn started with, and let the event log own everything from there.
+    //
+    // Matched on the text rather than assuming the last user message belongs to
+    // the live turn: if the session file has not caught up yet there is no
+    // overlap to trim, and cutting anyway would swallow the previous reply.
+    const opening = turnEvents.find((e) => e.type === "user.message")
+    if (opening?.type === "user.message") {
+      const at = history.findLastIndex(
+        (e) => e.type === "user.message" && e.text === opening.text,
+      )
+      if (at !== -1) return [...history.slice(0, at), ...turnEvents]
+    }
+    return [...history, ...turnEvents]
+  }, [view?.events, turnEvents])
 
   const [showAll, setShowAll] = useState(false)
   const hidden = showAll ? 0 : Math.max(0, events.length - VISIBLE_TAIL)

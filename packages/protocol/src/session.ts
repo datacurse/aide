@@ -82,6 +82,16 @@ export interface ConversationSummary {
   createdAt: number | null
   /** JSONL size on disk. Some transcripts are megabytes; the UI warns before loading one. */
   bytes: number
+  /**
+   * The run id of a turn currently in flight for this conversation, if any.
+   *
+   * This is what makes a reload survivable. The browser holds the run it is
+   * watching in component state, so refreshing mid-turn loses it and the page
+   * goes quiet while the daemon carries on working — leaving you to reload
+   * repeatedly to find out whether anything happened. The daemon knows perfectly
+   * well what is running; it just had no way to say so.
+   */
+  activeRunId: string | null
 }
 
 /**
