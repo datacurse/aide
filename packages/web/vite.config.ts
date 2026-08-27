@@ -4,15 +4,22 @@ import { defineConfig } from "vite"
 import { daemonControl } from "./vite-daemon.js"
 
 const PORT = Number(process.env["AIDE_PORT"] ?? 4317)
+const WEB_PORT = Number(process.env["AIDE_WEB_PORT"] ?? 5173)
 const DAEMON = `http://127.0.0.1:${PORT}`
 
 export default defineConfig({
   // The daemon is started and stopped by the dev server, not by a sibling
   // `pnpm -r --parallel` process. Two owners would race for the port, and a
   // process nobody owns cannot be restarted from the UI.
-  plugins: [react(), tailwindcss(), daemonControl(PORT)],
+  plugins: [react(), tailwindcss(), daemonControl(PORT, WEB_PORT)],
   server: {
-    port: 5173,
+    port: WEB_PORT,
+    // Never drift to the next free port. The daemon allowlists this origin by
+    // exact authority, so a page served from :5174 gets a 403 on every POST
+    // while GETs keep working — "it loads but nothing saves", with nothing
+    // pointing at the port. The plugin reclaims the port first; if that fails,
+    // failing to start is the honest outcome.
+    strictPort: true,
     proxy: {
       "/api": {
         target: DAEMON,

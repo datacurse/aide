@@ -22,6 +22,7 @@ import { connect } from "node:net"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import type { Plugin } from "vite"
+import { reclaimPort } from "./vite-port.js"
 
 const here = dirname(fileURLToPath(import.meta.url))
 const DAEMON_DIR = join(here, "..", "daemon")
@@ -77,7 +78,7 @@ function killTree(child: ChildProcess): void {
   }
 }
 
-export function daemonControl(port: number): Plugin {
+export function daemonControl(port: number, webPort: number): Plugin {
   let child: ChildProcess | null = null
   let starting = false
   /** Set while a stop we asked for is in flight, so its exit is not a crash. */
@@ -123,7 +124,14 @@ export function daemonControl(port: number): Plugin {
       return { ok: true, message: "already running" }
     }
     if (await probe(port)) {
-      return { ok: true, message: `adopted the daemon already listening on ${port}` }
+      // Adopted rather than reclaimed, because `pnpm daemon` standalone is a
+      // supported way to run one. The warning matters though: an adopted daemon
+      // may be running code from before your last land, and this dev server did
+      // not start it so it cannot restart it either.
+      return {
+        ok: true,
+        message: `adopted a daemon already on ${port} — not started here, so restart it yourself if it is stale`,
+      }
     }
 
     starting = true
@@ -251,7 +259,22 @@ export function daemonControl(port: number): Plugin {
     name: "aide:daemon-control",
     apply: "serve",
 
-    configureServer(server) {
+    async configureServer(server) {
+      // Before Vite binds. A stale dev server from a previous session would
+      // otherwise push this one to the next port, where the daemon's origin
+      // guard rejects its POSTs — see vite-port.ts.
+      const reclaimed = await reclaimPort(webPort)
+      for (const { pid, name } of reclaimed.killed) {
+        server.config.logger.info(`  [33m✖[0m  port ${webPort}: killed stale ${name} (pid ${pid})`)
+      }
+      if (reclaimed.refused) {
+        const who = reclaimed.refused.map((p) => `${p.name} (pid ${p.pid})`).join(", ")
+        server.config.logger.warn(
+          `  port ${webPort} is held by ${who}, which is not a dev server — leaving it alone. ` +
+            `Stop it, or set AIDE_WEB_PORT to something else.`,
+        )
+      }
+
       const json = (res: ServerResponse, code: number, body: unknown) => {
         res.statusCode = code
         res.setHeader("content-type", "application/json")

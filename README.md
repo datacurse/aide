@@ -45,6 +45,13 @@ daemon: the browser reaches the daemon over HTTP, so a dead daemon is precisely 
 with nobody left to receive "please start". Vite is already running, so Vite owns the
 process.
 
+`pnpm dev` takes port 5173 back if a stale dev server is sitting on it, and refuses to
+start rather than drifting to the next free port. That is not tidiness: the daemon
+allowlists the dev server's origin by exact authority, so a page served from :5174 gets a
+403 on every POST while GETs keep working — "it loads but nothing saves", with nothing
+pointing at the port. Only Node processes are reclaimed; anything else holding the port is
+named and left alone.
+
 That control plane exists only under `pnpm dev`. `pnpm daemon` still runs one standalone
 for anything real, and the dev server adopts a daemon started that way instead of
 fighting it for the port — it just cannot stop what it did not start.
