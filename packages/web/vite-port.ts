@@ -19,16 +19,29 @@ const run = promisify(execFile)
  * daemon will not talk to.
  */
 
-/** PIDs listening on a port. Empty on any failure — this is best-effort. */
+/**
+ * PIDs listening on a port. Empty on any failure — this is best-effort.
+ *
+ * Note the absence of `-p tcp`. On Windows that filter restricts the output to
+ * IPv4, and Vite binds `::1` — so with it, a stale Vite is invisible and nothing
+ * ever gets reclaimed. The first version of this had that flag, and the test
+ * that "proved" it worked used a squatter pinned to 127.0.0.1: an IPv4 fixture
+ * for an IPv6 problem. Plain `netstat -ano` lists both families.
+ */
 async function pidsOnPort(port: number): Promise<number[]> {
   try {
     if (process.platform === "win32") {
-      const { stdout } = await run("netstat", ["-ano", "-p", "tcp"], { windowsHide: true })
+      const { stdout } = await run("netstat", ["-ano"], { windowsHide: true })
       const pids = new Set<number>()
       for (const line of stdout.split(/\r?\n/)) {
-        // "  TCP    127.0.0.1:5173    0.0.0.0:0    LISTENING    1234"
-        const m = /^\s*TCP\s+\S+?:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$/i.exec(line)
-        if (m && Number(m[1]) === port) pids.add(Number(m[2]))
+        //   TCP    127.0.0.1:5173   0.0.0.0:0   LISTENING   1234
+        //   TCP    [::1]:5173       [::]:0      LISTENING   1234
+        // Greedy `(\S+)` so the split lands on the LAST colon, which is what
+        // separates the port from a bracketed IPv6 address.
+        const m = /^\s*TCP\s+(\S+):(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$/i.exec(line)
+        // LISTENING only: the TIME_WAIT rows for the same port report pid 0 and
+        // are not holding anything.
+        if (m && Number(m[2]) === port) pids.add(Number(m[3]))
       }
       return [...pids]
     }
@@ -74,7 +87,19 @@ export interface ReclaimResult {
  * software because it wanted an address.
  */
 export async function reclaimPort(port: number): Promise<ReclaimResult> {
-  const pids = (await pidsOnPort(port)).filter((pid) => pid > 0 && pid !== process.pid)
+  let all = await pidsOnPort(port)
+
+  // We are holding it ourselves. That is a Vite restart — a config or plugin
+  // file changed — and the previous http server has not finished closing yet.
+  // Waiting is the fix; killing our own process obviously is not, and returning
+  // immediately hands Vite a port that is still busy, which under strictPort
+  // means the restart dies with EADDRINUSE.
+  for (let i = 0; i < 30 && all.includes(process.pid); i += 1) {
+    await wait(100)
+    all = await pidsOnPort(port)
+  }
+
+  const pids = all.filter((pid) => pid > 0 && pid !== process.pid)
   if (pids.length === 0) return { killed: [], refused: null }
 
   const named = await Promise.all(pids.map(async (pid) => ({ pid, name: await processName(pid) })))
