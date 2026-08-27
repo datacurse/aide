@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import type { Attachment, ChatMode, ContextUsage, EffortLevel, RunEvent } from "@aide/protocol"
 import { api, type ConversationSummary, type ConversationView } from "../api.js"
 import { Composer } from "../Composer.js"
@@ -158,7 +158,21 @@ export function ConversationPane({
   const sessionId = openSessionId ?? liveSessionId
   const { events: live, draft } = useRunStream(runId)
 
+  /**
+   * The session this pane started itself, so adopting its id from the URL is not
+   * mistaken for switching conversations.
+   *
+   * A ref rather than state: the reset below must be able to read it without
+   * taking it as a dependency, which would make the reset run again.
+   */
+  const startedHere = useRef<string | null>(null)
+
   useEffect(() => {
+    // Switching conversations clears the pane. Picking up the id of the chat you
+    // just started here is not switching — the turn is streaming, and clearing
+    // `runId` unsubscribes from it mid-answer, which is what left a new chat
+    // showing your message and nothing else while the daemon carried on.
+    if (openSessionId !== null && openSessionId === startedHere.current) return
     setView(null)
     setError(null)
     setRunId(null)
@@ -209,6 +223,9 @@ export function ConversationPane({
     if (openSessionId) return
     for (const e of live) {
       if (e.type === "run.started" && e.sessionId && !liveSessionId) {
+        // Set before navigating: the reset effect reads it on the very next
+        // render, and a state update would not have landed by then.
+        startedHere.current = e.sessionId
         setLiveSessionId(e.sessionId)
         onStarted?.(e.sessionId)
       }

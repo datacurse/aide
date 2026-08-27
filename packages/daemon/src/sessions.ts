@@ -13,7 +13,7 @@
  */
 import { open, readdir, stat } from "node:fs/promises"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { isAbsolute, join, relative } from "node:path"
 import { getSessionMessages, listSessions } from "@anthropic-ai/claude-agent-sdk"
 import type { ChatMode, ConversationSummary, Project, RunEvent } from "@aide/protocol"
 import { STATE_DIR, chatModeFromSdk } from "@aide/protocol"
@@ -37,6 +37,9 @@ const MAX_MESSAGES = 1_500
  * a time and stops at the first window with a hit. Almost always that is the
  * first one; the budget bounds the pathological case.
  */
+/** Enough of the front of a transcript to carry its opening turn. */
+const HEAD_BYTES = 64 * 1024
+
 const MODE_WINDOW_BYTES = 512 * 1024
 const MODE_MAX_SCAN_BYTES = 8 * 1024 * 1024
 /** Enough to cover the pattern straddling a window boundary. */
@@ -101,9 +104,11 @@ export async function getConversation(
   sessionId: string,
   activeRunFor: (sessionId: string) => string | null = () => null,
 ): Promise<{ summary: ConversationSummary; events: RunEvent[]; truncated: boolean; totalMessages: number } | null> {
-  const summary = (await listConversations(project, activeRunFor)).find(
+  const listed = (await listConversations(project, activeRunFor)).find(
     (c) => c.sessionId === sessionId,
   )
+  // Not in the listing is not the same as not existing — see summaryFromFile.
+  const summary = listed ?? (await summaryFromFile(project, sessionId, activeRunFor))
   if (!summary) return null
 
   const messages = await getSessionMessages(sessionId, { dir: project.root })
@@ -138,6 +143,131 @@ export async function getConversation(
     truncated: messages.length > capped.length,
     totalMessages: messages.length,
   }
+}
+
+/**
+ * A summary for a conversation `listSessions` will not return.
+ *
+ * The SDK drops any session it cannot name. In sdk.mjs the row is built as
+ * `customTitle || aiTitle || lastPrompt || summaryHint || firstPrompt`, and then
+ * `if (!s) return null` — so a session with no title yet is ABSENT from the
+ * listing rather than merely stale in it.
+ *
+ * Which makes a brand-new chat invisible for the window between its first turn
+ * starting and its prompt being indexed. That window is precisely when the
+ * browser follows `run.started` to the conversation's new URL and asks for it,
+ * so "no conversation <id> in this project" landed in red over a chat that was
+ * working perfectly. A session that never gets a nameable prompt — an
+ * image-only opener, say — would have stayed invisible for good.
+ *
+ * Looking it up through the listing was the mistake: reading the transcript
+ * never needed the index, so neither does finding it.
+ */
+async function summaryFromFile(
+  project: Project,
+  sessionId: string,
+  activeRunFor: (sessionId: string) => string | null,
+): Promise<ConversationSummary | null> {
+  const file = await findSessionFile(sessionId)
+  if (!file) return null
+
+  let head: Awaited<ReturnType<typeof readSessionHead>>
+  let size = 0
+  let mtime = 0
+  try {
+    const info = await stat(file)
+    size = info.size
+    mtime = info.mtimeMs
+    head = await readSessionHead(file)
+  } catch {
+    return null
+  }
+  if (!head) return null
+
+  // findSessionFile searches every project directory, because the session id is
+  // the only stable handle. So the project this was asked through has to be the
+  // project it actually belongs to, or one project's URL would read another's
+  // conversations — the listing is scoped by `dir` and this must be too.
+  //
+  // An unreadable cwd is a refusal, NOT a default of project.root. Defaulting
+  // was tested and let a session through from a project it did not belong to:
+  // the check compares the cwd against project.root, so filling the cwd IN from
+  // project.root makes it compare the root to itself and pass for everyone.
+  if (!head.cwd) return null
+  const within = relative(project.root, head.cwd)
+  if (within.startsWith("..") || isAbsolute(within)) return null
+
+  const { kind, taskId } = classify(head.cwd)
+  return {
+    sessionId,
+    kind,
+    taskId,
+    title: firstLine(head.firstPrompt) ?? "(untitled)",
+    firstPrompt: head.firstPrompt,
+    cwd: head.cwd,
+    gitBranch: head.gitBranch,
+    lastModified: mtime,
+    createdAt: head.createdAt,
+    bytes: size,
+    activeRunId: activeRunFor(sessionId),
+    lastMode: null,
+  }
+}
+
+/**
+ * The few facts a summary needs, from the front of the transcript.
+ *
+ * Deliberately shallow: enough lines to find the opening user turn, and a
+ * tolerant read of it. Anything malformed is skipped rather than thrown on,
+ * because this runs precisely when the file is being written.
+ */
+async function readSessionHead(
+  file: string,
+): Promise<{ cwd: string | null; gitBranch: string | null; createdAt: number | null; firstPrompt: string } | null> {
+  const handle = await open(file, "r")
+  try {
+    const buffer = Buffer.alloc(HEAD_BYTES)
+    const { bytesRead } = await handle.read(buffer, 0, HEAD_BYTES, 0)
+    const out = { cwd: null as string | null, gitBranch: null as string | null, createdAt: null as number | null, firstPrompt: "" }
+    // The last line of the window is very likely truncated; dropping it is
+    // simpler than trying to tell a partial write from a whole one.
+    const lines = buffer.subarray(0, bytesRead).toString("utf8").split("\n").slice(0, -1)
+    for (const line of lines) {
+      let record: Record<string, unknown>
+      try {
+        record = JSON.parse(line) as Record<string, unknown>
+      } catch {
+        continue
+      }
+      if (out.cwd === null && typeof record["cwd"] === "string") out.cwd = record["cwd"]
+      if (out.gitBranch === null && typeof record["gitBranch"] === "string") {
+        out.gitBranch = record["gitBranch"]
+      }
+      if (out.createdAt === null && typeof record["timestamp"] === "string") {
+        const at = Date.parse(record["timestamp"])
+        if (!Number.isNaN(at)) out.createdAt = at
+      }
+      if (!out.firstPrompt && record["type"] === "user") out.firstPrompt = userText(record["message"])
+    }
+    return out
+  } finally {
+    await handle.close()
+  }
+}
+
+/** The text of a user turn, whichever of the two shapes it arrived in. */
+function userText(message: unknown): string {
+  if (typeof message !== "object" || message === null) return ""
+  const content = (message as { content?: unknown }).content
+  if (typeof content === "string") return content
+  if (!Array.isArray(content)) return ""
+  for (const part of content) {
+    if (typeof part === "object" && part !== null && (part as { type?: unknown }).type === "text") {
+      const text = (part as { text?: unknown }).text
+      if (typeof text === "string" && text.trim()) return text
+    }
+  }
+  return ""
 }
 
 /**
