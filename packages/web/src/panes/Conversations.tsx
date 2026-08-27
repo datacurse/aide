@@ -105,7 +105,7 @@ export function ConversationList({
           <div className="flex items-baseline gap-2 text-[10px] text-fg-dim">
             <span>{ago(c.lastModified)}</span>
             {c.bytes > 0 && <span>{mb(c.bytes)}</span>}
-            {c.gitBranch && <span className="truncate">{c.gitBranch}</span>}
+            {c.gitBranch && <span className="min-w-0 truncate">{c.gitBranch}</span>}
           </div>
         </button>
       ))}
@@ -285,7 +285,7 @@ export function ConversationPane({
           const el = e.currentTarget
           pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60
         }}
-        className="flex-1 overflow-auto px-3 py-2 font-mono text-xs leading-relaxed"
+        className="flex-1 overflow-x-hidden overflow-y-auto px-3 py-2 font-mono text-xs leading-relaxed"
       >
         {summary && view === null && !error ? (
           <Empty>Reading…</Empty>
@@ -354,10 +354,10 @@ export function ConversationPane({
       )}
 
       <footer className="flex h-[22px] shrink-0 items-center gap-4 border-t border-line bg-chrome px-3 font-sans text-[11px] text-fg-muted">
-        {summary && <span className={kindColor(summary)}>{kindLabel(summary)}</span>}
+        {summary && <span className={`shrink-0 ${kindColor(summary)}`}>{kindLabel(summary)}</span>}
         {view && <span>{view.totalMessages} messages</span>}
         {busy && <span className="text-info">working…</span>}
-        <span className="ml-auto truncate text-fg-dim" title={summary?.cwd}>
+        <span className="ml-auto min-w-0 truncate text-fg-dim" title={summary?.cwd}>
           {summary?.cwd ?? "runs in the project root"}
         </span>
       </footer>

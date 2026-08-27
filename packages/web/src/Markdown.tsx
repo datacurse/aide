@@ -21,7 +21,12 @@ import remarkGfm from "remark-gfm"
  */
 export function Markdown({ text }: { text: string }) {
   return (
-    <div className="font-sans text-[13px] leading-relaxed text-fg">
+    // `min-w-0` and `break-words` together are what keep a transcript inside its
+    // pane. A long unbroken token — a Windows path, a flag, a URL — has no break
+    // opportunity, so by default it widens its container rather than wrapping,
+    // and the whole conversation gains a horizontal scrollbar because of one
+    // line buried in it.
+    <div className="min-w-0 font-sans text-[13px] leading-relaxed break-words text-fg">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
@@ -74,13 +79,16 @@ export function Markdown({ text }: { text: string }) {
               return <code className="font-mono text-xs text-fg">{children}</code>
             }
             return (
-              <code className="rounded-sm bg-input px-1 py-0.5 font-mono text-[12px] text-syn-string">
+              // `break-all` rather than `break-words`: inline code is usually a
+              // path or an identifier with no spaces to break at, and the point
+              // is that it must never be the thing that widens the pane.
+              <code className="rounded-sm bg-input px-1 py-0.5 font-mono text-[12px] break-all text-syn-string">
                 {children}
               </code>
             )
           },
           pre: ({ children }) => (
-            <pre className="my-2 overflow-x-auto rounded border border-line bg-chrome p-2.5 leading-relaxed">
+            <pre className="my-2 max-w-full overflow-x-auto rounded border border-line bg-chrome p-2.5 leading-relaxed">
               {children}
             </pre>
           ),

@@ -88,19 +88,19 @@ export function WorkingBar({
       {!waiting && (
         <span className="inline-block size-2.5 shrink-0 animate-spin rounded-full border border-info border-t-transparent" />
       )}
-      <span>{activity}</span>
-      <span className="text-fg-dim">
+      <span className="min-w-0 truncate">{activity}</span>
+      <span className="shrink-0 text-fg-dim">
         {seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`}
       </span>
       {outputTokens > 0 && (
-        <span className="text-fg-dim" title="Output tokens in the message being written">
+        <span className="shrink-0 text-fg-dim" title="Output tokens in the message being written">
           {outputTokens.toLocaleString()} tokens
         </span>
       )}
       <button
         type="button"
         onClick={onInterrupt}
-        className="ml-auto text-fg-dim underline-offset-2 hover:text-err hover:underline"
+        className="ml-auto shrink-0 text-fg-dim underline-offset-2 hover:text-err hover:underline"
       >
         stop
       </button>

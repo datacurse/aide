@@ -241,11 +241,16 @@ function ToolRow({ line }: { line: ToolLine }) {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-baseline gap-2 rounded px-1 py-0.5 text-left hover:bg-hover"
+        className="flex w-full min-w-0 items-baseline gap-2 rounded px-1 py-0.5 text-left hover:bg-hover"
       >
         {mark}
-        <span className="text-syn-func">{line.name}</span>
-        <span className="truncate text-syn-string">{describeInput(line.name, line.input)}</span>
+        <span className="shrink-0 text-syn-func">{line.name}</span>
+        {/* min-w-0 is what makes `truncate` real: a flex child defaults to
+            min-width:auto and refuses to shrink below its content, so without it
+            the row grows to fit the command and drags the whole pane sideways. */}
+        <span className="min-w-0 truncate text-syn-string">
+          {describeInput(line.name, line.input)}
+        </span>
       </button>
       {open && (
         <pre className="mt-1 mb-2 max-h-64 overflow-auto rounded-sm bg-chrome p-2 text-[11px] leading-relaxed whitespace-pre-wrap text-fg-muted">
@@ -280,12 +285,12 @@ function PermissionRow({
         pending ? "border-warn bg-warn/5" : "border-line bg-chrome"
       }`}
     >
-      <div className="flex items-center gap-2 font-sans text-[12px]">
-        <span className={pending ? "text-warn" : "text-fg-dim"}>
+      <div className="flex min-w-0 items-center gap-2 font-sans text-[12px]">
+        <span className={`shrink-0 ${pending ? "text-warn" : "text-fg-dim"}`}>
           {pending ? "needs your approval" : line.allowed ? "you allowed" : "you declined"}
         </span>
-        <span className="font-mono text-syn-func">{line.name}</span>
-        <span className="truncate font-mono text-[11px] text-syn-string">
+        <span className="shrink-0 font-mono text-syn-func">{line.name}</span>
+        <span className="min-w-0 truncate font-mono text-[11px] text-syn-string">
           {describeInput(line.name, line.input)}
         </span>
         <button
@@ -336,11 +341,11 @@ function BootstrapRow({ line }: { line: BootstrapLine }) {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-baseline gap-2 rounded px-1 py-0.5 text-left hover:bg-hover"
+        className="flex w-full min-w-0 items-baseline gap-2 rounded px-1 py-0.5 text-left hover:bg-hover"
       >
         {mark}
-        <span className="text-syn-keyword">bootstrap</span>
-        <span className="truncate text-syn-string">{line.command}</span>
+        <span className="shrink-0 text-syn-keyword">bootstrap</span>
+        <span className="min-w-0 truncate text-syn-string">{line.command}</span>
         {line.ok !== null && (
           <span className="shrink-0 text-fg-dim">
             {(line.ms / 1000).toFixed(1)}s
@@ -439,7 +444,7 @@ function AcceptBar({
               {sha.slice(0, 8)}
             </code>
           )}
-          {result?.journal && <span className="truncate text-fg-dim">{result.journal}</span>}
+          {result?.journal && <span className="min-w-0 truncate text-fg-dim">{result.journal}</span>}
           <div className="ml-auto flex items-center gap-2">
             <span className="text-fg-dim">
               {branch ? `merges into ${branch}` : "merges into the checked-out branch"}
@@ -549,7 +554,7 @@ export function Transcript({
                 if (line.kind === "bootstrap") return <BootstrapRow key={line.seq} line={line} />
                 if (line.kind === "thinking")
                   return (
-                    <p key={line.seq} className="px-1 text-syn-comment italic">
+                    <p key={line.seq} className="px-1 break-words whitespace-pre-wrap text-syn-comment italic">
                       {line.text}
                     </p>
                   )
@@ -577,19 +582,19 @@ export function Transcript({
                   )
                 if (line.kind === "denied")
                   return (
-                    <p key={line.seq} className="px-1 text-warn">
+                    <p key={line.seq} className="px-1 break-words text-warn">
                       ✗ denied {line.name} — {line.reason}
                     </p>
                   )
                 if (line.kind === "retry")
                   return (
-                    <p key={line.seq} className="px-1 text-warn">
+                    <p key={line.seq} className="px-1 break-words text-warn">
                       ↻ {line.text}
                     </p>
                   )
                 if (line.kind === "error")
                   return (
-                    <p key={line.seq} className="px-1 text-err" title={line.text}>
+                    <p key={line.seq} className="px-1 break-words text-err" title={line.text}>
                       ! {humanizeError(line.text)}
                     </p>
                   )
@@ -737,7 +742,7 @@ export function RunPane({
           const el = e.currentTarget
           pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40
         }}
-        className="flex-1 overflow-auto px-3 py-2 font-mono text-xs leading-relaxed"
+        className="flex-1 overflow-x-hidden overflow-y-auto px-3 py-2 font-mono text-xs leading-relaxed"
       >
         {tab === "diff" ? (
           diff === null ? (
@@ -745,7 +750,7 @@ export function RunPane({
           ) : diff.diff.trim() === "" ? (
             <Empty>No changes in the worktree yet.</Empty>
           ) : (
-            <pre className="whitespace-pre">
+            <pre className="w-full overflow-x-auto whitespace-pre">
               {diff.diff.split("\n").map((l, i) => (
                 <div
                   key={i}
