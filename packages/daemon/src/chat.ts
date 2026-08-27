@@ -45,6 +45,9 @@ export interface ChatTurn {
   /** null until the SDK reports one — a brand new conversation has no id yet. */
   sessionId: string | null
   startedAt: number
+  /** The message that opened this turn, so a conversation with no transcript on
+   * disk yet can still be named. */
+  text: string
 }
 
 interface TurnRecord extends ChatTurn {
@@ -87,11 +90,12 @@ export class ChatLane {
   constructor(private readonly log: EventLog) {}
 
   turns(): ChatTurn[] {
-    return [...this.#turns.values()].map(({ runId, projectId, sessionId, startedAt }) => ({
+    return [...this.#turns.values()].map(({ runId, projectId, sessionId, startedAt, text }) => ({
       runId,
       projectId,
       sessionId,
       startedAt,
+      text,
     }))
   }
 
@@ -149,6 +153,7 @@ export class ChatLane {
       projectId: project.id,
       sessionId: opts.sessionId,
       startedAt: Date.now(),
+      text: opts.text,
       child,
       interrupted: false,
       pending: new Set(),

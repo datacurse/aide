@@ -103,12 +103,18 @@ export async function getConversation(
   project: Project,
   sessionId: string,
   activeRunFor: (sessionId: string) => string | null = () => null,
+  /** The turn running for this conversation right now, if there is one. */
+  liveTurnFor: (sessionId: string) => LiveTurn | null = () => null,
 ): Promise<{ summary: ConversationSummary; events: RunEvent[]; truncated: boolean; totalMessages: number } | null> {
   const listed = (await listConversations(project, activeRunFor)).find(
     (c) => c.sessionId === sessionId,
   )
-  // Not in the listing is not the same as not existing — see summaryFromFile.
-  const summary = listed ?? (await summaryFromFile(project, sessionId, activeRunFor))
+  // Neither absent from the listing nor absent from disk means it does not
+  // exist — see summaryFromFile and liveSummary.
+  const summary =
+    listed ??
+    (await summaryFromFile(project, sessionId, activeRunFor)) ??
+    liveSummary(project, sessionId, liveTurnFor(sessionId))
   if (!summary) return null
 
   const messages = await getSessionMessages(sessionId, { dir: project.root })
@@ -142,6 +148,58 @@ export async function getConversation(
     events,
     truncated: messages.length > capped.length,
     totalMessages: messages.length,
+  }
+}
+
+/** What the daemon knows about a turn it is running right now. */
+export interface LiveTurn {
+  runId: string
+  projectId: string
+  startedAt: number
+  /** The message that opened the turn. */
+  text: string
+}
+
+/**
+ * A summary for a conversation that is not on disk at all yet.
+ *
+ * The last resort, and the one that actually matters for a new chat. Measured:
+ * `run.started` carries the session id to the browser about 64ms before the SDK
+ * has created the transcript file, and the browser follows it to the new URL
+ * immediately. So for that window there is no listing row AND no file — nothing
+ * to read, however patiently you read it.
+ *
+ * But the daemon is not guessing here: it started this turn and is supervising
+ * the process running it. A conversation it is actively serving is the last
+ * thing that should 404, which is what put "no conversation <id> in this
+ * project" in red over a chat that was busy answering.
+ *
+ * The events are empty on purpose. The live stream is already delivering them;
+ * this only has to say the conversation exists and what it is called.
+ */
+function liveSummary(
+  project: Project,
+  sessionId: string,
+  turn: LiveTurn | null,
+): ConversationSummary | null {
+  // Scoped by project like every other path here: a turn running for one project
+  // must not answer through another project's URL.
+  if (!turn || turn.projectId !== project.id) return null
+  return {
+    sessionId,
+    // A chat runs in the project root by definition — that is what makes it a
+    // chat rather than a task — so this is not an assumption about the cwd.
+    kind: "chat",
+    taskId: null,
+    title: firstLine(turn.text) ?? "(new conversation)",
+    firstPrompt: turn.text,
+    cwd: project.root,
+    gitBranch: null,
+    lastModified: turn.startedAt,
+    createdAt: turn.startedAt,
+    bytes: 0,
+    activeRunId: turn.runId,
+    lastMode: null,
   }
 }
 

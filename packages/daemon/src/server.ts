@@ -99,6 +99,9 @@ app.addHook("onRequest", async (req, reply) => {
 const activeChatRun = (sessionId: string): string | null =>
   chat.turnForSession(sessionId)?.runId ?? null
 
+/** The whole turn, for the case where the transcript does not exist yet. */
+const liveChatTurn = (sessionId: string) => chat.turnForSession(sessionId) ?? null
+
 const notFound = (msg: string) => ({ statusCode: 404, error: "Not Found", message: msg })
 
 // ---------------------------------------------------------------------------
@@ -409,7 +412,7 @@ app.get("/api/projects/:id/conversations/:sessionId", async (req, reply) => {
   const project = await getProject(id)
   if (!project) return reply.code(404).send(notFound(`no project ${id}`))
   try {
-    const found = await getConversation(project, sessionId, activeChatRun)
+    const found = await getConversation(project, sessionId, activeChatRun, liveChatTurn)
     if (!found) return reply.code(404).send(notFound(`no conversation ${sessionId} in this project`))
     return found
   } catch (err) {
