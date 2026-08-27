@@ -36,6 +36,35 @@ export const CHAT_MODE_LABEL: Record<ChatMode, { label: string; hint: string }> 
   auto: { label: "Auto", hint: "Claude approves what passes a safety check, pauses for anything risky" },
 }
 
+/**
+ * An SDK permission mode back into aide's vocabulary.
+ *
+ * The session store is shared with the CLI and the VS Code extension, and every
+ * user turn in it is stamped with the mode it was sent under. Reading that back
+ * is what lets a conversation you had in VS Code on Auto stay on Auto when you
+ * open it here, rather than silently reverting to Manual and asking permission
+ * for the next command.
+ *
+ * Returns null for modes aide has no picker entry for — `dontAsk` (what task
+ * runs use) and `bypassPermissions`. Null means "no opinion", not "manual": the
+ * caller falls back to whatever the human last chose, which is never an
+ * escalation.
+ */
+export function chatModeFromSdk(value: unknown): ChatMode | null {
+  switch (value) {
+    case "default":
+      return "manual"
+    case "acceptEdits":
+      return "acceptEdits"
+    case "plan":
+      return "plan"
+    case "auto":
+      return "auto"
+    default:
+      return null
+  }
+}
+
 export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const
 export type EffortLevel = (typeof EFFORT_LEVELS)[number]
 
@@ -92,6 +121,14 @@ export interface ConversationSummary {
    * well what is running; it just had no way to say so.
    */
   activeRunId: string | null
+  /**
+   * The mode the last turn was sent under, when it can be read.
+   *
+   * Only populated when a single conversation is fetched — see `sessionMode`.
+   * Null means the file did not say, and the browser should keep the mode the
+   * human last picked.
+   */
+  lastMode: ChatMode | null
 }
 
 /**

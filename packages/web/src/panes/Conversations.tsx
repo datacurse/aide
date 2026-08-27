@@ -383,6 +383,8 @@ export function ConversationPane({
         <Composer
           busy={busy}
           usage={usage}
+          sessionId={sessionId}
+          inheritedMode={summary?.lastMode ?? null}
           onSend={(msg) => void send(msg)}
           onInterrupt={() => {
             if (runId) void api.interruptChat(runId).catch(() => {})

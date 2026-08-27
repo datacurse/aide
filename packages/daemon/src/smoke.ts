@@ -18,6 +18,7 @@ import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 import { writeJournalEntry } from "./journal.js"
+import { chatModeFromSdk } from "@aide/protocol"
 import { checkBashCommand } from "./policy.js"
 import {
   commitWorktree,
@@ -144,6 +145,24 @@ console.log("\nbash policy")
   check("denies a newline", !verdict("pnpm ls\nrm -rf /").allow)
   check("denies a non-string", !verdict(undefined).allow)
   check("denial says what to do instead", verdict("cd x && pnpm t").reason.includes("--filter"))
+}
+
+console.log("\ninherited chat mode")
+{
+  // The session store is shared with the CLI and the VS Code extension, and a
+  // conversation carries the mode it was last driven at. Reading that back is
+  // what stops a chat you were running on Auto elsewhere from quietly reverting
+  // to Manual here and asking permission for the next command.
+  check("default is what aide calls manual", chatModeFromSdk("default") === "manual")
+  check("acceptEdits round-trips", chatModeFromSdk("acceptEdits") === "acceptEdits")
+  check("plan round-trips", chatModeFromSdk("plan") === "plan")
+  check("auto round-trips", chatModeFromSdk("auto") === "auto")
+  // Null is the load-bearing case. It means "no opinion", and the browser keeps
+  // whatever the human last picked — so an unknown mode can never widen one.
+  check("dontAsk has no picker entry", chatModeFromSdk("dontAsk") === null, "what task runs use")
+  check("bypassPermissions is never inherited", chatModeFromSdk("bypassPermissions") === null)
+  check("a future mode is not guessed at", chatModeFromSdk("somethingNew") === null)
+  check("junk is not a mode", chatModeFromSdk(undefined) === null && chatModeFromSdk(7) === null)
 }
 
 console.log("\nprotocol stays browser-safe")

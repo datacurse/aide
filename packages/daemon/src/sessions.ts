@@ -11,9 +11,12 @@
  * extension, which is why a chat you had in VS Code appears in aide with no
  * import step — and why deleting one here would delete it there.
  */
+import { open, readdir, stat } from "node:fs/promises"
+import { homedir } from "node:os"
+import { join } from "node:path"
 import { getSessionMessages, listSessions } from "@anthropic-ai/claude-agent-sdk"
-import type { ConversationSummary, Project, RunEvent } from "@aide/protocol"
-import { STATE_DIR } from "@aide/protocol"
+import type { ChatMode, ConversationSummary, Project, RunEvent } from "@aide/protocol"
+import { STATE_DIR, chatModeFromSdk } from "@aide/protocol"
 import { normalizeSdkMessage } from "./agent.js"
 
 /**
@@ -22,6 +25,24 @@ import { normalizeSdkMessage } from "./agent.js"
  * shown to the user ("1200 of 4000 messages") means something.
  */
 const MAX_MESSAGES = 1_500
+
+/**
+ * The backwards scan for the mode a conversation was last driven at.
+ *
+ * The mode is stamped on every user turn, so the last one is a single assistant
+ * turn from the end — but that turn carries its tool results, and one session
+ * here put 363KB between the last stamp and EOF. Any fixed tail is therefore a
+ * guess that silently returns "unknown" on exactly the long, busy conversations
+ * where getting the mode right matters most, so this walks backwards a window at
+ * a time and stops at the first window with a hit. Almost always that is the
+ * first one; the budget bounds the pathological case.
+ */
+const MODE_WINDOW_BYTES = 512 * 1024
+const MODE_MAX_SCAN_BYTES = 8 * 1024 * 1024
+/** Enough to cover the pattern straddling a window boundary. */
+const MODE_OVERLAP_BYTES = 256
+
+const PERMISSION_MODE = /"permissionMode"\s*:\s*"([a-zA-Z]+)"/g
 
 /** `.aide/worktrees/task-0004` anywhere in the path means this ran for a task. */
 const TASK_CWD = new RegExp(`${STATE_DIR}[\\\\/]worktrees[\\\\/]task-(\\d+)`, "i")
@@ -66,6 +87,10 @@ export async function listConversations(
         createdAt: s.createdAt ?? null,
         bytes: s.fileSize ?? 0,
         activeRunId: activeRunFor(s.sessionId),
+        // Left null for the list. Filling it here would mean a file read per
+        // conversation on every poll, to answer a question only the open
+        // conversation asks; `getConversation` fills it for that one.
+        lastMode: null,
       } satisfies ConversationSummary
     })
     .sort((a, b) => b.lastModified - a.lastModified)
@@ -108,11 +133,87 @@ export async function getConversation(
   }
 
   return {
-    summary,
+    summary: { ...summary, lastMode: await sessionMode(sessionId) },
     events,
     truncated: messages.length > capped.length,
     totalMessages: messages.length,
   }
+}
+
+/**
+ * The mode the conversation was last driven at, read from the raw JSONL.
+ *
+ * The SDK's own reader drops this: `permissionMode` is on every user record on
+ * disk, but `SessionMessage` does not carry it. So this is the one place aide
+ * reads the session store directly rather than through the SDK — deliberately
+ * narrow, one undocumented field, and every failure returns null.
+ *
+ * That null matters. This is inherited state feeding a permission mode, so
+ * anything unreadable, unrecognised, or from a future SDK must mean "no
+ * opinion" and leave the human's own choice standing.
+ */
+async function sessionMode(sessionId: string): Promise<ChatMode | null> {
+  const file = await findSessionFile(sessionId)
+  if (!file) return null
+  try {
+    const handle = await open(file, "r")
+    try {
+      const { size } = await handle.stat()
+      const floor = Math.max(0, size - MODE_MAX_SCAN_BYTES)
+      let end = size
+      while (end > floor) {
+        const start = Math.max(floor, end - MODE_WINDOW_BYTES)
+        const length = end - start
+        const buffer = Buffer.alloc(length)
+        await handle.read(buffer, 0, length, start)
+        // The last match in the window wins: scanning forward and keeping the
+        // final hit is simpler than reversing a regex, and the window is capped.
+        // Slicing on byte boundaries can split a multi-byte character, which is
+        // harmless — the pattern is ASCII, and the overlap covers a split across
+        // the boundary itself.
+        let last: string | null = null
+        for (const hit of buffer.toString("utf8").matchAll(PERMISSION_MODE)) last = hit[1] ?? null
+        if (last !== null) return chatModeFromSdk(last)
+        if (start === floor) break
+        end = start + MODE_OVERLAP_BYTES
+      }
+      return null
+    } finally {
+      await handle.close()
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Locate `<sessionId>.jsonl` under `~/.claude/projects/`.
+ *
+ * By scanning rather than by encoding the project path into a directory name —
+ * that encoding is the SDK's, undocumented, and getting it subtly wrong would
+ * fail silently. The session id IS the filename, which is the stable part.
+ */
+async function findSessionFile(sessionId: string): Promise<string | null> {
+  // A session id reaches this from a URL and is about to become a path
+  // component, so anything that is not the UUID shape it should be is refused
+  // rather than joined.
+  if (!/^[0-9a-fA-F-]{36}$/.test(sessionId)) return null
+  const root = join(homedir(), ".claude", "projects")
+  let dirs: string[]
+  try {
+    dirs = await readdir(root)
+  } catch {
+    return null
+  }
+  for (const dir of dirs) {
+    const candidate = join(root, dir, `${sessionId}.jsonl`)
+    try {
+      if ((await stat(candidate)).isFile()) return candidate
+    } catch {
+      // Not in this project directory. Keep looking.
+    }
+  }
+  return null
 }
 
 function firstLine(s: string): string | null {

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react"
+import { useRemembered } from "./useRemembered.js"
 import {
   CHAT_MODES,
   CHAT_MODE_LABEL,
@@ -19,6 +20,11 @@ const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 
 const kb = (bytes: number) =>
   bytes > 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.round(bytes / 1024)} KB`
+
+const isChatMode = (v: unknown): v is ChatMode =>
+  typeof v === "string" && (CHAT_MODES as readonly string[]).includes(v)
+const isEffort = (v: unknown): v is EffortLevel =>
+  typeof v === "string" && (EFFORT_LEVELS as readonly string[]).includes(v)
 
 let attachmentSeq = 0
 
@@ -154,11 +160,17 @@ function ModePicker({
 export function Composer({
   busy,
   usage,
+  sessionId,
+  inheritedMode,
   onSend,
   onInterrupt,
 }: {
   busy: boolean
   usage: ContextUsage | null
+  /** Which conversation is open; null for a new one. Scopes `inheritedMode`. */
+  sessionId: string | null
+  /** The mode this conversation was last driven at, or null if unknown. */
+  inheritedMode: ChatMode | null
   onSend: (msg: {
     text: string
     attachments: Attachment[]
@@ -169,8 +181,36 @@ export function Composer({
 }) {
   const [text, setText] = useState("")
   const [attachments, setAttachments] = useState<Attachment[]>([])
-  const [mode, setMode] = useState<ChatMode>("manual")
-  const [effort, setEffort] = useState<EffortLevel>("high")
+  // Remembered, not reset. Picking Auto and then having the next page load put
+  // you back on Manual is how a chat ends up asking permission for every command
+  // while you are certain you already told it not to.
+  const [preferred, setPreferred] = useRemembered<ChatMode>("aide.chat.mode", "manual", isChatMode)
+  const [effort, setEffort] = useRemembered<EffortLevel>("aide.chat.effort", "high", isEffort)
+  /**
+   * The mode this particular conversation was last driven at, which beats the
+   * remembered preference while it is open — a chat you were running on Auto in
+   * VS Code should not start asking permission just because you opened it here.
+   *
+   * Held apart from `preferred` rather than written into it, because inheriting
+   * must not quietly change your default for every other conversation. Opening
+   * one old Auto chat is not a decision to run everything on Auto.
+   */
+  const [inherited, setInherited] = useState<ChatMode | null>(null)
+  const mode = inherited ?? preferred
+
+  // Keyed on the session too: two conversations can carry the same mode, and
+  // without the id the effect would not re-fire on the second one, leaving your
+  // manual override from the first still in force.
+  useEffect(() => {
+    setInherited(inheritedMode)
+  }, [sessionId, inheritedMode])
+
+  // Choosing from the menu is a decision, so it both overrides the inherited
+  // value and becomes the new default.
+  const chooseMode = (m: ChatMode) => {
+    setInherited(null)
+    setPreferred(m)
+  }
   const [note, setNote] = useState<string | null>(null)
   const area = useRef<HTMLTextAreaElement>(null)
 
@@ -258,7 +298,7 @@ export function Composer({
       {note && <p className="mt-1 font-sans text-[11px] text-warn">{note}</p>}
 
       <div className="mt-1.5 flex items-center gap-3">
-        <ModePicker mode={mode} effort={effort} onMode={setMode} onEffort={setEffort} />
+        <ModePicker mode={mode} effort={effort} onMode={chooseMode} onEffort={setEffort} />
         <ContextMeter usage={usage} />
         <div className="ml-auto flex items-center gap-2">
           {busy ? (
