@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useState } from "react"
 import { api, type Health, type ProjectView, type TaskView } from "./api.js"
+import { CHIME_KEY } from "./chime.js"
 import { DaemonBar } from "./Daemon.js"
-import { useAppLocation } from "./useAppLocation.js"
+import { carryDraft, draftKey, openNewChat } from "./drafts.js"
+import { PANES, useAppLocation } from "./useAppLocation.js"
+import { useRemembered } from "./useRemembered.js"
 import { ConversationList, ConversationPane } from "./panes/Conversations.js"
+import { GitList, GitPane } from "./panes/Git.js"
 import { RunPane } from "./panes/Run.js"
 import { Button, Empty, PaneHeader, StatusDot, STATUS_STYLE } from "./ui.js"
 
@@ -20,10 +24,20 @@ export function App() {
    * URL, so a reload lands you back where you were and Back steps through what
    * you had open. See useAppLocation.
    */
-  const [{ projectId, pane: mode, taskId, sessionId }, navigate] = useAppLocation()
+  const [{ projectId, pane: mode, taskId, sessionId, sha }, navigate] = useAppLocation()
   /** Bumped to refetch the conversation list — a new chat has no id until it starts. */
   const [conversationsSeq, setConversationsSeq] = useState(0)
   const [draft, setDraft] = useState({ title: "", body: "" })
+  /**
+   * Whether a finished run makes a sound. Remembered rather than a session
+   * toggle: a chime you have to silence again after every reload is worse than
+   * no chime, because you stop trusting the reload.
+   */
+  const [chiming, setChiming] = useRemembered<boolean>(
+    CHIME_KEY,
+    true,
+    (v): v is boolean => typeof v === "boolean",
+  )
 
   const refresh = useCallback(async () => {
     // Health is polled with everything else rather than fetched once at mount.
@@ -89,7 +103,23 @@ export function App() {
           <span className="text-sm font-semibold tracking-tight text-fg">aide</span>
         </div>
         {error && <span className="min-w-0 flex-1 truncate text-[11px] text-err">{error}</span>}
-        <DaemonBar health={health} onChanged={() => void refresh()} />
+        <div className="flex shrink-0 items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setChiming(!chiming)}
+            title={
+              chiming
+                ? "A finished run rings. Click to silence."
+                : "Finished runs are silent. Click to hear them."
+            }
+            className={`text-[11px] underline-offset-2 hover:underline ${
+              chiming ? "text-fg-muted" : "text-fg-dim line-through"
+            }`}
+          >
+            chime
+          </button>
+          <DaemonBar health={health} onChanged={() => void refresh()} />
+        </div>
       </header>
 
       <main className="flex min-h-0 flex-1">
@@ -128,11 +158,18 @@ export function App() {
           </div>
         </aside>
 
-        {/* Tasks and conversations */}
-        <aside className="flex w-80 shrink-0 flex-col border-r border-line bg-chrome">
+        {/* Tasks, conversations, history */}
+        {/* Wider for git: the history column carries a graph, and a lane costs
+            real width — squeezing it into the task list's 20rem leaves nothing
+            for the subject, which is the part anyone actually reads. */}
+        <aside
+          className={`flex shrink-0 flex-col border-r border-line bg-chrome ${
+            mode === "git" ? "w-96" : "w-80"
+          }`}
+        >
           <PaneHeader title={mode}>
             <div className="mr-1 flex overflow-hidden rounded border border-line">
-              {(["tasks", "chats"] as const).map((m) => (
+              {PANES.map((m) => (
                 <button
                   key={m}
                   type="button"
@@ -145,15 +182,31 @@ export function App() {
                 </button>
               ))}
             </div>
-            <Button
-              disabled={!project}
-              onClick={() =>
-                mode === "tasks" ? setComposing((v) => !v) : navigate({ sessionId: null })
-              }
-              title={mode === "tasks" ? "New task" : "Start a new conversation"}
-            >
-              new
-            </Button>
+            {/* The git pane has nothing to create. It reads the repo, and the
+                two things that write to it — commit and land — belong to a task
+                and live in the run pane behind its diff. */}
+            {mode !== "git" && (
+              <Button
+                disabled={!project}
+                onClick={() => {
+                  if (mode === "tasks") {
+                    setComposing((v) => !v)
+                    return
+                  }
+                  // Idempotent on purpose: a second press is you looking for the
+                  // chat you already started, not asking for another one.
+                  if (project) openNewChat(project.id)
+                  navigate({ sessionId: null })
+                }}
+                title={
+                  mode === "tasks"
+                    ? "New task"
+                    : "Start a new conversation. Pressing this again opens the one you already started."
+                }
+              >
+                new
+              </Button>
+            )}
           </PaneHeader>
 
           {composing && project && (
@@ -181,7 +234,13 @@ export function App() {
             </div>
           )}
 
-          {mode === "chats" ? (
+          {mode === "git" ? (
+            <GitList
+              projectId={projectId}
+              selected={sha}
+              onSelect={(next) => navigate({ sha: next })}
+            />
+          ) : mode === "chats" ? (
             <ConversationList
               key={conversationsSeq}
               projectId={projectId}
@@ -219,7 +278,12 @@ export function App() {
           )}
         </aside>
 
-        {mode === "chats" ? (
+        {mode === "git" ? (
+          <section className="flex min-h-0 min-w-0 flex-1 flex-col bg-editor">
+            <PaneHeader title={sha ? `commit ${sha.slice(0, 7)}` : "working tree"} />
+            <GitPane projectId={projectId} sha={sha} />
+          </section>
+        ) : mode === "chats" ? (
           <ConversationPane
             projectId={projectId}
             openSessionId={sessionId}
@@ -228,6 +292,10 @@ export function App() {
             // on the conversation rather than on a blank new one — and refetch
             // the list so the row appears.
             onStarted={(id) => {
+              // The draft row is this conversation, so it does not linger next
+              // to the real one the list is about to grow — anything still
+              // unsent in its box moves across with it.
+              if (projectId) carryDraft(draftKey(projectId, null), draftKey(projectId, id))
               navigate({ sessionId: id })
               setConversationsSeq((n) => n + 1)
             }}

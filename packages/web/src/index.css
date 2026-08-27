@@ -50,6 +50,17 @@
   --color-warn: #e2c08d; /* gitDecoration.modifiedResourceForeground */
   --color-info: #3794ff; /* charts.blue, progressBar.background */
 
+  /* Commit graph. VS Code draws its own graph in IBM's colourblind-safe set
+     rather than in theme colours, for the reason that decides this palette:
+     these are the only colours in the UI whose whole job is to be told apart
+     from each other at 2px wide. Five, because a sixth lane is rare and the
+     sixth colour anyone picks is always a near-miss of one already here. */
+  --color-graph-1: #78a9ff;
+  --color-graph-2: #ffb000;
+  --color-graph-3: #dc267f;
+  --color-graph-4: #40c8ae;
+  --color-graph-5: #c586c0;
+
   /* Diff */
   --color-diff-add: #9bb95526; /* diffEditor.insertedLineBackground */
   --color-diff-del: #ff000026; /* diffEditor.removedLineBackground */

@@ -20,6 +20,16 @@ import { promisify } from "node:util"
 import { writeJournalEntry } from "./journal.js"
 import { chatModeFromSdk } from "@aide/protocol"
 import { checkBashCommand } from "./policy.js"
+import { restartDecision, type Health } from "@aide/protocol"
+import {
+  buildGraph,
+  commitDetail,
+  isSha,
+  log as readLog,
+  overview,
+  parseStatus,
+  workingTree,
+} from "./repo.js"
 import {
   commitWorktree,
   currentBranch,
@@ -207,6 +217,62 @@ console.log("\nprotocol stays browser-safe")
   check("the node entry still carries paths", nodeEntry.includes("./paths.js"))
 }
 
+console.log("\nrestarting a stale daemon")
+{
+  // The daemon loads its modules once, so every edit to packages/daemon/src
+  // leaves a process running code that no longer exists. The dev server fixes
+  // that by restarting it — and the previous version of this rule, chokidar
+  // firing on a file write, killed a daemon three lines into a land and left the
+  // task stranded at `committed` with an orphaned worktree. Hence a pure
+  // function, and hence these.
+  const QUIET = 1500
+  const base: Health = {
+    ok: true,
+    taskModel: "claude-opus-5",
+    maxConcurrentRuns: 2,
+    maxBudgetUsd: 5,
+    bootSourceId: "aaaaaaaaaaaa",
+    sourceId: "bbbbbbbbbbbb",
+    stale: true,
+    supervised: true,
+    busy: { runs: 0, chats: 0, writes: 0 },
+    idleMs: 10_000,
+  }
+  const decide = (patch: Partial<Health>, previous = "bbbbbbbbbbbb" as string | null) =>
+    restartDecision({ ...base, ...patch }, previous, QUIET)
+
+  check("restarts a stale, quiet daemon", decide({}).restart, decide({}).reason)
+  check("leaves a current daemon alone", !decide({ stale: false }).restart)
+
+  // Each of these is a way to destroy work.
+  check("not while a task run is in flight", !decide({ busy: { runs: 1, chats: 0, writes: 0 } }).restart)
+  check("not while a run is merely QUEUED", !decide({ busy: { runs: 1, chats: 0, writes: 0 } }).restart, "shutdown cancels the queue")
+  check("not mid chat turn", !decide({ busy: { runs: 0, chats: 1, writes: 0 } }).restart)
+  check(
+    "not mid land",
+    !decide({ busy: { runs: 0, chats: 0, writes: 1 } }).restart,
+    "a land is one request, and killing it strands the task at committed",
+  )
+  check(
+    "and it says what it is waiting for",
+    decide({ busy: { runs: 2, chats: 1, writes: 0 } }).reason === "2 runs, 1 chat turn in flight",
+    decide({ busy: { runs: 2, chats: 1, writes: 0 } }).reason,
+  )
+
+  // The gap between two of the browser's requests is not a safe moment.
+  check("not in the gap right after a write", !decide({ idleMs: 200 }).restart)
+  check("but yes once it has been quiet", decide({ idleMs: QUIET }).restart)
+
+  // A tree still being rewritten reports a different fingerprint every tick, and
+  // restarting once per tick through a `git merge` helps nobody.
+  check("not while the tree is still moving", !decide({}, "ccccccccccc").restart)
+  check("not on the very first sighting", !decide({}, null).restart)
+
+  // Unknown must never read as changed: a daemon with no source tree to compare
+  // against is not stale, it is unknowable.
+  check("never restarts on an unreadable source", !decide({ sourceId: null }, null).restart)
+}
+
 console.log("\njournal")
 const project: Project = { id: "p1", name: "smoke", root, addedAt: new Date().toISOString() }
 const task: Task = {
@@ -298,6 +364,196 @@ check("merged into main", landed.into === "main", landed.into)
 check("is a merge commit", (await git(root, ["log", "-1", "--format=%P"])).trim().split(" ").length === 2, "--no-ff held")
 check("agent's file is in main", existsSync(join(root, "lib/new.ts")))
 check("edit landed", (await readFile(join(root, "app.ts"), "utf8")).trim() === "export const n = 2")
+
+console.log("\nreading the repository")
+{
+  const view = await overview(root)
+  check("knows the branch", view.branch === "main", view.branch ?? "(detached)")
+  check("knows HEAD", view.head !== null && !view.unborn, view.head ?? "")
+  check("invents no upstream", view.upstream === null, "this repo has no remote")
+
+  const history = await readLog(root, 3)
+  check("log honours the limit", history.commits.length === 3, `${history.commits.length}`)
+  check("says there is more", history.more, "one extra is fetched so this is not a guess")
+  check("newest first", history.commits[0]?.sha === landed.sha, history.commits[0]?.subject ?? "")
+  // Read again unlimited rather than reusing the three above: this repo's
+  // commits are all made inside the same second, so which of them `git log`
+  // puts third is a tie-break, and an assertion about trailers must not depend
+  // on it.
+  const full = await readLog(root, 50)
+  check(
+    "reads the Aide-Task trailer",
+    full.commits.some((c) => c.tasks.includes("0001")),
+    "this is what links a commit back to the task that asked for it",
+  )
+  check("and leaves it off the commits without one", full.commits.some((c) => c.tasks.length === 0))
+  check("no more history than there is", !full.more, `${full.commits.length} commits`)
+
+  // The assertion this section exists for. `git show` on a cleanly resolved
+  // merge prints an empty combined diff, and every landed task is a --no-ff
+  // merge — so without `-m --first-parent` the whole point of the view, seeing
+  // what landed, is a commit that appears to have changed nothing.
+  const detail = await commitDetail(root, landed.sha)
+  check("finds the merge commit", detail !== null)
+  check("merge has a diff", detail?.diff.includes("+export const added = true") === true, "-m --first-parent")
+  check("merge has a stat", detail?.stat.includes("lib/new.ts") === true)
+  check("keeps the whole message", detail?.message.includes("Merge task 0001") === true)
+
+  check("an option is not a sha", !isSha("--upload-pack=whatever"), "this value comes from the URL")
+  check("a real sha is", isSha(landed.sha))
+  check("and commitDetail refuses it", (await commitDetail(root, "--output=/tmp/x")) === null)
+
+  // The `++i` that consumes a rename's second field is easy to get wrong in a
+  // way that eats the NEXT entry rather than failing outright.
+  const parsed = parseStatus("R  new name.txt\u0000old name.txt\u0000?? plain.txt\u0000")
+  check("rename carries its old path", parsed[0]?.from === "old name.txt", parsed[0]?.from ?? "null")
+  check("rename does not swallow the next entry", parsed.length === 2 && parsed[1]?.path === "plain.txt")
+
+  await writeFile(join(root, "app.ts"), "export const n = 3\n", "utf8")
+  await writeFile(join(root, "brand new.txt"), "untracked\n", "utf8")
+  const tree = await workingTree(root)
+  check("sees the edit", tree.files.some((f) => f.path === "app.ts" && f.unstaged === "modified"))
+  check("edit is in the diff", tree.diff.includes("+export const n = 3"))
+  const fresh = tree.files.find((f) => f.path === "brand new.txt")
+  check("sees a new file whose name has a space", fresh?.code === "??", fresh?.path ?? "missing")
+  check("new file's content is in the diff", tree.diff.includes("+untracked"), "--no-index against /dev/null")
+  check("new file reads as new", tree.diff.includes("new file mode"))
+  // The whole reason this view diffs new files the awkward way. `add -A -N` is
+  // how the worktree routes do it, and doing that here would stage intent-to-add
+  // across the human's own checkout because they opened a read-only page.
+  check(
+    "staged nothing to manage it",
+    (await git(root, ["diff", "--cached", "--name-only"])).trim() === "",
+    "read-only means read-only",
+  )
+  await rm(join(root, "brand new.txt"))
+  await git(root, ["checkout", "--", "app.ts"])
+}
+
+console.log("\nthe drawn graph")
+{
+  // The half of the history view nobody can eyeball. A lane is a number, and a
+  // wrong number is a line that goes somewhere the reader will believe. This
+  // repo has the shape that matters by the time we get here: a branch that left
+  // main and came back through a --no-ff merge, plus `rival`, which never did.
+  const page = await readLog(root, 50)
+  const rowFor = (sha: string) => page.graph.find((r) => r.sha === sha)
+
+  check("a row per commit", page.graph.length === page.commits.length)
+  check(
+    "rows are in the same order as the commits",
+    page.graph.every((r, i) => r.sha === page.commits[i]?.sha),
+    "the UI pairs them by index; the sha is carried so this cannot drift silently",
+  )
+
+  check(
+    "the newest commit has no line above it",
+    rowFor(page.commits[0]?.sha ?? "")?.enters.length === 0,
+    "nothing on the page points at it",
+  )
+
+  const merge = rowFor(landed.sha)
+  check("the merge has two lines leaving it", merge?.leaves.length === 2, `${merge?.leaves.length}`)
+  check(
+    "and they leave in different lanes",
+    merge?.leaves[0]?.lane !== merge?.leaves[1]?.lane,
+    "both parents in one lane would draw a merge as a straight line",
+  )
+  check("the merge keeps its own lane for its first parent", merge?.leaves[0]?.lane === merge?.lane)
+
+  const [firstParent, secondParent] = page.commits.find((c) => c.sha === landed.sha)?.parents ?? []
+  check(
+    "main keeps its colour across the merge",
+    rowFor(firstParent ?? "")?.color === merge?.color,
+    "a new colour at every merge is how a graph turns into spaghetti",
+  )
+  check(
+    "the branch that landed runs beside it, not on top of it",
+    rowFor(secondParent ?? "")?.lane !== merge?.lane,
+  )
+  check(
+    "every lane drawn fits the width the page reports",
+    page.lanes >= 2 &&
+      page.graph.every((r) =>
+        [r.lane, ...[...r.through, ...r.enters, ...r.leaves].map((l) => l.lane)].every(
+          (l) => l < page.lanes,
+        ),
+      ),
+    `${page.lanes} lanes wide`,
+  )
+  check(
+    "nothing is drawn twice in one lane",
+    page.graph.every(
+      (r) =>
+        new Set(r.leaves.map((l) => l.lane)).size === r.leaves.length &&
+        new Set(r.enters.map((l) => l.lane)).size === r.enters.length,
+    ),
+    "two lines in one lane are one line as far as the reader is concerned",
+  )
+
+  // Where the branch left main. Every line still looking for this commit ends
+  // here, and all but one of them is drawn joining in.
+  const base = (await git(root, ["merge-base", firstParent ?? "", secondParent ?? ""])).trim()
+  check(
+    "the lines meet again at the fork point",
+    (rowFor(base)?.enters.length ?? 0) >= 2,
+    `${base.slice(0, 8)} — its own line plus at least one branch joining it`,
+  )
+
+  // Ref classification, which is the reason the log asks for --decorate=full.
+  // aide names its own branches `aide/task-NNNN`, so "a slash means a remote"
+  // would have labelled every branch aide made itself as somebody else's.
+  const refs = page.commits.flatMap((c) => c.refs)
+  const taskBranch = refs.find((r) => r.name === "aide/task-0001")
+  check("a slashed local branch is a branch", taskBranch?.kind === "branch", taskBranch?.kind ?? "missing")
+  check("the checked-out branch says so", refs.some((r) => r.name === "main" && r.head))
+  check("and the others do not", refs.find((r) => r.name === "rival")?.head === false)
+  check("no ref path leaks through", !refs.some((r) => r.name.startsWith("refs/")), "the UI prints these")
+
+  const first = page.commits.find((c) => c.parents.length === 0)
+  check("the first commit's line simply stops", rowFor(first?.sha ?? "")?.leaves.length === 0)
+
+  // Synthetic, because the case that decides whether a long history stays
+  // readable is one no throwaway repo makes by accident: a lane freed in the
+  // middle of the page, with a line still running to the left of it, has to be
+  // handed to the next tip that needs one.
+  const commit = (sha: string, parents: string[]) => ({
+    sha,
+    parents,
+    short: sha,
+    author: "",
+    authorEmail: "",
+    date: "",
+    refs: [],
+    tasks: [],
+    subject: "",
+  })
+  const synth = buildGraph([
+    commit("d", ["c", "b"]),
+    commit("c", ["a"]),
+    commit("b", ["a"]),
+    commit("a", ["a0"]),
+    commit("z", []),
+    commit("a0", []),
+  ])
+  check(
+    "a commit in the middle of a branch is joined to the one above it",
+    synth.graph[1]?.enters.length === 1 && synth.graph[1]?.enters[0]?.lane === synth.graph[1]?.lane,
+    "without this every dot is drawn with a gap over it",
+  )
+  check("the merged-in branch takes the lane beside it", synth.graph[2]?.lane === 1, `${synth.graph[2]?.lane}`)
+  check(
+    "both lines land on the shared parent",
+    synth.graph[3]?.enters.length === 2,
+    "one is the lane it continues in, the other is the branch joining it",
+  )
+  check(
+    "the freed lane is reused, not abandoned",
+    synth.graph[4]?.lane === 1,
+    "an unrelated tip must not push the graph one column further right forever",
+  )
+  check("so the whole page is two lanes wide", synth.lanes === 2, `${synth.lanes}`)
+}
 
 await removeWorktree(root, "0001")
 check("worktree removed", !existsSync(wt))

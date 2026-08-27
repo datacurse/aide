@@ -5,6 +5,7 @@ import type {
   ChatMode,
   ClientMessage,
   EffortLevel,
+  Health,
   RunEvent,
   ServerMessage,
 } from "@aide/protocol"
@@ -17,6 +18,8 @@ import { draftCommitMessage } from "./helper.js"
 import { writeJournalEntry } from "./journal.js"
 import { reconcileStrandedTasks } from "./reconcile.js"
 import { addProject, getProject, listProjects, removeProject } from "./registry.js"
+import * as repo from "./repo.js"
+import { BOOT_SOURCE_ID, currentSourceId, isStale } from "./source.js"
 import { getConversation, listConversations } from "./sessions.js"
 import { Supervisor } from "./supervisor.js"
 import { createTask, deleteTask, getTask, listTasks, patchTask, setStatus } from "./tasks.js"
@@ -95,6 +98,44 @@ app.addHook("onRequest", async (req, reply) => {
   if (refusal) return reply.code(403).send({ message: refusal })
 })
 
+// ---------------------------------------------------------------------------
+// Is this a safe moment to be restarted?
+//
+// The dev server restarts this process when its source changes, and the one
+// thing it must never do is restart it mid-write. That already happened once,
+// under `tsx watch`: landing a task rewrote `packages/daemon/src`, chokidar
+// fired, and the daemon was killed between `git merge` and the `setStatus`
+// after it — leaving the task stranded at `committed` with an orphaned worktree
+// and a reset socket that read as "the land failed".
+//
+// Runs and chat turns are visible to the supervisor and the chat lane. A land is
+// neither: it is one HTTP request that merges, removes a worktree and rewrites a
+// task file before it answers. So mutating requests are counted here, which is
+// the only place that sees them.
+//
+// Keyed by request id rather than a counter, because a counter has to be
+// decremented exactly once and this hook does not run for requests the origin
+// guard above already refused. A set cannot go negative.
+// ---------------------------------------------------------------------------
+
+const inFlightWrites = new Set<string>()
+let lastWriteFinishedAt = Date.now()
+
+const isWrite = (method: string) => method !== "GET" && method !== "HEAD" && method !== "OPTIONS"
+
+app.addHook("onRequest", async (req) => {
+  if (isWrite(req.method)) inFlightWrites.add(req.id)
+})
+
+const finishWrite = (id: string) => {
+  if (inFlightWrites.delete(id)) lastWriteFinishedAt = Date.now()
+}
+
+app.addHook("onResponse", async (req) => finishWrite(req.id))
+// A client that hangs up mid-request never gets a response, and without this its
+// id would sit in the set forever and the daemon would look permanently busy.
+app.addHook("onRequestAbort", async (req) => finishWrite(req.id))
+
 /** Which conversation, if any, currently has a chat turn running. */
 const activeChatRun = (sessionId: string): string | null =>
   chat.turnForSession(sessionId)?.runId ?? null
@@ -108,11 +149,23 @@ const notFound = (msg: string) => ({ statusCode: 404, error: "Not Found", messag
 // Projects
 // ---------------------------------------------------------------------------
 
-app.get("/api/health", async () => ({
+app.get("/api/health", async (): Promise<Health> => ({
   ok: true,
   taskModel: CONFIG.taskModel,
   maxConcurrentRuns: CONFIG.maxConcurrentRuns,
   maxBudgetUsd: CONFIG.maxBudgetUsd,
+  bootSourceId: BOOT_SOURCE_ID,
+  sourceId: await currentSourceId(),
+  stale: await isStale(),
+  supervised: process.env["AIDE_MANAGED"] === "1",
+  busy: {
+    // Queued counts as busy: shutdown cancels the queue, so restarting over a
+    // waiting task loses it just as surely as restarting over a running one.
+    runs: supervisor.runs().filter((r) => r.phase === "running" || r.phase === "queued").length,
+    chats: chat.turns().length,
+    writes: inFlightWrites.size,
+  },
+  idleMs: Date.now() - lastWriteFinishedAt,
 }))
 
 app.get("/api/projects", async () => {
@@ -386,6 +439,67 @@ app.get("/api/projects/:id/branch", async (req, reply) => {
 })
 
 // ---------------------------------------------------------------------------
+// The repository itself
+//
+// Read-only, and separate from the task-worktree routes above on purpose: those
+// show what an agent did, these show the repo it did it in. Split across three
+// requests because they have three different lifetimes — the summary is polled,
+// the working tree is re-read only while you are looking at it, and a commit is
+// immutable and therefore fetched once and never again.
+// ---------------------------------------------------------------------------
+
+const DEFAULT_LOG = 50
+const MAX_LOG = 500
+
+app.get("/api/projects/:id/git", async (req, reply) => {
+  const { id } = req.params as { id: string }
+  const { limit } = req.query as { limit?: string }
+  const project = await getProject(id)
+  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
+
+  const n = Math.min(Math.max(Number(limit) || DEFAULT_LOG, 1), MAX_LOG)
+  try {
+    return {
+      overview: await repo.overview(project.root),
+      dirty: repo.countDirt(await repo.status(project.root)),
+      log: await repo.log(project.root, n),
+    }
+  } catch (err) {
+    // A project whose directory was moved or deleted is the common case here,
+    // and it must not read as the daemon being broken.
+    return reply.code(502).send({
+      message: `could not read ${project.root}: ${err instanceof Error ? err.message : String(err)}`,
+    })
+  }
+})
+
+app.get("/api/projects/:id/git/working", async (req, reply) => {
+  const { id } = req.params as { id: string }
+  const project = await getProject(id)
+  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
+  try {
+    return await repo.workingTree(project.root)
+  } catch (err) {
+    return reply.code(502).send({
+      message: `could not read ${project.root}: ${err instanceof Error ? err.message : String(err)}`,
+    })
+  }
+})
+
+app.get("/api/projects/:id/git/commits/:sha", async (req, reply) => {
+  const { id, sha } = req.params as { id: string; sha: string }
+  const project = await getProject(id)
+  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
+  // 400 rather than 404 for a malformed sha: the difference between "that is not
+  // a sha" and "no commit by that name" is the one a stuck UI needs.
+  if (!repo.isSha(sha)) return reply.code(400).send({ message: `${sha} is not a commit sha` })
+
+  const found = await repo.commitDetail(project.root, sha)
+  if (!found) return reply.code(404).send(notFound(`no commit ${sha} in ${project.name}`))
+  return found
+})
+
+// ---------------------------------------------------------------------------
 // Conversations
 //
 // Read straight out of the SDK's own session store, not out of anything aide
@@ -485,6 +599,24 @@ app.post("/api/runs/:runId/chat-interrupt", async (req, reply) => {
   const { runId } = req.params as { runId: string }
   if (!chat.interrupt(runId)) return reply.code(404).send(notFound(`run ${runId} is not active`))
   return { interrupted: true }
+})
+
+/**
+ * A route this daemon has never heard of, explained.
+ *
+ * Fastify's own 404 says `Route GET:/api/projects/x/git not found`, which is
+ * true and useless: the overwhelmingly likely reason is that the browser is
+ * running code newer than this process. Saying so turns a bug report into a
+ * button press.
+ *
+ * Only for unmatched routes — the explicit 404s above, for a project or task
+ * that genuinely does not exist, never reach this.
+ */
+app.setNotFoundHandler(async (req, reply) => {
+  const message = (await isStale())
+    ? `this daemon booted before ${req.method} ${req.url} existed — its source has changed since, so restart it`
+    : `Route ${req.method}:${req.url} not found`
+  return reply.code(404).send({ statusCode: 404, error: "Not Found", message })
 })
 
 // ---------------------------------------------------------------------------

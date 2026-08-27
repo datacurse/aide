@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import type { Attachment, ChatMode, ContextUsage, EffortLevel, RunEvent } from "@aide/protocol"
 import { api, type ConversationSummary, type ConversationView } from "../api.js"
+import { useDoneChime } from "../chime.js"
 import { Composer } from "../Composer.js"
+import { discardDraft, draftKey, openNewChat, useDraft, type Draft } from "../drafts.js"
 import { Markdown } from "../Markdown.js"
 import { WorkingBar } from "../Working.js"
 import { Empty, PaneHeader } from "../ui.js"
@@ -35,6 +37,59 @@ const kindColor = (c: ConversationSummary) =>
   c.kind === "task" ? "text-diff-add-fg" : "text-syn-var"
 
 /**
+ * A chat that exists but has not spoken yet.
+ *
+ * It is a row like any other so that pressing "new" produces something you can
+ * see and come back to, rather than a blank pane you can only be in. Discardable
+ * because it is the one row nothing else will ever remove: a chat that never
+ * gets a first message never gets a session, so it would otherwise sit at the
+ * top of the list forever.
+ */
+function UnstartedRow({
+  draft,
+  selected,
+  onOpen,
+  onDiscard,
+}: {
+  draft: Draft
+  selected: boolean
+  onOpen: () => void
+  onDiscard: () => void
+}) {
+  const preview = draft.text.trim().split("\n", 1)[0] ?? ""
+  return (
+    <div
+      className={`group flex w-full items-center gap-2 px-3 py-1.5 font-sans ${
+        selected ? "bg-active text-white" : "text-fg-muted hover:bg-hover"
+      }`}
+    >
+      <button type="button" onClick={onOpen} className="flex min-w-0 flex-1 flex-col gap-0.5 text-left">
+        <div className="flex items-baseline gap-2">
+          <span className="shrink-0 text-[10px] text-syn-var">chat</span>
+          <span className="flex-1 truncate text-[13px]">{preview || "New chat"}</span>
+        </div>
+        <div className="flex items-baseline gap-2 text-[10px] text-fg-dim">
+          <span>not sent yet</span>
+          {draft.attachments.length > 0 && (
+            <span>
+              {draft.attachments.length} image{draft.attachments.length > 1 ? "s" : ""}
+            </span>
+          )}
+        </div>
+      </button>
+      <button
+        type="button"
+        onClick={onDiscard}
+        title="Discard this chat"
+        className="shrink-0 text-[11px] text-fg-dim opacity-0 group-hover:opacity-100 hover:text-err"
+      >
+        ✕
+      </button>
+    </div>
+  )
+}
+
+/**
  * The list of a project's conversations.
  *
  * Both kinds are shown. A `chat` is a session whose cwd is the project root —
@@ -51,10 +106,17 @@ export function ConversationList({
 }: {
   projectId: string | null
   selected: string | null
-  onSelect: (sessionId: string) => void
+  /** null selects the chat that has not started yet — the draft row. */
+  onSelect: (sessionId: string | null) => void
 }) {
   const [items, setItems] = useState<ConversationSummary[] | null>(null)
   const [error, setError] = useState<string | null>(null)
+  /**
+   * The chat you pressed "new" for. It has no session id and no file on disk, so
+   * the daemon cannot know about it and it cannot come back in `items` — until
+   * its first turn, this record is the entire conversation.
+   */
+  const unstarted = useDraft(projectId ? draftKey(projectId, null) : null)
 
   useEffect(() => {
     setItems(null)
@@ -78,7 +140,7 @@ export function ConversationList({
   if (!projectId) return <Empty>Select a project.</Empty>
   if (error) return <Empty>{error}</Empty>
   if (items === null) return <Empty>Reading the session store…</Empty>
-  if (items.length === 0) {
+  if (items.length === 0 && !unstarted) {
     return (
       <Empty>
         No conversations yet. Chats from Claude Code and the VS Code extension appear here too.
@@ -88,6 +150,14 @@ export function ConversationList({
 
   return (
     <div className="flex-1 overflow-auto py-1">
+      {unstarted && (
+        <UnstartedRow
+          draft={unstarted}
+          selected={selected === null}
+          onOpen={() => onSelect(null)}
+          onDiscard={() => discardDraft(unstarted.key)}
+        />
+      )}
       {items.map((c) => (
         <button
           key={c.sessionId}
@@ -249,6 +319,10 @@ export function ConversationPane({
   )
   const busy = runId !== null && !finished
 
+  // The point of the whole conversation pane is that you leave it running and
+  // come back. Something has to say when to come back.
+  useDoneChime(busy, runId)
+
   const usage = useMemo<ContextUsage | null>(() => {
     for (let i = turnEvents.length - 1; i >= 0; i -= 1) {
       const e = turnEvents[i]
@@ -301,6 +375,11 @@ export function ConversationPane({
   }) => {
     if (!projectId) return
     setError(null)
+    // A first message is sent before the conversation has an id, so for the next
+    // second or two the list has nothing to show for the thing now running —
+    // unless the draft row is there to stand in for it. Usually it already is;
+    // this covers arriving at a new chat without having pressed "new".
+    if (!sessionId) openNewChat(projectId)
     try {
       const { runId: id } = await api.chat(projectId, { sessionId, ...msg })
       setRunId(id)
@@ -354,19 +433,20 @@ export function ConversationPane({
                 )}
               </div>
             )}
-            <Transcript events={shown} onPermission={busy ? answer : undefined} />
-            {busy && (draft.thinking || draft.text) && (
-              <div className="space-y-1">
-                {draft.thinking && (
-                  <p className="px-1 text-syn-comment italic">{draft.thinking}</p>
-                )}
-                {draft.text && (
-                  <div className="px-1">
-                    <Markdown text={draft.text} />
-                  </div>
-                )}
-              </div>
-            )}
+            <Transcript events={shown} onPermission={busy ? answer : undefined}>
+              {busy && (draft.thinking || draft.text) ? (
+                <>
+                  {draft.thinking && (
+                    <p className="px-1 text-syn-comment italic">{draft.thinking}</p>
+                  )}
+                  {draft.text && (
+                    <div className="px-1">
+                      <Markdown text={draft.text} />
+                    </div>
+                  )}
+                </>
+              ) : null}
+            </Transcript>
           </>
         )}
         {error && <p className="mt-2 font-sans text-[11px] text-err">{error}</p>}
@@ -401,6 +481,7 @@ export function ConversationPane({
           busy={busy}
           usage={usage}
           sessionId={sessionId}
+          draftKey={draftKey(projectId, sessionId)}
           inheritedMode={summary?.lastMode ?? null}
           onSend={(msg) => void send(msg)}
           onInterrupt={() => {

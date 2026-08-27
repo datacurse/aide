@@ -22,6 +22,24 @@ export interface ModelSpend {
 }
 
 /**
+ * A screenshot the human attached to a message.
+ *
+ * Carried inline as base64, the same way it was pasted and the same way the
+ * session store keeps it. That does mean a run log holds a second copy of the
+ * bytes, which is a real cost and was weighed: the alternative — serving them
+ * back out of the session file by reference — has no answer for the live turn,
+ * because the browser is showing the message before the SDK has written the
+ * transcript. One representation that works in both directions beats two that
+ * each work half the time.
+ */
+export interface MessageImage {
+  /** e.g. "image/png". */
+  mediaType: string
+  /** Base64, without the data: URL prefix. */
+  data: string
+}
+
+/**
  * What a worker emits. The daemon stamps runId/seq/ts on append, so workers never
  * have to know their own sequence number.
  */
@@ -75,8 +93,12 @@ export type RunEventBody =
    * until now: `task.prompt` was on the wire and rendered nowhere, so a
    * transcript read as an agent talking to itself. A replayed conversation has
    * one per turn, and they are most of what makes it a conversation.
+   *
+   * `images` is what was pasted alongside the text. Absent rather than empty
+   * when there were none: every transcript written before attachments existed
+   * is that case, and the reader has to keep working on them.
    */
-  | { type: "user.message"; text: string }
+  | { type: "user.message"; text: string; images?: MessageImage[] }
   /** `parentToolUseId` is non-null for subagent output, null for the main loop. */
   | { type: "assistant.text"; text: string; parentToolUseId: string | null }
   | { type: "assistant.thinking"; text: string; parentToolUseId: string | null }

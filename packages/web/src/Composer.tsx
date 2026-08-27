@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react"
+import { readDraft, saveDraft, useDraft } from "./drafts.js"
 import { useRemembered } from "./useRemembered.js"
 import {
   CHAT_MODES,
@@ -27,6 +28,9 @@ const isEffort = (v: unknown): v is EffortLevel =>
   typeof v === "string" && (EFFORT_LEVELS as readonly string[]).includes(v)
 
 let attachmentSeq = 0
+
+/** One array for every empty box, so the identity is stable across renders. */
+const NOTHING_ATTACHED: Attachment[] = []
 
 /** Strip the `data:image/png;base64,` prefix — the API wants the payload alone. */
 function splitDataUrl(dataUrl: string): { mediaType: string; data: string } | null {
@@ -161,6 +165,7 @@ export function Composer({
   busy,
   usage,
   sessionId,
+  draftKey,
   inheritedMode,
   onSend,
   onInterrupt,
@@ -169,6 +174,8 @@ export function Composer({
   usage: ContextUsage | null
   /** Which conversation is open; null for a new one. Scopes `inheritedMode`. */
   sessionId: string | null
+  /** Where the unsent contents of the box live. See drafts.ts. */
+  draftKey: string
   /** The mode this conversation was last driven at, or null if unknown. */
   inheritedMode: ChatMode | null
   onSend: (msg: {
@@ -179,8 +186,18 @@ export function Composer({
   }) => void
   onInterrupt: () => void
 }) {
-  const [text, setText] = useState("")
-  const [attachments, setAttachments] = useState<Attachment[]>([])
+  /**
+   * The box reads straight out of the draft store rather than keeping its own
+   * copy. Component state is what evaporated a half-written message on every
+   * reload, and a copy synced against the store would need to decide, on each
+   * conversation switch, which of the two was the newer — a race with no right
+   * answer. There is only one value, and it is the one that survives.
+   */
+  const draft = useDraft(draftKey)
+  const text = draft?.text ?? ""
+  const attachments = draft?.attachments ?? NOTHING_ATTACHED
+  const edit = (patch: { text?: string; attachments?: Attachment[] }) =>
+    saveDraft(draftKey, { text, attachments, ...patch })
   // Remembered, not reset. Picking Auto and then having the next page load put
   // you back on Manual is how a chat ends up asking permission for every command
   // while you are certain you already told it not to.
@@ -219,8 +236,7 @@ export function Composer({
   const send = () => {
     if (!canSend) return
     onSend({ text: text.trim(), attachments, mode, effort })
-    setText("")
-    setAttachments([])
+    edit({ text: "", attachments: [] })
     setNote(null)
   }
 
@@ -232,7 +248,13 @@ export function Composer({
     const read = await Promise.all(
       images.filter((f) => f.size <= MAX_ATTACHMENT_BYTES).map(readAsAttachment),
     )
-    setAttachments((prev) => [...prev, ...read.filter((a): a is Attachment => a !== null)])
+    const added = read.filter((a): a is Attachment => a !== null)
+    if (added.length === 0) return
+    // Re-read the box rather than trusting what this closure captured: decoding
+    // is async, so anything typed — or a second image pasted — while it ran
+    // would be overwritten by the stale copy.
+    const now = readDraft(draftKey)
+    saveDraft(draftKey, { text: now.text, attachments: [...now.attachments, ...added] })
   }
 
   return (
@@ -252,7 +274,7 @@ export function Composer({
               {a.mediaType.replace("image/", "")} {kb(a.bytes)}
               <button
                 type="button"
-                onClick={() => setAttachments((prev) => prev.filter((x) => x.id !== a.id))}
+                onClick={() => edit({ attachments: attachments.filter((x) => x.id !== a.id) })}
                 className="text-fg-dim hover:text-err"
                 title="Remove"
               >
@@ -266,7 +288,7 @@ export function Composer({
       <textarea
         ref={area}
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => edit({ text: e.target.value })}
         // Paste is the whole point of the attachment feature: a screenshot goes
         // straight from the clipboard into the turn, no file dialog.
         onPaste={(e) => {

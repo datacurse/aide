@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useState } from "react"
-import type { RunEvent, RunStatus, TaskStatus } from "@aide/protocol"
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import type { MessageImage, RunEvent, RunStatus, TaskStatus } from "@aide/protocol"
 import { api, type CommitResult, type DiffView, type TaskView } from "../api.js"
+import { useDoneChime } from "../chime.js"
+import { Diff } from "../Diff.js"
 import { Markdown } from "../Markdown.js"
 import { Button, Empty, PaneHeader, STATUS_STYLE, money } from "../ui.js"
 import { useRunStream, type StreamState } from "../useRunStream.js"
@@ -38,6 +40,13 @@ interface PermissionLine {
   allowed: boolean | null
   reason: string
 }
+/** What the human said, and whatever they pasted with it. */
+interface UserLine {
+  kind: "user"
+  seq: number
+  text: string
+  images: MessageImage[]
+}
 interface OutcomeLine {
   kind: "outcome"
   seq: number
@@ -53,7 +62,7 @@ type Line =
   | { kind: "text"; seq: number; text: string; nested: boolean }
   | { kind: "thinking"; seq: number; text: string }
   | { kind: "queued"; seq: number; position: number }
-  | { kind: "user"; seq: number; text: string }
+  | UserLine
   | BootstrapLine
   | { kind: "denied"; seq: number; name: string; reason: string }
   | PermissionLine
@@ -96,7 +105,7 @@ function toLines(events: RunEvent[]): Line[] {
   for (const e of events) {
     switch (e.type) {
       case "user.message":
-        lines.push({ kind: "user", seq: e.seq, text: e.text })
+        lines.push({ kind: "user", seq: e.seq, text: e.text, images: e.images ?? [] })
         break
       case "assistant.text":
         lines.push({ kind: "text", seq: e.seq, text: e.text, nested: !!e.parentToolUseId })
@@ -259,6 +268,75 @@ function ToolRow({ line }: { line: ToolLine }) {
           {line.summary ? `\n\n--- result ---\n${line.summary}` : ""}
         </pre>
       )}
+    </div>
+  )
+}
+
+/**
+ * The question, pinned.
+ *
+ * `position: sticky` rather than a copy rendered into a header bar: there is one
+ * element, so it cannot disagree with itself, and the browser hands off from one
+ * question to the next for free — the next one paints over this one as it
+ * arrives, because a later sibling with the same z-index wins. The z-index is
+ * needed for the other half of that: without it every ordinary line AFTER this
+ * block paints over the pinned copy, and the answer scrolls through it rather
+ * than under it.
+ *
+ * Clipped when collapsed for a reason worth naming: a question is usually a
+ * sentence, but sometimes it is thirty lines of pasted log, and pinning all of
+ * that leaves no pane left to read the answer in.
+ */
+function UserRow({ line }: { line: UserLine }) {
+  const [open, setOpen] = useState(false)
+  const [clipped, setClipped] = useState(false)
+  const body = useRef<HTMLDivElement>(null)
+
+  // Measured, not guessed from the length of the text: whether it overflows
+  // depends on how wide the pane is and on whether a screenshot came with it,
+  // and a "more" button that reveals nothing is worse than no button.
+  useLayoutEffect(() => {
+    const el = body.current
+    if (!el || open) return
+    setClipped(el.scrollHeight > el.clientHeight + 1)
+  }, [line.text, line.images.length, open])
+
+  return (
+    <div className="sticky top-0 z-10 my-2 border-b-line border-l-syn-var border-b border-l-2 bg-chrome px-3 py-1.5">
+      <div className="mb-0.5 flex items-baseline gap-2">
+        <span className="font-sans text-[10px] tracking-wide text-syn-var uppercase">you</span>
+        {(clipped || line.images.length > 0) && (
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            className="ml-auto shrink-0 font-sans text-[11px] text-fg-dim hover:text-fg"
+          >
+            {open ? "collapse" : "expand"}
+          </button>
+        )}
+      </div>
+      <div ref={body} className={open ? "" : "max-h-24 overflow-hidden"}>
+        {line.images.length > 0 && (
+          <div className="mb-1.5 flex flex-wrap gap-1.5">
+            {line.images.map((img, i) => (
+              <button
+                key={i}
+                type="button"
+                onClick={() => setOpen((v) => !v)}
+                title={open ? "Shrink it" : "Show it full size"}
+                className={open ? "cursor-zoom-out" : "cursor-zoom-in"}
+              >
+                <img
+                  src={`data:${img.mediaType};base64,${img.data}`}
+                  alt="pasted screenshot"
+                  className={`w-auto rounded-sm border border-line ${open ? "max-h-80" : "h-12"}`}
+                />
+              </button>
+            ))}
+          </div>
+        )}
+        <Markdown text={line.text} />
+      </div>
     </div>
   )
 }
@@ -530,6 +608,101 @@ function AcceptBar({
 }
 
 
+/** One line of the transcript, as its own function so the grouping below can
+ * render lines without owning a copy of this switch. */
+function renderLine(
+  line: Line,
+  onPermission?: (requestId: string, allowed: boolean) => void,
+): ReactNode {
+  if (line.kind === "tool") return <ToolRow key={line.seq} line={line} />
+  if (line.kind === "bootstrap") return <BootstrapRow key={line.seq} line={line} />
+  if (line.kind === "thinking")
+    return (
+      <p key={line.seq} className="px-1 break-words whitespace-pre-wrap text-syn-comment italic">
+        {line.text}
+      </p>
+    )
+  if (line.kind === "queued")
+    return (
+      <p key={line.seq} className="px-1 text-fg-dim">
+        ◦ queued{line.position > 1 ? ` behind ${line.position - 1}` : ""}
+      </p>
+    )
+  if (line.kind === "user") return <UserRow key={line.seq} line={line} />
+  if (line.kind === "permission")
+    return <PermissionRow key={line.seq} line={line} onAnswer={onPermission} />
+  if (line.kind === "denied")
+    return (
+      <p key={line.seq} className="px-1 break-words text-warn">
+        ✗ denied {line.name} — {line.reason}
+      </p>
+    )
+  if (line.kind === "retry")
+    return (
+      <p key={line.seq} className="px-1 break-words text-warn">
+        ↻ {line.text}
+      </p>
+    )
+  if (line.kind === "error")
+    return (
+      <p key={line.seq} className="px-1 break-words text-err" title={line.text}>
+        ! {humanizeError(line.text)}
+      </p>
+    )
+  if (line.kind === "outcome") {
+    const outcome = describeOutcome(line)
+    return (
+      <p
+        key={line.seq}
+        title={`SDK result subtype: ${line.subtype}`}
+        className={`mt-3 border-t border-line px-1 pt-2 ${outcome.className}`}
+      >
+        ● {outcome.label}
+        <span className="text-fg-dim">
+          {" — "}
+          {line.turns} turns · {(line.ms / 1000).toFixed(1)}s · ~{money(line.cost)} est.
+        </span>
+      </p>
+    )
+  }
+  return (
+    <div
+      key={line.seq}
+      className={`px-1 ${line.nested ? "ml-4 border-l border-line pl-3" : ""}`}
+    >
+      <Markdown text={line.text} />
+    </div>
+  )
+}
+
+/**
+ * The lines, cut into one box per question.
+ *
+ * This is what makes the pinned question hand over cleanly, and it is not
+ * cosmetic: a sticky element sticks inside its own parent and nowhere else. In
+ * one flat list every question would stay pinned for the rest of the
+ * conversation, stacked behind the newest one — and since the boxes are
+ * different heights, a taller old question would leave a strip of itself showing
+ * under the new one. A box per exchange means each question is pushed out by the
+ * next, which is the behaviour you already know from an editor.
+ *
+ * Anything before the first question — a task run's bootstrap row, say — is its
+ * own leading box, so it is never adopted by a question it came before.
+ */
+function groupByQuestion(lines: Line[]): Line[][] {
+  const groups: Line[][] = []
+  let current: Line[] | null = null
+  for (const line of lines) {
+    if (line.kind === "user" || current === null) {
+      current = [line]
+      groups.push(current)
+    } else {
+      current.push(line)
+    }
+  }
+  return groups
+}
+
 /**
  * The transcript, as a component rather than as part of the run pane.
  *
@@ -541,91 +714,36 @@ function AcceptBar({
 export function Transcript({
   events,
   onPermission,
+  children,
 }: {
   events: RunEvent[]
   /** Present only for a live chat turn; a replayed transcript cannot be answered. */
   onPermission?: (requestId: string, allowed: boolean) => void
+  /**
+   * The reply still streaming in, which has no event of its own yet.
+   *
+   * Taken as children rather than rendered after this component so it lands
+   * inside the LAST question's box. Outside it, scrolling into the streaming
+   * reply released the pinned question — precisely when the answer is arriving
+   * and you most want to see what it is answering.
+   */
+  children?: ReactNode
 }) {
-  const lines = useMemo(() => toLines(events), [events])
+  const groups = useMemo(() => groupByQuestion(toLines(events)), [events])
 
-  if (lines.length === 0) return <Empty>Nothing in this transcript.</Empty>
+  if (groups.length === 0) {
+    if (!children) return <Empty>Nothing in this transcript.</Empty>
+    return <div className="space-y-1">{children}</div>
+  }
   return (
-            <div className="space-y-1">
-              {lines.map((line) => {
-                if (line.kind === "tool") return <ToolRow key={line.seq} line={line} />
-                if (line.kind === "bootstrap") return <BootstrapRow key={line.seq} line={line} />
-                if (line.kind === "thinking")
-                  return (
-                    <p key={line.seq} className="px-1 break-words whitespace-pre-wrap text-syn-comment italic">
-                      {line.text}
-                    </p>
-                  )
-                if (line.kind === "queued")
-                  return (
-                    <p key={line.seq} className="px-1 text-fg-dim">
-                      ◦ queued{line.position > 1 ? ` behind ${line.position - 1}` : ""}
-                    </p>
-                  )
-                if (line.kind === "user")
-                  return (
-                    <div
-                      key={line.seq}
-                      className="my-2 border-l-2 border-syn-var bg-chrome px-3 py-1.5"
-                    >
-                      <div className="mb-0.5 font-sans text-[10px] tracking-wide text-syn-var uppercase">
-                        you
-                      </div>
-                      <Markdown text={line.text} />
-                    </div>
-                  )
-                if (line.kind === "permission")
-                  return (
-                    <PermissionRow key={line.seq} line={line} onAnswer={onPermission} />
-                  )
-                if (line.kind === "denied")
-                  return (
-                    <p key={line.seq} className="px-1 break-words text-warn">
-                      ✗ denied {line.name} — {line.reason}
-                    </p>
-                  )
-                if (line.kind === "retry")
-                  return (
-                    <p key={line.seq} className="px-1 break-words text-warn">
-                      ↻ {line.text}
-                    </p>
-                  )
-                if (line.kind === "error")
-                  return (
-                    <p key={line.seq} className="px-1 break-words text-err" title={line.text}>
-                      ! {humanizeError(line.text)}
-                    </p>
-                  )
-                if (line.kind === "outcome") {
-                  const outcome = describeOutcome(line)
-                  return (
-                    <p
-                      key={line.seq}
-                      title={`SDK result subtype: ${line.subtype}`}
-                      className={`mt-3 border-t border-line px-1 pt-2 ${outcome.className}`}
-                    >
-                      ● {outcome.label}
-                      <span className="text-fg-dim">
-                        {" — "}
-                        {line.turns} turns · {(line.ms / 1000).toFixed(1)}s · ~{money(line.cost)} est.
-                      </span>
-                    </p>
-                  )
-                }
-                return (
-                  <div
-                    key={line.seq}
-                    className={`px-1 ${line.nested ? "ml-4 border-l border-line pl-3" : ""}`}
-                  >
-                    <Markdown text={line.text} />
-                  </div>
-                )
-              })}
-            </div>
+    <div className="space-y-1">
+      {groups.map((group, i) => (
+        <section key={group[0]?.seq ?? i} className="space-y-1">
+          {group.map((line) => renderLine(line, onPermission))}
+          {i === groups.length - 1 && children}
+        </section>
+      ))}
+    </div>
   )
 }
 
@@ -669,6 +787,12 @@ export function RunPane({
     [events],
   ) as Extract<RunEvent, { type: "run.finished" }> | undefined
   const isActive = !!task?.activeRunId
+
+  // A task run is the case the chime exists for: nobody watches a worktree
+  // build for six minutes. `isActive` comes from the daemon rather than from a
+  // terminal event, so a run that died without logging one still rings.
+  useDoneChime(isActive, runId)
+
   const outcome = finished
     ? describeOutcome({
         kind: "outcome",
@@ -760,28 +884,7 @@ export function RunPane({
           ) : diff.diff.trim() === "" ? (
             <Empty>No changes in the worktree yet.</Empty>
           ) : (
-            <pre className="w-full overflow-x-auto whitespace-pre">
-              {diff.diff.split("\n").map((l, i) => (
-                <div
-                  key={i}
-                  className={
-                    l.startsWith("+++") || l.startsWith("---")
-                      ? "text-fg-muted"
-                      : l.startsWith("+")
-                        ? "bg-diff-add text-diff-add-fg"
-                        : l.startsWith("-")
-                          ? "bg-diff-del text-diff-del-fg"
-                          : l.startsWith("@@")
-                            ? "text-syn-comment"
-                            : l.startsWith("diff --git")
-                              ? "mt-3 text-syn-var"
-                              : "text-fg-muted"
-                  }
-                >
-                  {l || " "}
-                </div>
-              ))}
-            </pre>
+            <Diff patch={diff.diff} />
           )
         ) : !runId ? (
           <Empty>This task has not run yet.</Empty>

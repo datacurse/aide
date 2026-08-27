@@ -1,0 +1,425 @@
+import { stat } from "node:fs/promises"
+import { join } from "node:path"
+import type {
+  GitCommit,
+  GitCommitDetail,
+  GitDirty,
+  GitFileChange,
+  GitFileState,
+  GitGraphRow,
+  GitLane,
+  GitLog,
+  GitOverview,
+  GitRef,
+  GitWorkingTree,
+} from "@aide/protocol"
+import { git, gitDiffing, gitOr } from "./git.js"
+
+/**
+ * Reading a project's own repository — branch, history, and whatever is sitting
+ * uncommitted in the working tree.
+ *
+ * Strictly read-only, and that is a rule rather than a description. The obvious
+ * way to make untracked files appear in a diff is `git add -A -N`, which is what
+ * `worktreeDiff` does — but a task worktree belongs to aide and the project's
+ * checkout belongs to the human. Staging intent-to-add across someone's own
+ * working tree because they opened a read-only view is aide editing state it was
+ * only asked to show. New files are diffed with `--no-index` against /dev/null
+ * instead, which touches nothing.
+ */
+
+// ---------------------------------------------------------------------------
+// Overview
+// ---------------------------------------------------------------------------
+
+export async function overview(root: string): Promise<GitOverview> {
+  // "HEAD" rather than a name is git's way of saying detached, and a detached
+  // checkout is a real state a project can be in — mid-bisect, mid-rebase — not
+  // an error to hide.
+  const named = await gitOr("HEAD", async () =>
+    (await git(root, ["rev-parse", "--abbrev-ref", "HEAD"])).trim(),
+  )
+  const branch = named === "HEAD" || named === "" ? null : named
+
+  // Fails in a repo with no commits yet, which is exactly what `unborn` means.
+  const head = await gitOr<string | null>(null, async () =>
+    (await git(root, ["rev-parse", "--short", "HEAD"])).trim(),
+  )
+
+  const upstream = await gitOr<string | null>(null, async () =>
+    (await git(root, ["rev-parse", "--abbrev-ref", "@{upstream}"])).trim(),
+  )
+
+  // `--left-right --count` answers "ahead<tab>behind" in one call. Asked for
+  // directly rather than read off `git status --branch`'s header, because that
+  // header drops the counts entirely when they are zero, so its absence means
+  // both "in step" and "no upstream" and the two are not the same thing.
+  const [ahead, behind] = await gitOr<[number, number]>([0, 0], async () => {
+    const out = await git(root, ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
+    const [a, b] = out.trim().split(/\s+/)
+    return [Number(a) || 0, Number(b) || 0]
+  })
+
+  return { root, branch, head, upstream, ahead, behind, unborn: head === null }
+}
+
+// ---------------------------------------------------------------------------
+// Working tree
+// ---------------------------------------------------------------------------
+
+const STATE: Record<string, GitFileState> = {
+  A: "added",
+  M: "modified",
+  D: "deleted",
+  R: "renamed",
+  C: "copied",
+  T: "type-changed",
+  "?": "untracked",
+  "!": "ignored",
+  U: "conflicted",
+}
+
+/** git's unmerged codes: anything with a U, plus the two same-letter pairs. */
+const isConflicted = (code: string) => code.includes("U") || code === "AA" || code === "DD"
+
+/**
+ * `--porcelain=v1 -z` rather than the human format, because the human one quotes
+ * and escapes any path with a space or a non-ASCII byte, and unpicking C string
+ * literals by hand is a bug waiting for the first file with a space in its name.
+ * `-z` emits raw bytes with NUL terminators, and a rename spends two fields: the
+ * new path, then the old one.
+ */
+export function parseStatus(z: string): GitFileChange[] {
+  const fields = z.split("\0")
+  const files: GitFileChange[] = []
+
+  for (let i = 0; i < fields.length; i++) {
+    const entry = fields[i]
+    if (!entry) continue
+    const code = entry.slice(0, 2)
+    const path = entry.slice(3)
+    if (!path) continue
+
+    let from: string | null = null
+    if (code[0] === "R" || code[0] === "C") {
+      // The old path is its own NUL-terminated field, immediately after.
+      from = fields[++i] ?? null
+    }
+
+    const conflicted = isConflicted(code)
+    files.push({
+      path,
+      from,
+      code,
+      staged: conflicted ? "conflicted" : (STATE[code[0] ?? " "] ?? null),
+      unstaged: conflicted ? "conflicted" : (STATE[code[1] ?? " "] ?? null),
+    })
+  }
+  return files
+}
+
+export function countDirt(files: GitFileChange[]): GitDirty {
+  const dirty: GitDirty = { staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }
+  for (const f of files) {
+    if (f.code === "??") dirty.untracked++
+    else if (isConflicted(f.code)) dirty.conflicted++
+    else {
+      if (f.staged) dirty.staged++
+      if (f.unstaged) dirty.unstaged++
+    }
+  }
+  return dirty
+}
+
+export async function status(root: string): Promise<GitFileChange[]> {
+  // `--untracked-files=all` so new files are listed one by one. The default
+  // collapses them into a bare directory name, which cannot be diffed and reads
+  // in the UI as one mystery entry instead of the six files it stands for.
+  const z = await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+  return parseStatus(z)
+}
+
+/**
+ * How much untracked content is worth rendering inline. A stray build artefact
+ * or an unignored lockfile is megabytes of noise, and a view that hangs on one
+ * is worse than a view that says it skipped it.
+ */
+const UNTRACKED_FILE_LIMIT = 50
+const UNTRACKED_BYTE_LIMIT = 512 * 1024
+
+export async function workingTree(root: string): Promise<GitWorkingTree> {
+  const files = await status(root)
+  const view = await overview(root)
+
+  // `diff HEAD` is staged and unstaged together — everything between the last
+  // commit and the files on disk, which is the question this view exists to
+  // answer. Before the first commit there is no HEAD to compare against, so the
+  // index is the only baseline there is.
+  const tracked = await gitOr("", () =>
+    git(root, view.unborn ? ["diff", "--cached"] : ["diff", "HEAD"]),
+  )
+
+  const parts = tracked.trim() ? [tracked.trimEnd()] : []
+  const omitted: { path: string; why: string }[] = []
+  let rendered = 0
+
+  for (const f of files) {
+    if (f.code !== "??") continue
+    if (rendered >= UNTRACKED_FILE_LIMIT) {
+      omitted.push({ path: f.path, why: `over ${UNTRACKED_FILE_LIMIT} new files` })
+      continue
+    }
+    let size = 0
+    try {
+      size = (await stat(join(root, f.path))).size
+    } catch {
+      // Gone between the status call and this one. Not an error, just gone.
+      omitted.push({ path: f.path, why: "disappeared while reading" })
+      continue
+    }
+    if (size > UNTRACKED_BYTE_LIMIT) {
+      omitted.push({ path: f.path, why: `${Math.round(size / 1024)} KB, too large to inline` })
+      continue
+    }
+    // git understands /dev/null on Windows too — it matches the literal string
+    // rather than resolving it through the OS — and it makes git emit a real
+    // `new file mode` header, so new files land in the same renderer as every
+    // other patch instead of needing a second one.
+    const patch = await gitOr("", () =>
+      gitDiffing(root, ["diff", "--no-index", "--", "/dev/null", f.path]),
+    )
+    if (patch.trim()) {
+      parts.push(patch.trimEnd())
+      rendered++
+    }
+  }
+
+  return { overview: view, files, diff: parts.join("\n"), omitted }
+}
+
+// ---------------------------------------------------------------------------
+// History
+// ---------------------------------------------------------------------------
+
+const FIELDS = [
+  "%H",
+  "%h",
+  "%an",
+  "%ae",
+  "%aI",
+  "%D",
+  "%P",
+  // Comma-separated explicitly: the trailers atom separates with a NEWLINE by
+  // default, so a commit carrying two Aide-Task trailers would split across two
+  // records and desynchronise every field after it.
+  "%(trailers:key=Aide-Task,valueonly,separator=%x2c)",
+  "%s",
+] as const
+
+// Unit separator between fields. Nothing git puts in these can contain one, and
+// unlike a space or a pipe it needs no escaping for subjects that contain either.
+const FORMAT = `--format=${FIELDS.join("%x1f")}`
+
+/**
+ * `HEAD -> refs/heads/main, refs/remotes/origin/main, tag: refs/tags/v1`.
+ *
+ * Read from the full form on purpose — see GitRef. Anything git decorates with
+ * that is not a ref path (`grafted`, `replaced`) is kept as it came rather than
+ * dropped: an unexplained word next to a commit is a question, and a commit
+ * quietly missing its decoration is a wrong answer.
+ */
+function parseRefs(raw: string): GitRef[] {
+  const out: GitRef[] = []
+  for (const piece of raw.split(",").map((r) => r.trim()).filter(Boolean)) {
+    let rest = piece
+    let head = false
+    if (rest.startsWith("HEAD -> ")) {
+      head = true
+      rest = rest.slice(8)
+    }
+    if (rest === "HEAD") {
+      // Detached: HEAD is at this commit and no branch is.
+      out.push({ name: "HEAD", kind: "branch", head: true })
+      continue
+    }
+    if (rest.startsWith("tag: ")) rest = rest.slice(5)
+    if (rest.startsWith("refs/heads/")) out.push({ name: rest.slice(11), kind: "branch", head })
+    else if (rest.startsWith("refs/remotes/")) out.push({ name: rest.slice(13), kind: "remote", head })
+    else if (rest.startsWith("refs/tags/")) out.push({ name: rest.slice(10), kind: "tag", head })
+    else out.push({ name: rest, kind: "branch", head })
+  }
+  return out
+}
+
+function parseCommit(line: string): GitCommit | null {
+  const f = line.split("\x1f")
+  const [sha, short, author, authorEmail, date, refs, parents, tasks, ...rest] = f
+  if (!sha || !short) return null
+  return {
+    sha,
+    short,
+    author: author ?? "",
+    authorEmail: authorEmail ?? "",
+    date: date ?? "",
+    refs: parseRefs(refs ?? ""),
+    parents: (parents ?? "").split(" ").filter(Boolean),
+    tasks: (tasks ?? "").split(",").map((t) => t.trim()).filter(Boolean),
+    // Rejoined rather than taken as one field, so a subject that somehow does
+    // contain a separator truncates instead of losing the commit entirely.
+    subject: rest.join("\x1f"),
+  }
+}
+
+/**
+ * Lanes for a page of history: the drawn graph, minus the drawing.
+ *
+ * A track is a line on its way down the page, and what it holds is the sha it
+ * is still LOOKING for. A commit takes over the first track waiting for it —
+ * that is what makes a branch one unbroken line rather than a new column per
+ * commit — and any other track waiting for the same sha is a second child, so
+ * it ends here and is drawn merging in.
+ *
+ * Two rules earn their keep and are easy to get wrong:
+ *
+ * - The first parent inherits the commit's own lane AND its colour. Give it a
+ *   fresh lane and `main` changes colour and column at every merge, which is
+ *   the difference between a graph you can follow and a plate of spaghetti.
+ * - A lane freed by a merge is reused, but only ever from the left. Without
+ *   that, a busy repo drifts rightwards forever and the column grows to fit
+ *   lanes that are all empty.
+ *
+ * A parent outside the page is not a special case: its track stays open and the
+ * row draws a line leaving the bottom edge, which is what "history continues
+ * past here" looks like.
+ */
+export function buildGraph(commits: GitCommit[]): { graph: GitGraphRow[]; lanes: number } {
+  interface Track {
+    /** The sha this line is descending towards. */
+    sha: string
+    color: number
+  }
+  const tracks: (Track | null)[] = []
+  const graph: GitGraphRow[] = []
+  let nextColor = 0
+  let lanes = 0
+
+  /** Leftmost gap, else a new column on the right. */
+  const free = () => {
+    const gap = tracks.indexOf(null)
+    return gap === -1 ? tracks.length : gap
+  }
+
+  for (const commit of commits) {
+    let lane = tracks.findIndex((t) => t?.sha === commit.sha)
+    // Nothing was waiting for it: a branch tip, or a commit whose children are
+    // above the top of this page. Either way nothing is drawn above the dot.
+    const tip = lane === -1
+    if (tip) {
+      lane = free()
+      tracks[lane] = { sha: commit.sha, color: nextColor++ }
+    }
+    const color = tracks[lane]?.color ?? 0
+
+    const enters: GitLane[] = tip ? [] : [{ lane, color }]
+    for (let i = 0; i < tracks.length; i++) {
+      const t = tracks[i]
+      if (i !== lane && t?.sha === commit.sha) {
+        enters.push({ lane: i, color: t.color })
+        tracks[i] = null
+      }
+    }
+
+    // Read before the parents are placed, so a lane this commit is about to open
+    // is not also claimed to be running past it.
+    const through: GitLane[] = []
+    for (let i = 0; i < tracks.length; i++) {
+      const t = tracks[i]
+      if (i !== lane && t) through.push({ lane: i, color: t.color })
+    }
+
+    const leaves: GitLane[] = []
+    const [first, ...rest] = commit.parents
+    if (first) {
+      tracks[lane] = { sha: first, color }
+      leaves.push({ lane, color })
+    } else {
+      tracks[lane] = null
+    }
+    for (const parent of rest) {
+      const open = tracks.findIndex((t) => t?.sha === parent)
+      const existing = open === -1 ? null : tracks[open]
+      if (existing) {
+        // Two branches with the same parent share one line down to it.
+        leaves.push({ lane: open, color: existing.color })
+        continue
+      }
+      const l = free()
+      const c = nextColor++
+      tracks[l] = { sha: parent, color: c }
+      leaves.push({ lane: l, color: c })
+    }
+
+    lanes = Math.max(lanes, lane + 1)
+    for (const l of [...through, ...enters, ...leaves]) lanes = Math.max(lanes, l.lane + 1)
+    graph.push({ sha: commit.sha, lane, color, through, enters, leaves })
+
+    // Trailing empties would otherwise make `free()` walk further every row.
+    while (tracks.length > 0 && tracks[tracks.length - 1] === null) tracks.pop()
+  }
+
+  return { graph, lanes }
+}
+
+export async function log(root: string, limit: number): Promise<GitLog> {
+  // `--topo-order` because the default is date order, and date order interleaves
+  // two branches by when someone happened to commit — drawing a line that
+  // crosses itself for no reason a reader can see. `--branches` because a graph
+  // of one branch is a straight line: aide's own task branches, and the merges
+  // `land` makes, are the shape this view exists to show. HEAD is named as well,
+  // so a detached checkout still appears in its own history.
+  //
+  // One extra, so "is there more history" is an answer rather than a guess made
+  // from whether the page came back full.
+  const out = await gitOr("", () =>
+    git(root, ["log", `-n${limit + 1}`, "--topo-order", "--decorate=full", FORMAT, "HEAD", "--branches"]),
+  )
+  const all = out.split("\n").map(parseCommit).filter((c): c is GitCommit => c !== null)
+  const commits = all.slice(0, limit)
+  // Built from the page rather than from `all`: the one extra commit exists to
+  // answer "is there more", and letting it open a lane would draw a line for a
+  // row that is not on the screen.
+  const { graph, lanes } = buildGraph(commits)
+  return { commits, more: all.length > limit, graph, lanes }
+}
+
+/**
+ * A sha, and nothing that could be mistaken for an option.
+ *
+ * This value arrives from the URL. Without the check, a hash of
+ * `--upload-pack=<anything>` reaches `git show` as a flag rather than as a
+ * revision, and git is an excellent tool for running arbitrary programs once it
+ * is allowed to choose its own arguments. Hex only, so there is no argument to
+ * have.
+ */
+export const isSha = (v: string): boolean => /^[0-9a-f]{4,40}$/i.test(v)
+
+export async function commitDetail(root: string, sha: string): Promise<GitCommitDetail | null> {
+  if (!isSha(sha)) return null
+
+  const line = await gitOr("", () => git(root, ["log", "-1", "--decorate=full", FORMAT, sha]))
+  const commit = parseCommit(line.split("\n")[0] ?? "")
+  if (!commit) return null
+
+  const message = await gitOr("", () => git(root, ["log", "-1", "--format=%B", sha]))
+
+  // `-m --first-parent` is what makes a merge show anything at all. Plain
+  // `git show` on a merge prints a combined diff, which is empty whenever the
+  // merge resolved cleanly — and aide's own `land` merges `--no-ff`, so without
+  // these two flags every landed task would appear here as a commit that changed
+  // no files. On an ordinary commit they do nothing.
+  const shown = ["show", "--format=", "-m", "--first-parent", sha]
+  const stat = await gitOr("", () => git(root, [...shown, "--stat"]))
+  const diff = await gitOr("", () => git(root, [...shown, "--patch"]))
+
+  return { commit, message: message.trimEnd(), stat: stat.trim(), diff }
+}

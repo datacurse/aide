@@ -21,6 +21,12 @@ import type { ServerResponse } from "node:http"
 import { connect } from "node:net"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
+// By relative path, not `@aide/protocol`, and that is not a style choice. Vite
+// loads this config through Node: relative TypeScript is bundled for it, but a
+// bare workspace specifier is left external, and Node then resolves
+// `@aide/protocol` to raw `.ts` sources whose own `.js` imports it cannot follow
+// — `pnpm build` dies before it starts, on a file the bundle never includes.
+import { restartDecision, type Health } from "../protocol/src/health.js"
 import type { Plugin } from "vite"
 import { reclaimPort } from "./vite-port.js"
 
@@ -31,6 +37,19 @@ const TSX_CLI = join(DAEMON_DIR, "node_modules", "tsx", "dist", "cli.mjs")
 
 /** Enough output to see why a crash happened, not enough to leak memory. */
 const LOG_LINES = 300
+
+/** How often to ask the daemon whether its own source has changed under it. */
+const FRESHNESS_POLL_MS = 2000
+
+/**
+ * How long the daemon must have been quiet before an automatic restart.
+ *
+ * `busy.writes === 0` alone is not quiet. A land answers, and the browser
+ * immediately follows with a burst of list refreshes; the gap between two of
+ * them is a moment where nothing is in flight and the work is obviously not
+ * over. This turns that gap into a non-answer.
+ */
+const QUIET_MS = 1500
 
 /**
  * How often to re-probe while the daemon is down. The gate below runs per
@@ -95,6 +114,10 @@ export function daemonControl(port: number, webPort: number): Plugin {
   /** Known to be accepting connections. Gates the proxy — see the middleware. */
   let reachable = false
   let lastProbeAt = 0
+  /** Set while an automatic restart is in flight, so the poll cannot stack. */
+  let refreshing = false
+  /** The on-disk fingerprint seen last tick — see the settling check below. */
+  let lastSeenSourceId: string | null = null
   const log: string[] = []
 
   const record = (text: string) => {
@@ -127,6 +150,30 @@ export function daemonControl(port: number, webPort: number): Plugin {
       startedAt: null,
       lastExit,
     }
+  }
+
+  /**
+   * Shut down a daemon this instance did not spawn but a previous one did.
+   *
+   * `stop()` refuses these on purpose — it cannot tell them from a `pnpm daemon`
+   * someone is running in their own terminal, and killing that would be rude.
+   * The caller here has already checked `supervised`, so it knows. There is no
+   * `taskkill` fallback because there is no pid to kill: asking over HTTP is the
+   * only lever, which is enough because the daemon answers before it dies.
+   */
+  const shutdownUnowned = async (): Promise<boolean> => {
+    await fetch(`http://127.0.0.1:${port}/api/shutdown`, {
+      method: "POST",
+      signal: AbortSignal.timeout(2000),
+    }).catch(() => {})
+    for (let i = 0; i < 100; i += 1) {
+      if (!(await probe(port, 200))) {
+        reachable = false
+        return true
+      }
+      await wait(100)
+    }
+    return false
   }
 
   const start = async (): Promise<{ ok: boolean; message: string }> => {
@@ -162,11 +209,17 @@ export function daemonControl(port: number, webPort: number): Plugin {
     // `committed`, the worktree orphaned, and the browser saw a reset socket,
     // which reads as "the land failed".
     //
-    // The daemon that develops aide cannot also be restarted by aide's edits.
-    // Restart is now deliberate — that is what the restart button is for.
+    // The lesson was not "never restart on a change", it was "never restart
+    // during one". chokidar knew a file had changed and nothing else; it could
+    // not know the daemon was three lines into a land. So the trigger moved off
+    // the filesystem and onto the daemon itself, which can answer both
+    // questions — see keepFresh below.
     const proc = spawn(process.execPath, [TSX_CLI, "src/server.ts"], {
       cwd: DAEMON_DIR,
-      env: { ...process.env, AIDE_PORT: String(port) },
+      // AIDE_MANAGED is what lets a LATER instance of this plugin recognise this
+      // daemon as one a dev server started, after a config reload has thrown
+      // away the child handle. See keepFresh.
+      env: { ...process.env, AIDE_PORT: String(port), AIDE_MANAGED: "1" },
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     })
@@ -265,6 +318,71 @@ export function daemonControl(port: number, webPort: number): Plugin {
       return { ok: false, message: "the daemon did not exit within 14s" }
     } finally {
       stopping = false
+    }
+  }
+
+  /**
+   * Restart the daemon when its source has changed, and only when that is free.
+   *
+   * This is the root fix for a skew that is otherwise guaranteed here: the
+   * daemon loads its modules once, and the milestone is developing aide's daemon
+   * inside aide, so every daemon-side change lands in a checkout whose daemon
+   * predates it. The symptom was a 404 for a route added minutes earlier.
+   *
+   * The trigger is the daemon rather than the filesystem, which is the whole
+   * difference from the `tsx watch` arrangement this replaces. chokidar knew a
+   * file had changed and nothing else; the daemon knows both that its source
+   * moved AND whether it is currently three lines into a land. `restartDecision`
+   * holds that rule and is tested in `pnpm smoke` — this function only fetches,
+   * obeys and logs.
+   *
+   * An adopted daemon is left alone: it belongs to whoever started it, and
+   * killing someone's `pnpm daemon` because a file changed is not this plugin's
+   * call. The header says "older code" for that case instead.
+   */
+  const keepFresh = async (say: (msg: string) => void): Promise<void> => {
+    if (refreshing || starting || stopping) return
+
+    let health: Health
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/api/health`, {
+        signal: AbortSignal.timeout(1500),
+      })
+      if (!res.ok) return
+      health = (await res.json()) as Health
+    } catch {
+      // Booting, or wedged. Either way the next tick asks again.
+      return
+    }
+    // A daemon too old to report the field cannot be reasoned about, and
+    // `undefined` must not read as "not stale" — this is the one skew that
+    // would disable the fix for skew.
+    if (typeof health.stale !== "boolean" || health.busy === undefined) return
+
+    // Ours, or a predecessor's. Anything else belongs to whoever started it.
+    const owned = child !== null && child.exitCode === null
+    if (!owned && health.supervised !== true) return
+
+    const seen = lastSeenSourceId
+    lastSeenSourceId = health.sourceId
+    const decision = restartDecision(health, seen, QUIET_MS)
+    if (!decision.restart) return
+
+    refreshing = true
+    try {
+      record(`--- ${decision.reason}; restarting ---`)
+      say(`daemon: ${decision.reason}, restarting`)
+      if (owned) {
+        await stop()
+      } else if (!(await shutdownUnowned())) {
+        record("--- the previous daemon would not exit; leaving it alone ---")
+        return
+      }
+      const r = await start()
+      record(`--- ${r.message} ---`)
+      if (!r.ok) say(`daemon: automatic restart failed - ${r.message}`)
+    } finally {
+      refreshing = false
     }
   }
 
@@ -370,6 +488,18 @@ export function daemonControl(port: number, webPort: number): Plugin {
       void start().then((r) => {
         server.config.logger.info(`  \x1b[32m➜\x1b[0m  daemon:   ${r.message}`)
       })
+
+      // Watching the daemon rather than the filesystem — see keepFresh.
+      const freshness = setInterval(() => {
+        void keepFresh((msg) => server.config.logger.info(`  ${msg}`))
+      }, FRESHNESS_POLL_MS)
+
+      // Vite closes and rebuilds its dev server whenever the config or any of
+      // its imports change, which constructs a NEW plugin instance. Without this
+      // the old instance's timer keeps polling, and two controllers racing to
+      // restart the same daemon is worse than none. Clearing a timer here is
+      // safe in a way that killing the daemon here was not.
+      server.httpServer?.once("close", () => clearInterval(freshness))
 
       // Only process death takes the daemon with it.
       //

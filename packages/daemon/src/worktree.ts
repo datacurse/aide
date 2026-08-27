@@ -1,33 +1,10 @@
-import { execFile } from "node:child_process"
 import { existsSync } from "node:fs"
 import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { isAbsolute, join } from "node:path"
-import { promisify } from "node:util"
 import { STATE_DIR, branchName } from "@aide/protocol"
 import { worktreePath } from "@aide/protocol/node"
-
-const run = promisify(execFile)
-
-// Diffs can be large; the default 1MB buffer truncates real ones.
-const GIT_OPTS = { maxBuffer: 32 * 1024 * 1024, windowsHide: true } as const
-
-/**
- * git says *why* it refused on stderr, and sometimes on stdout instead (merge
- * conflicts list the files there). execFile's own message is just the exit code,
- * so without this a failed commit surfaces in the UI as "Command failed" and the
- * actual reason — no user.email, a pre-commit hook, a conflict — is thrown away.
- */
-async function git(cwd: string, args: string[]): Promise<string> {
-  try {
-    const { stdout } = await run("git", ["-C", cwd, ...args], GIT_OPTS)
-    return stdout
-  } catch (err) {
-    const e = err as { stderr?: string; stdout?: string; message?: string }
-    const detail = `${e.stderr ?? ""}${e.stdout ?? ""}`.trim()
-    throw new Error(detail || e.message || `git ${args[0]} failed`)
-  }
-}
+import { git } from "./git.js"
 
 export async function isGitRepo(root: string): Promise<boolean> {
   try {

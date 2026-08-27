@@ -15,6 +15,7 @@ import type {
   Attachment,
   ChatMode,
   EffortLevel,
+  MessageImage,
   ModelSpend,
   RunDelta,
   RunEventBody,
@@ -186,6 +187,21 @@ export interface NormalizeContext {
 }
 
 /**
+ * An image block's payload, if it is one aide can draw.
+ *
+ * Only base64 sources: the API also accepts a URL source, and rendering one
+ * would mean the browser fetching from wherever a transcript points, which is
+ * not something a local review tool should do on your behalf.
+ */
+function toMessageImage(source: unknown): MessageImage | null {
+  const s = (source ?? {}) as Record<string, unknown>
+  if (s["type"] !== "base64") return null
+  const mediaType = String(s["media_type"] ?? "")
+  const data = String(s["data"] ?? "")
+  return mediaType.startsWith("image/") && data ? { mediaType, data } : null
+}
+
+/**
  * One SDK message in, zero or more `RunEventBody` out. THE mapping.
  *
  * Kept as a pure function rather than inlined in the streaming loop because a
@@ -267,6 +283,10 @@ export function normalizeSdkMessage(
     }
     if (!Array.isArray(content)) return []
     const out: RunEventBody[] = []
+    // A pasted screenshot is its own block, and it comes BEFORE the text block
+    // it belongs to. Held here until the text arrives so the two land as one
+    // message rather than as a picture followed by a caption.
+    let images: MessageImage[] = []
     for (const b of content) {
       const block = b as Record<string, unknown>
       if (block["type"] === "tool_result") {
@@ -276,11 +296,20 @@ export function normalizeSdkMessage(
           ok: block["is_error"] !== true,
           summary: summarizeToolResult(block["content"]),
         })
+      } else if (block["type"] === "image") {
+        const image = toMessageImage(block["source"])
+        if (image) images.push(image)
       } else if (block["type"] === "text") {
         const text = String(block["text"] ?? "")
-        if (text.trim()) out.push({ type: "user.message", text })
+        if (text.trim() || images.length) {
+          out.push({ type: "user.message", text, ...(images.length ? { images } : {}) })
+          images = []
+        }
       }
     }
+    // "look at this" with no words at all is a real message, and dropping it
+    // left the reply hanging under nothing.
+    if (images.length) out.push({ type: "user.message", text: "", images })
     return out
   }
 

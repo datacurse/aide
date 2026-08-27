@@ -140,8 +140,18 @@ export class ChatLane {
     }
 
     // The human's own words go in first, before the SDK is even contacted, so a
-    // turn that fails to spawn still shows what it was answering.
-    this.log.append(runId, { type: "user.message", text: opts.text })
+    // turn that fails to spawn still shows what it was answering. The pasted
+    // screenshots go in with them: a message that is half a sentence and a
+    // picture reads as half a sentence without them, and the session file that
+    // will hold the other copy does not exist yet at this point in the turn.
+    const images = opts.attachments.map((a) => ({ mediaType: a.mediaType, data: a.data }))
+    this.log.append(runId, {
+      type: "user.message",
+      text: opts.text,
+      // Omitted rather than empty, so a turn with no screenshots logs the same
+      // line it always did.
+      ...(images.length ? { images } : {}),
+    })
 
     const child = fork(WORKER, [], {
       execArgv: ["--import", "tsx"],

@@ -3,12 +3,16 @@ import type {
   ChatMode,
   ConversationSummary,
   EffortLevel,
+  GitCommitDetail,
+  GitSummary,
+  GitWorkingTree,
+  Health,
   Project,
   RunEvent,
   Task,
 } from "@aide/protocol"
 
-export type { ConversationSummary }
+export type { ConversationSummary, GitCommitDetail, GitSummary, GitWorkingTree, Health }
 
 /** A conversation's replayed transcript. */
 export interface ConversationView {
@@ -36,13 +40,6 @@ export interface DaemonStatus {
   managed: boolean
   startedAt: number | null
   lastExit: { code: number | null; signal: string | null; at: number } | null
-}
-
-export interface Health {
-  ok: boolean
-  taskModel: string
-  maxConcurrentRuns: number
-  maxBudgetUsd: number
 }
 
 export interface DiffView {
@@ -171,4 +168,13 @@ export const api = {
     }),
   land: (projectId: string, taskId: string) =>
     call<LandResult>(`/api/projects/${projectId}/tasks/${taskId}/land`, { method: "POST" }),
+
+  /** Branch, ahead/behind, dirt counts and the log — one poll's worth. */
+  git: (projectId: string, limit: number) =>
+    call<GitSummary>(`/api/projects/${projectId}/git?limit=${limit}`),
+  /** Split out because it carries a whole patch, and is only read when shown. */
+  gitWorking: (projectId: string) =>
+    call<GitWorkingTree>(`/api/projects/${projectId}/git/working`),
+  gitCommit: (projectId: string, sha: string) =>
+    call<GitCommitDetail>(`/api/projects/${projectId}/git/commits/${sha}`),
 }

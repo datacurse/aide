@@ -93,6 +93,36 @@ export function DaemonBar({ health, onChanged }: { health: Health | null; onChan
 
   const crashed = state === "stopped" && status?.lastExit != null
 
+  /**
+   * The daemon is running code that no longer exists on disk.
+   *
+   * Normally nobody ever sees this: the dev server notices within a couple of
+   * seconds and restarts the daemon the moment doing so is free. It is shown
+   * anyway because the two cases where that cannot happen are exactly the two
+   * where a silent skew would waste an afternoon — a daemon busy enough that
+   * restarting it would destroy work, and a daemon this dev server does not own.
+   */
+  const inFlight = (health?.busy.runs ?? 0) + (health?.busy.chats ?? 0)
+  const staleNote =
+    health?.stale !== true
+      ? null
+      : // `supervised`, not `status.managed`: the two differ for a couple of
+        // seconds after the dev server reloads its own config, and it is
+        // `supervised` that decides whether anything will restart this daemon.
+        health.supervised !== true
+        ? {
+            text: "older code",
+            title:
+              "This daemon is running code from before your last edit, and it was started outside the dev server — restart it where you started it.",
+          }
+        : inFlight > 0
+          ? {
+              text: `older code · restarting after ${inFlight} in flight`,
+              title:
+                "The source changed since this daemon booted. It will restart on its own once nothing is running — restarting now would kill the work in flight.",
+            }
+          : { text: "older code · restarting…", title: "The source changed; picking it up now." }
+
   return (
     <div className="relative flex items-center gap-2">
       {health && state !== "stopped" && (
@@ -114,6 +144,12 @@ export function DaemonBar({ health, onChanged }: { health: Health | null; onChan
         <span className={`inline-block size-1.5 shrink-0 rounded-full ${DOT[state]}`} />
         {LABEL[state]}
       </span>
+
+      {staleNote && (
+        <span className="text-[11px] text-warn" title={staleNote.title}>
+          {staleNote.text}
+        </span>
+      )}
 
       {state === "stopped" && (
         <Button
