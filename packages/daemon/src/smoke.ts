@@ -11,7 +11,7 @@
  */
 import { execFile } from "node:child_process"
 import { existsSync } from "node:fs"
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { promisify } from "node:util"
@@ -24,9 +24,11 @@ import {
   recentSubjects,
   removeWorktree,
   withTrailers,
+  workingTreeDirt,
   worktreeDiff,
   worktreeDiffStat,
 } from "./worktree.js"
+import { STATE_DIR } from "@aide/protocol"
 import type { Project, RunEvent, Task } from "@aide/protocol"
 
 const run = promisify(execFile)
@@ -101,6 +103,19 @@ try {
 }
 check("refuses an empty commit", threw.includes("nothing to commit"), threw)
 
+console.log("\nagent scope — the agent may write specs, but not aide's own bookkeeping")
+await mkdir(join(wt, STATE_DIR, "tasks"), { recursive: true })
+await mkdir(join(wt, STATE_DIR, "specs"), { recursive: true })
+await writeFile(join(wt, STATE_DIR, "tasks", "0009-stale.md"), "stale snapshot\n", "utf8")
+await writeFile(join(wt, STATE_DIR, "specs", "queue.md"), "# Queue\n", "utf8")
+const scopedDiff = await worktreeDiff(wt)
+check("hides .aide/tasks", !scopedDiff.includes("0009-stale.md"), "daemon-owned")
+check("shows .aide/specs", scopedDiff.includes("queue.md"), "agent output must be landable")
+const scopedSha = await commitWorktree(wt, "Add a queue spec\n")
+const shown = await git(wt, ["show", "--stat", "--format=", scopedSha])
+check("commit matches the reviewed diff", !shown.includes("0009-stale.md") && shown.includes("queue.md"))
+check("worktree still holds the untracked task file", existsSync(join(wt, STATE_DIR, "tasks", "0009-stale.md")))
+
 console.log("\njournal")
 const project: Project = { id: "p1", name: "smoke", root, addedAt: new Date().toISOString() }
 const task: Task = {
@@ -133,6 +148,20 @@ check("records the denial", entry.includes("`Bash`"))
 check("marks cost an estimate", entry.includes("$0.12 (estimate)"))
 check("duration is readable", entry.includes("1m 35s"))
 
+console.log("\naide's own bookkeeping is not dirt")
+// This is the state every managed project is permanently in: adding a project
+// scaffolds .aide/, creating a task writes into it, and setStatus("done")
+// rewrites the task file the moment a land finishes. If this counted as dirt,
+// nothing could ever land — which is exactly what happened before.
+await mkdir(join(root, STATE_DIR, "tasks"), { recursive: true })
+await writeFile(join(root, STATE_DIR, "tasks", "0002-next.md"), "---\nid: '0002'\n---\n", "utf8")
+await writeFile(join(root, STATE_DIR, "project.md"), "# Project\n", "utf8")
+check("scaffolding is not dirt", (await workingTreeDirt(root)) === "", "the land blocker")
+check("but git still sees it", (await git(root, ["status", "--porcelain"])).includes(".aide"))
+await writeFile(join(root, "real.txt"), "a real uncommitted change\n", "utf8")
+check("a real change IS dirt", (await workingTreeDirt(root)).includes("real.txt"))
+await rm(join(root, "real.txt"))
+
 console.log("\nland refusals")
 await writeFile(join(root, "dirty.txt"), "uncommitted\n", "utf8")
 threw = ""
@@ -142,12 +171,18 @@ try {
   threw = err instanceof Error ? err.message : String(err)
 }
 check("refuses a dirty target", threw.includes("uncommitted changes"), threw.split("\n")[0] ?? "")
-await run("git", ["-C", root, "clean", "-fd"], { windowsHide: true })
+// Remove only the real dirt. `git clean -fd` would also sweep away the .aide/
+// scaffolding, and landing over that scaffolding is what the final land check
+// is here to prove.
+await rm(join(root, "dirty.txt"))
 
 console.log("\nconflict is aborted, not left half-merged")
 await git(root, ["checkout", "-q", "-b", "rival"])
 await writeFile(join(root, "app.ts"), "export const n = 999\n", "utf8")
-await git(root, ["add", "-A"])
+// `add -A` here would also stage the .aide/ scaffolding onto `rival`, and
+// checking main back out would then delete it — quietly removing the dirt the
+// final land is supposed to prove it can land over.
+await git(root, ["add", "app.ts"])
 await git(root, ["commit", "-m", "Set n to 999"])
 threw = ""
 try {
@@ -156,11 +191,17 @@ try {
   threw = err instanceof Error ? err.message : String(err)
 }
 check("reports the conflict", threw.includes("aborted"), threw.split("\n")[0] ?? "")
-check("target left clean", (await git(root, ["status", "--porcelain"])).trim() === "", "no half-merge")
+// Asserted through workingTreeDirt, not raw porcelain: .aide/ is legitimately
+// present and untracked here, and the thing being proved is that no half-merged
+// content survived the abort.
+check("target left clean", (await workingTreeDirt(root)) === "", "no half-merge")
 check("still on rival", (await currentBranch(root)) === "rival")
 
 console.log("\nland")
 await git(root, ["checkout", "-q", "main"])
+// The assertion that matters: git considers this tree dirty, and landing works
+// anyway, because the only thing dirtying it is aide's own bookkeeping.
+check("git sees .aide/ dirt going in", (await git(root, ["status", "--porcelain"])).includes(".aide"))
 const landed = await mergeTaskBranch(root, "0001", "Merge task 0001: Bump n")
 check("merged into main", landed.into === "main", landed.into)
 check("is a merge commit", (await git(root, ["log", "-1", "--format=%P"])).trim().split(" ").length === 2, "--no-ff held")

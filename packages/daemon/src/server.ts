@@ -27,6 +27,62 @@ const supervisor = new Supervisor(log)
 const app = Fastify({ logger: { level: process.env["AIDE_LOG_LEVEL"] ?? "warn" } })
 await app.register(fastifyWebsocket)
 
+// ---------------------------------------------------------------------------
+// Local-origin guard
+//
+// Binding 127.0.0.1 is not a security boundary, and treating it as one is the
+// mistake this closes.
+//
+// Any page you have open can already issue requests to http://127.0.0.1:4317.
+// The only thing stopping it from READING the answers is that this server sends
+// no CORS headers — and DNS rebinding removes even that: point a hostname you
+// control at 127.0.0.1, and the browser considers the response same-origin by
+// its own rules. Every route here becomes readable by a background tab.
+//
+// That was survivable while the API served project names. It is not: the diff
+// routes already return source code, and the file routes will return any file
+// in any repo you have added.
+//
+// Rebinding can forge the DNS name but not the Host header, so an allowlist of
+// literal loopback authorities closes the whole class. The Vite proxy sets
+// changeOrigin, so it arrives here as 127.0.0.1:<port> and passes, but it
+// forwards the browser's Origin untouched — which is why the dev server's own
+// origin has to be listed separately.
+// ---------------------------------------------------------------------------
+
+const LOOPBACK = ["127.0.0.1", "localhost", "[::1]"]
+
+const ALLOWED_HOSTS = new Set(LOOPBACK.map((h) => `${h}:${CONFIG.port}`))
+
+const ALLOWED_ORIGINS = new Set([
+  ...LOOPBACK.map((h) => `http://${h}:${CONFIG.port}`),
+  ...LOOPBACK.map((h) => `http://${h}:${CONFIG.webPort}`),
+  ...CONFIG.extraOrigins,
+])
+
+/** Shared by the HTTP hook and the WebSocket upgrade, which must both enforce it. */
+function localOriginRefusal(headers: {
+  host?: string
+  origin?: string
+}): string | null {
+  const host = headers.host ?? ""
+  if (!ALLOWED_HOSTS.has(host.toLowerCase())) {
+    return `refused: Host ${host || "(absent)"} is not a loopback address for this daemon`
+  }
+  // Absent Origin is normal for curl and for same-origin navigations; a present
+  // one that we do not recognise is a cross-site caller.
+  const origin = headers.origin
+  if (origin !== undefined && !ALLOWED_ORIGINS.has(origin.toLowerCase())) {
+    return `refused: origin ${origin} may not call this daemon`
+  }
+  return null
+}
+
+app.addHook("onRequest", async (req, reply) => {
+  const refusal = localOriginRefusal(req.headers)
+  if (refusal) return reply.code(403).send({ message: refusal })
+})
+
 const notFound = (msg: string) => ({ statusCode: 404, error: "Not Found", message: msg })
 
 // ---------------------------------------------------------------------------
@@ -89,7 +145,12 @@ app.post("/api/projects/:id/tasks", async (req, reply) => {
 
   const project = await getProject(id)
   if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-  return createTask(project, title.trim(), (body ?? title).trim())
+  // `(body ?? title)` looked like a fallback and never was one: the compose form
+  // sends `draft.body.trim()`, so a blank textarea arrives as "", and `"" ?? x`
+  // is "" — nullish coalescing does not catch an empty string. The task was
+  // created with an empty prompt and the agent handed an empty user message.
+  // Store the empty body honestly; the title is composed into the user turn.
+  return createTask(project, title.trim(), (body ?? "").trim())
 })
 
 app.delete("/api/projects/:id/tasks/:taskId", async (req, reply) => {
@@ -296,7 +357,20 @@ app.get("/api/projects/:id/branch", async (req, reply) => {
 // Live stream
 // ---------------------------------------------------------------------------
 
-app.get("/ws", { websocket: true }, (socket) => {
+app.get("/ws", { websocket: true }, (socket, req) => {
+  // Second gate, kept deliberately. The onRequest hook was measured to fire on
+  // the upgrade request and reject it with a 403 before the socket opens, so
+  // this is redundant today — but WebSockets are not subject to the same-origin
+  // policy at all, meaning any page can open ws://127.0.0.1:4317/ws and it will
+  // connect. That makes this the one route where a future change to hook
+  // ordering, or to @fastify/websocket's lifecycle, would silently reopen the
+  // hole rather than break something visible. Two gates, one cheap.
+  const refusal = localOriginRefusal(req.headers)
+  if (refusal) {
+    socket.close(1008, "forbidden")
+    return
+  }
+
   const subs = new Map<string, () => void>()
 
   const send = (msg: ServerMessage) => {

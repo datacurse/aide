@@ -4,8 +4,23 @@ const num = (name: string, fallback: number): number => {
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
+const list = (name: string, fallback: string[]): string[] => {
+  const raw = process.env[name]
+  if (!raw) return fallback
+  return raw.split(",").map((s) => s.trim()).filter(Boolean)
+}
+
 export const CONFIG = {
   port: num("AIDE_PORT", 4317),
+
+  /** Where the Vite dev server runs. Only used to allow it as a browser origin. */
+  webPort: num("AIDE_WEB_PORT", 5173),
+
+  /**
+   * Extra browser origins permitted to call this daemon, beyond loopback and
+   * the dev server. Comma-separated. Almost nobody should need this.
+   */
+  extraOrigins: list("AIDE_ALLOWED_ORIGINS", []),
 
   /** Opus for the work itself. */
   taskModel: process.env["AIDE_TASK_MODEL"] ?? "claude-opus-5",

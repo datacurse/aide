@@ -62,10 +62,11 @@ function probe(port: number, timeoutMs = 500): Promise<boolean> {
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 /**
- * `tsx watch` runs the daemon as a grandchild, and on Windows killing the parent
- * leaves that grandchild holding the port — the next start then fails with
- * EADDRINUSE and the UI reports a daemon that will not start for no visible
- * reason. taskkill /T is the only reliable way to take the tree down.
+ * tsx re-execs node with its loader, so the daemon is a GRANDCHILD of this
+ * process, and on Windows killing the parent leaves that grandchild holding the
+ * port — the next start then fails with EADDRINUSE and the UI reports a daemon
+ * that will not start for no visible reason. taskkill /T is the only reliable
+ * way to take the tree down.
  */
 function killTree(child: ChildProcess): void {
   if (child.pid === undefined || child.exitCode !== null) return
@@ -130,9 +131,21 @@ export function daemonControl(port: number): Plugin {
     log.length = 0
     record(`--- starting daemon on port ${port} ---`)
 
-    // `tsx watch` so editing daemon source still reloads it, exactly as the old
-    // `pnpm -r --parallel dev` did.
-    const proc = spawn(process.execPath, [TSX_CLI, "watch", "src/server.ts"], {
+    // Plain `tsx`, NOT `tsx watch`, and that is load-bearing rather than a
+    // simplification.
+    //
+    // tsx watch follows the import graph, and `packages/protocol/src/*` is in
+    // the daemon's graph as raw TypeScript through a pnpm junction. So landing
+    // a task — `git merge` rewriting `packages/daemon/src/*` in the main
+    // checkout — made chokidar fire and SIGTERM the daemon about 100ms later,
+    // MID-REQUEST. The merge committed, and then `removeWorktree`,
+    // `setStatus("done")` and the HTTP response never ran: the task stranded at
+    // `committed`, the worktree orphaned, and the browser saw a reset socket,
+    // which reads as "the land failed".
+    //
+    // The daemon that develops aide cannot also be restarted by aide's edits.
+    // Restart is now deliberate — that is what the restart button is for.
+    const proc = spawn(process.execPath, [TSX_CLI, "src/server.ts"], {
       cwd: DAEMON_DIR,
       env: { ...process.env, AIDE_PORT: String(port) },
       stdio: ["ignore", "pipe", "pipe"],
@@ -263,10 +276,19 @@ export function daemonControl(port: number): Plugin {
         server.config.logger.info(`  \x1b[32m➜\x1b[0m  daemon:   ${r.message}`)
       })
 
+      // Only process death takes the daemon with it.
+      //
+      // There used to be a `server.httpServer.once("close", ...)` here too, and
+      // it was a trap: Vite restarts its own dev server when the config or any
+      // of its imports change, which closes the http server without the process
+      // going anywhere. So landing a change to `vite.config.ts` or to this file
+      // force-killed the daemon, and the replacement plugin instance then raced
+      // the dying process for the port and adopted a corpse. A config reload is
+      // not a shutdown, and it has no business stopping a daemon that may be
+      // mid-run.
       const shutdown = () => {
         if (child) killTree(child)
       }
-      server.httpServer?.once("close", shutdown)
       process.once("exit", shutdown)
       process.once("SIGINT", shutdown)
       process.once("SIGTERM", shutdown)

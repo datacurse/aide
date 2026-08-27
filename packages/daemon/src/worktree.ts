@@ -118,22 +118,54 @@ export async function removeWorktree(root: string, taskId: string): Promise<void
   await git(root, ["worktree", "remove", path, "--force"])
 }
 
+// ---------------------------------------------------------------------------
+// Whose files are whose
+// ---------------------------------------------------------------------------
+
+/**
+ * The parts of `.aide/` the DAEMON writes, excluded from everything the agent
+ * is allowed to stage.
+ *
+ * `tasks/` and `journal/` are written by the daemon in the main checkout while
+ * a run is in flight. A commit that carried the worktree's own copies of them
+ * would, on land, write them back over the live ones — resurrecting a stale
+ * `status: running`, or replacing the journal entry that same commit produced.
+ *
+ * Everything else under `.aide/` is deliberately NOT excluded. `specs/`,
+ * `decisions/` and `project.md` are written by humans and agents, so a task
+ * whose whole job is "write the spec for X" has to be able to land its output.
+ *
+ * `:(top,...)` anchors each pattern to the repo root rather than to cwd.
+ */
+const AGENT_SCOPE = [
+  ".",
+  `:(top,exclude)${STATE_DIR}/tasks`,
+  `:(top,exclude)${STATE_DIR}/journal`,
+] as const
+
+/** Same pathspec, appended after a `--`. */
+const scoped = (args: string[]): string[] => [...args, "--", ...AGENT_SCOPE]
+
 /**
  * The diff of everything the agent did, including files it created.
  *
  * The `add -A -N` pass is load-bearing: intent-to-add makes untracked files show
  * up in `git diff`. Without it, brand new files are invisible and the first run
  * looks like it did nothing.
+ *
+ * Every git call that stages or shows the agent's work uses AGENT_SCOPE, and
+ * they must all use the SAME one: if the diff the human reviews and the `add`
+ * the commit runs disagree, the human approves one change and lands another.
  */
 export async function worktreeDiff(worktreeAbsPath: string): Promise<string> {
   if (!existsSync(worktreeAbsPath)) return ""
-  await git(worktreeAbsPath, ["add", "-A", "-N"])
-  return git(worktreeAbsPath, ["diff"])
+  await git(worktreeAbsPath, scoped(["add", "-A", "-N"]))
+  return git(worktreeAbsPath, scoped(["diff"]))
 }
 
 export async function worktreeStatus(worktreeAbsPath: string): Promise<string> {
   if (!existsSync(worktreeAbsPath)) return ""
-  return git(worktreeAbsPath, ["status", "--porcelain"])
+  return git(worktreeAbsPath, scoped(["status", "--porcelain"]))
 }
 
 // ---------------------------------------------------------------------------
@@ -143,8 +175,8 @@ export async function worktreeStatus(worktreeAbsPath: string): Promise<string> {
 /** `git diff --stat` for the worktree, after intent-to-add. Cheap context. */
 export async function worktreeDiffStat(worktreeAbsPath: string): Promise<string> {
   if (!existsSync(worktreeAbsPath)) return ""
-  await git(worktreeAbsPath, ["add", "-A", "-N"])
-  return git(worktreeAbsPath, ["diff", "--stat"])
+  await git(worktreeAbsPath, scoped(["add", "-A", "-N"]))
+  return git(worktreeAbsPath, scoped(["diff", "--stat"]))
 }
 
 /**
@@ -182,8 +214,13 @@ export async function commitWorktree(
   if (!existsSync(worktreeAbsPath)) throw new Error(`no worktree at ${worktreeAbsPath}`)
   if (!message.trim()) throw new Error("commit message is empty")
 
-  await git(worktreeAbsPath, ["add", "-A"])
-  if (!(await git(worktreeAbsPath, ["status", "--porcelain"])).trim()) {
+  // The emptiness probe carries the pathspec too, and that is not symmetry for
+  // its own sake: without it, a run that touched only excluded paths passes the
+  // "is there anything to commit" check and then `git commit` fails with
+  // "nothing added to commit" — an error about staging, reported at the point
+  // where the human just approved a message.
+  await git(worktreeAbsPath, scoped(["add", "-A"]))
+  if (!(await git(worktreeAbsPath, scoped(["status", "--porcelain"]))).trim()) {
     throw new Error("nothing to commit — the run left the worktree unchanged")
   }
 
@@ -204,6 +241,30 @@ export async function commitWorktree(
 /** The branch checked out in the project's own working directory. */
 export async function currentBranch(root: string): Promise<string> {
   return (await git(root, ["rev-parse", "--abbrev-ref", "HEAD"])).trim()
+}
+
+/**
+ * Everything uncommitted in the project's working tree that is not aide's own
+ * bookkeeping. Empty string means clean enough to land into.
+ *
+ * `.aide/` is excluded because otherwise NOTHING could ever land. Adding a
+ * project scaffolds `.aide/` into the working tree; creating a task writes a
+ * file there; committing writes a journal entry there; and every status
+ * transition rewrites the task file — including the `setStatus("done")` that
+ * runs immediately after a successful land. So the tree is dirty before the
+ * first task exists and dirty again the instant a land finishes. "Commit
+ * `.aide/` first" is not inconvenient, it is unreachable.
+ *
+ * Excluding it costs no safety, because this check was never what protects
+ * uncommitted work. Its job is narrower: `git merge --abort` is only reliable
+ * on a tree that was clean going in, so this is the guard that makes the abort
+ * in `mergeTaskBranch` trustworthy. Work is protected by git itself, which
+ * still refuses to merge over local modifications to the paths a merge touches
+ * — `.aide/` included, if a task branch ever really does change one.
+ */
+export async function workingTreeDirt(root: string): Promise<string> {
+  const out = await git(root, ["status", "--porcelain", "--", ".", `:(top,exclude)${STATE_DIR}`])
+  return out.trim()
 }
 
 /**
@@ -235,7 +296,7 @@ export async function mergeTaskBranch(
       `the project is itself on ${branch}; check out the branch you want to merge into first`,
     )
   }
-  const dirty = (await git(root, ["status", "--porcelain"])).trim()
+  const dirty = await workingTreeDirt(root)
   if (dirty) {
     throw new Error(
       `${root} has uncommitted changes; commit or stash them before landing into ${into}`,
