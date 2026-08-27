@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react"
 import { api, type Health, type ProjectView, type TaskView } from "./api.js"
-import type { ConversationSummary } from "@aide/protocol"
 import { DaemonBar } from "./Daemon.js"
+import { useAppLocation } from "./useAppLocation.js"
 import { ConversationList, ConversationPane } from "./panes/Conversations.js"
 import { RunPane } from "./panes/Run.js"
 import { Button, Empty, PaneHeader, StatusDot, STATUS_STYLE } from "./ui.js"
@@ -13,13 +13,14 @@ export function App() {
   const [health, setHealth] = useState<Health | null>(null)
   const [projects, setProjects] = useState<ProjectView[]>([])
   const [tasks, setTasks] = useState<TaskView[]>([])
-  const [projectId, setProjectId] = useState<string | null>(null)
-  const [taskId, setTaskId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [composing, setComposing] = useState(false)
-  /** Which list the second column shows, and therefore what the main pane is. */
-  const [mode, setMode] = useState<"tasks" | "chats">("tasks")
-  const [conversation, setConversation] = useState<ConversationSummary | null>(null)
+  /**
+   * Which project, which list, which task or conversation — all of it in the
+   * URL, so a reload lands you back where you were and Back steps through what
+   * you had open. See useAppLocation.
+   */
+  const [{ projectId, pane: mode, taskId, sessionId }, navigate] = useAppLocation()
   /** Bumped to refetch the conversation list — a new chat has no id until it starts. */
   const [conversationsSeq, setConversationsSeq] = useState(0)
   const [draft, setDraft] = useState({ title: "", body: "" })
@@ -61,8 +62,7 @@ export function App() {
     if (!path?.trim()) return
     try {
       const added = await api.addProject(path.trim())
-      setProjectId(added.id)
-      setTaskId(null)
+      navigate({ projectId: added.id })
       await refresh()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -75,7 +75,7 @@ export function App() {
       const created = await api.createTask(projectId, draft.title.trim(), draft.body.trim())
       setDraft({ title: "", body: "" })
       setComposing(false)
-      setTaskId(created.id)
+      navigate({ taskId: created.id })
       await refresh()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -106,10 +106,7 @@ export function App() {
                 <button
                   key={p.id}
                   type="button"
-                  onClick={() => {
-                    setProjectId(p.id)
-                    setTaskId(null)
-                  }}
+                  onClick={() => navigate({ projectId: p.id })}
                   className={`flex w-full items-center gap-2 px-3 py-[3px] text-left font-sans text-[13px] ${
                     p.id === projectId
                       ? "bg-active text-white"
@@ -139,7 +136,7 @@ export function App() {
                 <button
                   key={m}
                   type="button"
-                  onClick={() => setMode(m)}
+                  onClick={() => navigate({ pane: m })}
                   className={`px-2 py-0.5 text-xs ${
                     mode === m ? "bg-input text-fg" : "text-fg-muted hover:text-fg"
                   }`}
@@ -151,7 +148,7 @@ export function App() {
             <Button
               disabled={!project}
               onClick={() =>
-                mode === "tasks" ? setComposing((v) => !v) : setConversation(null)
+                mode === "tasks" ? setComposing((v) => !v) : navigate({ sessionId: null })
               }
               title={mode === "tasks" ? "New task" : "Start a new conversation"}
             >
@@ -188,8 +185,8 @@ export function App() {
             <ConversationList
               key={conversationsSeq}
               projectId={projectId}
-              selected={conversation?.sessionId ?? null}
-              onSelect={setConversation}
+              selected={sessionId}
+              onSelect={(id) => navigate({ sessionId: id })}
             />
           ) : (
           <div className="flex-1 overflow-auto py-1">
@@ -202,7 +199,7 @@ export function App() {
                 <button
                   key={t.id}
                   type="button"
-                  onClick={() => setTaskId(t.id)}
+                  onClick={() => navigate({ taskId: t.id })}
                   className={`flex w-full items-center gap-2 px-3 py-[3px] text-left font-sans text-[13px] ${
                     t.id === taskId
                       ? "bg-active text-white"
@@ -225,10 +222,15 @@ export function App() {
         {mode === "chats" ? (
           <ConversationPane
             projectId={projectId}
-            summary={conversation}
-            // A new chat has no id until its first turn starts. Bumping this
-            // makes the list refetch so the conversation appears in it.
-            onStarted={() => setConversationsSeq((n) => n + 1)}
+            openSessionId={sessionId}
+            // A new chat has no id until its first turn starts. Put it in the
+            // URL the moment it exists, so a reload mid-first-turn still lands
+            // on the conversation rather than on a blank new one — and refetch
+            // the list so the row appears.
+            onStarted={(id) => {
+              navigate({ sessionId: id })
+              setConversationsSeq((n) => n + 1)
+            }}
           />
         ) : (
           <RunPane projectId={projectId} task={task} runId={runId} onChanged={() => void refresh()} />

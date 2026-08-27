@@ -51,7 +51,7 @@ export function ConversationList({
 }: {
   projectId: string | null
   selected: string | null
-  onSelect: (c: ConversationSummary) => void
+  onSelect: (sessionId: string) => void
 }) {
   const [items, setItems] = useState<ConversationSummary[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -92,7 +92,7 @@ export function ConversationList({
         <button
           key={c.sessionId}
           type="button"
-          onClick={() => onSelect(c)}
+          onClick={() => onSelect(c.sessionId)}
           className={`flex w-full flex-col gap-0.5 px-3 py-1.5 text-left font-sans ${
             c.sessionId === selected ? "bg-active text-white" : "text-fg-muted hover:bg-hover"
           }`}
@@ -123,17 +123,22 @@ export function ConversationList({
  * `Transcript` because the daemon normalizes session messages into the same
  * events a run emits.
  *
- * `summary` being null is not an error state: it is a NEW conversation, which
+ * Keyed by session id rather than by a summary object, so the whole of what the
+ * app is showing is a handful of strings — which is what lets it live in the URL
+ * and survive a reload. Everything else about the conversation (its title, its
+ * cwd, whether a turn is running) arrives with the transcript anyway.
+ *
+ * A null `openSessionId` is not an error state: it is a NEW conversation, which
  * has no id until the SDK assigns one on the first turn.
  */
 export function ConversationPane({
   projectId,
-  summary,
+  openSessionId,
   onStarted,
 }: {
   projectId: string | null
-  summary: ConversationSummary | null
-  /** A new chat learns its session id mid-turn; the list needs to know. */
+  openSessionId: string | null
+  /** A new chat learns its session id mid-turn; the URL needs to know. */
   onStarted?: (sessionId: string) => void
 }) {
   const [view, setView] = useState<ConversationView | null>(null)
@@ -149,7 +154,8 @@ export function ConversationPane({
   /** Known once a new conversation's first turn starts. */
   const [liveSessionId, setLiveSessionId] = useState<string | null>(null)
 
-  const sessionId = summary?.sessionId ?? liveSessionId
+  const summary = view?.summary ?? null
+  const sessionId = openSessionId ?? liveSessionId
   const { events: live, draft } = useRunStream(runId)
 
   useEffect(() => {
@@ -158,14 +164,14 @@ export function ConversationPane({
     setRunId(null)
     setSent(new Map())
     setLiveSessionId(null)
-  }, [summary?.sessionId, summary?.bytes])
+  }, [openSessionId])
 
   useEffect(() => {
-    if (!projectId || !summary) return
+    if (!projectId || !openSessionId) return
 
     let cancelled = false
     void api
-      .conversation(projectId, summary.sessionId)
+      .conversation(projectId, openSessionId)
       .then((v) => {
         if (!cancelled) setView(v)
       })
@@ -175,7 +181,7 @@ export function ConversationPane({
     return () => {
       cancelled = true
     }
-  }, [projectId, summary?.sessionId])
+  }, [projectId, openSessionId])
 
   // Adopt a turn that was already running when this page loaded.
   //
@@ -184,11 +190,9 @@ export function ConversationPane({
   // anything happened was to reload again. The daemon knows what is running;
   // this asks.
   useEffect(() => {
-    // The freshly fetched transcript is the more current of the two: `summary`
-    // came from a list that may have been fetched before this turn started.
-    const inFlight = view?.summary.activeRunId ?? summary?.activeRunId ?? null
+    const inFlight = view?.summary.activeRunId ?? null
     if (inFlight && !runId) setRunId(inFlight)
-  }, [view?.summary.activeRunId, summary?.activeRunId, runId])
+  }, [view?.summary.activeRunId, runId])
 
   // Fold the live stream into the accumulator. Keyed by runId+seq so the replay
   // a reconnect delivers lands on top of what is already there.
@@ -202,14 +206,14 @@ export function ConversationPane({
     // Only a NEW conversation needs this: it has no id until the SDK assigns one,
     // and the list has no row for it yet. An existing one already knows its id,
     // and telling the list to refetch mid-turn just churns it.
-    if (summary) return
+    if (openSessionId) return
     for (const e of live) {
       if (e.type === "run.started" && e.sessionId && !liveSessionId) {
         setLiveSessionId(e.sessionId)
         onStarted?.(e.sessionId)
       }
     }
-  }, [live, liveSessionId, onStarted, summary])
+  }, [live, liveSessionId, onStarted, openSessionId])
 
   const turnEvents = useMemo(
     () => [...sent.values()].sort((a, b) => (a.runId === b.runId ? a.seq - b.seq : 0)),
@@ -295,7 +299,7 @@ export function ConversationPane({
     })
   }
 
-  const title = summary ? `conversation · ${summary.title}` : "new chat"
+  const title = summary ? `conversation · ${summary.title}` : openSessionId ? "conversation" : "new chat"
 
   return (
     <section className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-editor">
@@ -307,7 +311,7 @@ export function ConversationPane({
         className="relative flex-1 overflow-x-hidden overflow-y-auto px-3 py-2 font-mono text-xs leading-relaxed"
       >
         <div ref={content}>
-        {summary && view === null && !error ? (
+        {openSessionId && view === null && !error ? (
           <Empty>Reading…</Empty>
         ) : events.length === 0 ? (
           <Empty>
