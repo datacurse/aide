@@ -8,9 +8,6 @@ import { Empty, PaneHeader } from "../ui.js"
 import { useRunStream } from "../useRunStream.js"
 import { Transcript } from "./Run.js"
 
-/** Past this, a transcript is slow to read and slower to render; ask first. */
-const HEAVY_BYTES = 2 * 1024 * 1024
-
 /**
  * How many events to render without being asked.
  *
@@ -140,8 +137,6 @@ export function ConversationPane({
 }) {
   const [view, setView] = useState<ConversationView | null>(null)
   const [error, setError] = useState<string | null>(null)
-  /** Set when the transcript is big enough that loading it needs a decision. */
-  const [heavy, setHeavy] = useState(false)
   /** The turn in flight, if any. */
   const [runId, setRunId] = useState<string | null>(null)
   /**
@@ -162,11 +157,10 @@ export function ConversationPane({
     setRunId(null)
     setSent(new Map())
     setLiveSessionId(null)
-    setHeavy(Boolean(summary && summary.bytes > HEAVY_BYTES))
   }, [summary?.sessionId, summary?.bytes])
 
   useEffect(() => {
-    if (!projectId || !summary || heavy) return
+    if (!projectId || !summary) return
 
     let cancelled = false
     void api
@@ -180,7 +174,7 @@ export function ConversationPane({
     return () => {
       cancelled = true
     }
-  }, [projectId, summary?.sessionId, heavy])
+  }, [projectId, summary?.sessionId])
 
   // Fold the live stream into the accumulator. Keyed by runId+seq so the replay
   // a reconnect delivers lands on top of what is already there.
@@ -293,18 +287,7 @@ export function ConversationPane({
         }}
         className="flex-1 overflow-auto px-3 py-2 font-mono text-xs leading-relaxed"
       >
-        {heavy && summary ? (
-          <Empty>
-            This transcript is {mb(summary.bytes)} on disk.{" "}
-            <button
-              type="button"
-              onClick={() => setHeavy(false)}
-              className="text-accent underline underline-offset-2"
-            >
-              Load it anyway
-            </button>
-          </Empty>
-        ) : summary && view === null && !error ? (
+        {summary && view === null && !error ? (
           <Empty>Reading…</Empty>
         ) : events.length === 0 ? (
           <Empty>
@@ -314,19 +297,21 @@ export function ConversationPane({
           </Empty>
         ) : (
           <>
-            {view?.truncated && (
-              <p className="mb-2 border-b border-line pb-2 font-sans text-[11px] text-warn">
-                Showing the first part of {view.totalMessages} messages.
-              </p>
-            )}
-            {hidden > 0 && (
-              <button
-                type="button"
-                onClick={() => setShowAll(true)}
-                className="mb-2 w-full border-b border-line pb-2 font-sans text-[11px] text-fg-dim hover:text-fg"
-              >
-                {hidden} earlier events hidden — show all
-              </button>
+            {(hidden > 0 || view?.truncated) && (
+              <div className="mb-2 border-b border-line pb-2 text-center font-sans text-[11px] text-fg-dim">
+                {view?.truncated
+                  ? `showing the most recent of ${view.totalMessages} messages`
+                  : `${hidden} earlier events hidden`}
+                {hidden > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAll(true)}
+                    className="ml-2 text-accent underline underline-offset-2"
+                  >
+                    show all
+                  </button>
+                )}
+              </div>
             )}
             <Transcript events={shown} onPermission={busy ? answer : undefined} />
             {busy && (draft.thinking || draft.text) && (

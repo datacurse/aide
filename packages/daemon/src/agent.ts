@@ -47,7 +47,8 @@ export interface RunAgentOptions {
   deniedBash: string[]
   /** Merged over `process.env` for the run. */
   env: Record<string, string>
-  maxBudgetUsd: number
+  /** Omit for no cap. See CONFIG.chatMaxBudgetUsd for why a chat has none. */
+  maxBudgetUsd?: number
   maxTurns?: number
 
   // -------------------------------------------------------------------------
@@ -424,7 +425,7 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
       // Only when someone is watching. Partial messages are thousands of events
       // per turn, and a headless task has nobody to show them to.
       ...(opts.onDelta ? { includePartialMessages: true } : {}),
-      maxBudgetUsd: opts.maxBudgetUsd,
+      ...(opts.maxBudgetUsd ? { maxBudgetUsd: opts.maxBudgetUsd } : {}),
       ...(opts.maxTurns ? { maxTurns: opts.maxTurns } : {}),
       // Load the target project's .claude/ but not the host's ~/.claude, so a run
       // behaves the same on anyone's machine. Measured: the host's global config

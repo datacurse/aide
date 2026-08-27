@@ -103,6 +103,11 @@ Each of these is a bug that has already been paid for once.
   appear in `git diff`. Without it the first run looks like it did nothing.
 - **Permissions fail closed.** `permissionMode: "dontAsk"` plus an explicit allowlist. Print
   mode starts in Manual on every plan, so an allowlist alone is not a baseline.
+- **Only autonomous runs get a budget cap.** A task runs with nobody watching, so
+  `maxBudgetUsd` is the one thing between a confused agent and an afternoon of spending.
+  A chat has a human and a stop button, so it has no cap by default — and a cap that
+  severs an answer mid-sentence bills you for the whole turn anyway, buying nothing.
+  `AIDE_CHAT_MAX_BUDGET_USD` sets one if you want it.
 - **Cost numbers are estimates.** `total_cost_usd` comes from a price table bundled into the
   SDK at build time. Good for a dashboard, never for billing. Read totals from
   `modelUsage`, which includes subagent spend; `usage` excludes it.

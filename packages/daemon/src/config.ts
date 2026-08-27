@@ -33,8 +33,27 @@ export const CONFIG = {
    */
   maxConcurrentRuns: num("AIDE_MAX_CONCURRENT", 2),
 
-  /** Per run. Ends the run with subtype error_max_budget_usd rather than a surprise. */
+  /**
+   * Per TASK run. Ends the run with subtype error_max_budget_usd rather than a
+   * surprise bill.
+   *
+   * A task is autonomous: it runs with nobody watching, so a cap is the only
+   * thing standing between a confused agent and an afternoon of spending. That
+   * argument does not transfer to a chat, which is why chats have their own
+   * setting below.
+   */
   maxBudgetUsd: num("AIDE_MAX_BUDGET_USD", 5),
+
+  /**
+   * Per chat turn. Zero means no cap, which is the default.
+   *
+   * A chat has a human at the keyboard and a stop button, so the reason the task
+   * cap exists simply is not present — and a cap that cuts off an answer
+   * mid-sentence costs you the whole turn's spend anyway, buying nothing. Long
+   * conversations resend a large context every turn and are legitimately
+   * expensive; the outcome line reports what each one cost.
+   */
+  chatMaxBudgetUsd: num("AIDE_CHAT_MAX_BUDGET_USD", 0),
 
   /**
    * Fail closed. Anything not listed is denied, because a headless run has nobody

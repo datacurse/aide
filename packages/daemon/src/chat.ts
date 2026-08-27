@@ -127,7 +127,7 @@ export class ChatLane {
       allowedBash: [...CONFIG.allowedBash],
       deniedBash: [...CONFIG.deniedBash],
       env: CONFIG.runEnv,
-      maxBudgetUsd: CONFIG.maxBudgetUsd,
+      ...(CONFIG.chatMaxBudgetUsd ? { maxBudgetUsd: CONFIG.chatMaxBudgetUsd } : {}),
       chatMode: opts.mode,
       effort: opts.effort,
       attachments: opts.attachments,

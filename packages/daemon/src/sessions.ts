@@ -74,7 +74,10 @@ export async function getConversation(
   if (!summary) return null
 
   const messages = await getSessionMessages(sessionId, { dir: project.root })
-  const capped = messages.slice(0, MAX_MESSAGES)
+  // The TAIL, not the head. Slicing from the front served the oldest 1500
+  // messages of a long conversation and hid everything recent — the exact
+  // opposite of what anyone opening it wants to read.
+  const capped = messages.slice(-MAX_MESSAGES)
 
   const events: RunEvent[] = []
   let seq = 0
