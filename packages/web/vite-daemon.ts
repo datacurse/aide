@@ -32,6 +32,13 @@ const TSX_CLI = join(DAEMON_DIR, "node_modules", "tsx", "dist", "cli.mjs")
 /** Enough output to see why a crash happened, not enough to leak memory. */
 const LOG_LINES = 300
 
+/**
+ * How often to re-probe while the daemon is down. The gate below runs per
+ * request and the browser polls three routes at once, so without this a boot
+ * would cost a TCP connect per request rather than per quarter-second.
+ */
+const GATE_PROBE_MS = 250
+
 export type DaemonState = "stopped" | "starting" | "running" | "adopted"
 
 interface Status {
@@ -85,6 +92,9 @@ export function daemonControl(port: number, webPort: number): Plugin {
   let stopping = false
   let startedAt: number | null = null
   let lastExit: Status["lastExit"] = null
+  /** Known to be accepting connections. Gates the proxy — see the middleware. */
+  let reachable = false
+  let lastProbeAt = 0
   const log: string[] = []
 
   const record = (text: string) => {
@@ -128,6 +138,7 @@ export function daemonControl(port: number, webPort: number): Plugin {
       // supported way to run one. The warning matters though: an adopted daemon
       // may be running code from before your last land, and this dev server did
       // not start it so it cannot restart it either.
+      reachable = true
       return {
         ok: true,
         message: `adopted a daemon already on ${port} — not started here, so restart it yourself if it is stale`,
@@ -175,6 +186,7 @@ export function daemonControl(port: number, webPort: number): Plugin {
       // A stop we asked for is not a crash, and recording it as one would put a
       // red "exited (code 1)" in the header every time someone used the button —
       // taskkill /F always reports a nonzero code.
+      reachable = false
       lastExit = stopping ? null : { code, signal, at: Date.now() }
       record(
         stopping
@@ -201,6 +213,7 @@ export function daemonControl(port: number, webPort: number): Plugin {
       if (await probe(port, 300)) {
         starting = false
         startedAt = Date.now()
+        reachable = true
         return { ok: true, message: `listening on ${port}` }
       }
       await wait(250)
@@ -310,6 +323,47 @@ export function daemonControl(port: number, webPort: number): Plugin {
           return
         }
         next()
+      })
+
+      // Do not let the proxy attempt a connection that is known to fail.
+      //
+      // The daemon reconciles stranded tasks BEFORE it listens — deliberately,
+      // since a health endpoint that answers has to mean the task list is
+      // honest. Vite is ready in ~250ms and the daemon takes about a second, so
+      // every `pnpm dev` has a window where the page is up and the daemon is
+      // not, and the browser polls straight into it.
+      //
+      // vite.config.ts already answers those with a clean 503, but that is not
+      // enough on its own: Vite registers its own proxy error handler AFTER the
+      // one `configure` installs, so it logs an ECONNREFUSED stack trace no
+      // matter what ours does. Three of them on every start, which reads like a
+      // failure and is not one. There is nothing to log if the request never
+      // reaches the proxy.
+      //
+      // Registered here rather than in the config because this is the only
+      // place that knows whether the daemon is up. Middlewares added from
+      // `configureServer` run ahead of the internal ones, the proxy included.
+      const daemonUp = async (): Promise<boolean> => {
+        if (reachable) return true
+        const now = Date.now()
+        if (now - lastProbeAt < GATE_PROBE_MS) return false
+        lastProbeAt = now
+        // Re-probed rather than trusted: a daemon someone started outside this
+        // dev server has to be able to open the gate too.
+        reachable = await probe(port, 200)
+        return reachable
+      }
+
+      server.middlewares.use((req, rawRes, next) => {
+        if (!(req.url ?? "").startsWith("/api")) return next()
+        void daemonUp().then((up) => {
+          if (up) return next()
+          json(rawRes as ServerResponse, 503, {
+            message: starting
+              ? `daemon is starting on ${port}`
+              : `daemon is not running on ${port}`,
+          })
+        })
       })
 
       // `pnpm dev` should still bring the whole thing up without being asked.
