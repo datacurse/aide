@@ -9,8 +9,16 @@
  * touches none of this: it makes one-shot text calls with no tools and returns a
  * string, so it never sees a message union to normalize.
  */
+import { randomUUID } from "node:crypto"
 import { query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk"
-import type { ModelSpend, RunEventBody, RunStatus } from "@aide/protocol"
+import type {
+  Attachment,
+  ChatMode,
+  EffortLevel,
+  ModelSpend,
+  RunEventBody,
+  RunStatus,
+} from "@aide/protocol"
 import { checkBashCommand } from "./policy.js"
 
 export interface RunAgentOptions {
@@ -40,6 +48,35 @@ export interface RunAgentOptions {
   env: Record<string, string>
   maxBudgetUsd: number
   maxTurns?: number
+
+  // -------------------------------------------------------------------------
+  // Chat turns. A task run leaves all of these unset and behaves exactly as
+  // before; a chat sets them and gets a conversational, human-supervised turn.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Continue an existing session instead of starting one.
+   *
+   * Deliberately WITHOUT `forkSession`. A task follow-up would fork, so an older
+   * run stays resumable at its own point; a chat appends, so the conversation
+   * keeps one stable id the way it does in the CLI and the VS Code extension.
+   * Forking a chat would fracture it into a chain of ids after every message.
+   */
+  resume?: string
+  /** Omitted for task runs, which stay on the fail-closed `dontAsk`. */
+  chatMode?: ChatMode
+  effort?: EffortLevel
+  /** Images pasted into the composer, sent as content blocks alongside the text. */
+  attachments?: Attachment[]
+  /**
+   * Asks the human to approve a tool call. Present only for chat turns; when it
+   * is absent, anything not already permitted is denied, which is the right
+   * answer when nobody is listening.
+   */
+  onPermission?: (req: { requestId: string; name: string; input: unknown }) => Promise<boolean>
+  /** Emit a `context.usage` event at the end of the turn. Chat only. */
+  trackContext?: boolean
+
   /**
    * Receives a handle to interrupt the run. This is a control message over the
    * SDK's stdin channel, NOT a signal, which is why it behaves identically on
@@ -83,6 +120,18 @@ function toModelSpend(raw: unknown): Record<string, ModelSpend> {
 }
 
 const statusFor = (subtype: string): RunStatus => (subtype === "success" ? "success" : "failed")
+
+/**
+ * aide's mode names to the SDK's. Kept as a table rather than reusing the SDK's
+ * strings directly so the UI vocabulary matches the Claude Code UI ("Manual")
+ * rather than the transport ("default").
+ */
+const CHAT_TO_SDK_MODE: Record<ChatMode, "default" | "acceptEdits" | "plan" | "auto"> = {
+  manual: "default",
+  acceptEdits: "acceptEdits",
+  plan: "plan",
+  auto: "auto",
+}
 
 export interface NormalizeContext {
   taskId: string
@@ -235,13 +284,27 @@ export function composeRequest(title: string, prompt: string): string {
 export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventBody> {
   const request = composeRequest(opts.title, opts.prompt)
 
+  // Images first, then the text. The Messages API takes either a bare string or
+  // an array of content blocks; a turn with no attachments keeps the string
+  // form, which is also what a replayed transcript shows for older sessions.
+  const content =
+    opts.attachments?.length
+      ? [
+          ...opts.attachments.map((a) => ({
+            type: "image" as const,
+            source: { type: "base64" as const, media_type: a.mediaType, data: a.data },
+          })),
+          { type: "text" as const, text: request },
+        ]
+      : request
+
   // Streaming input mode. `prompt` must be an AsyncIterable for control requests
   // (interrupt) to be available at all. We yield one message and close the
   // stream, so the run ends after its turn instead of waiting for more input.
   async function* input(): AsyncGenerator<SDKUserMessage> {
     yield {
       type: "user",
-      message: { role: "user", content: request },
+      message: { role: "user", content },
       parent_tool_use_id: null,
       session_id: "",
     } as SDKUserMessage
@@ -255,6 +318,8 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
   // query() throws AFTER yielding an error result, so without this the same
   // failure gets logged twice: once as the real outcome, once as a bare error.
   let finished = false
+  /** Latest context reading of the turn; emitted once, just before the result. */
+  let lastUsage: { totalTokens: number; maxTokens: number; percentage: number } | null = null
 
   const q = query({
     prompt: input(),
@@ -262,10 +327,22 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
       model: opts.model,
       cwd: opts.cwd,
       allowedTools: opts.allowedTools,
-      // Fail closed. Print mode starts in Manual on every plan, so an allowlist
-      // alone is not a baseline: dontAsk denies anything not explicitly allowed
-      // or in the read-only command set.
-      permissionMode: "dontAsk",
+      // A task run fails closed — print mode starts in Manual on every plan, so
+      // an allowlist alone is not a baseline, and `dontAsk` denies anything not
+      // explicitly allowed or in the read-only command set.
+      //
+      // A chat does not, because someone is watching. `manual` maps to the SDK's
+      // `default`, which routes an ask to canUseTool below.
+      permissionMode: opts.chatMode ? CHAT_TO_SDK_MODE[opts.chatMode] : "dontAsk",
+      // A chat gets the whole Claude Code toolset AVAILABLE, while auto-approving
+      // only the read-only ones (see `chatAutoAllowTools`). `tools` decides what
+      // exists; `allowedTools` decides what skips the question. A task run leaves
+      // this alone and keeps the narrow set it was given.
+      ...(opts.chatMode ? { tools: { type: "preset" as const, preset: "claude_code" as const } } : {}),
+      ...(opts.effort ? { effort: opts.effort } : {}),
+      // Append rather than fork: a chat keeps one stable session id, the way it
+      // does in the CLI. See the field's comment for why forking is wrong here.
+      ...(opts.resume ? { resume: opts.resume } : {}),
       // Without this, runs end by asking a question nobody is there to answer
       // ("want me to fix it?"), which reads as done but leaves the task undone.
       systemPrompt: {
@@ -308,9 +385,21 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
       // auth problem rather than a config one.
       env: { ...process.env, ...opts.env },
       canUseTool: async (name, toolInput) => {
-        // Bash gets a real decision; everything else that reaches here was not
-        // on the allowlist and is refused. Note this callback only sees calls the
-        // SDK has not already resolved, so it is a gate, not an audit log.
+        // A chat asks. This is the whole difference between the two kinds of
+        // run: a human is present, so a call the SDK could not resolve becomes a
+        // question rather than a refusal. The turn blocks here until the answer
+        // comes back through the browser.
+        if (opts.onPermission) {
+          const requestId = randomUUID()
+          const allowed = await opts.onPermission({ requestId, name, input: toolInput })
+          if (allowed) return { behavior: "allow", updatedInput: toolInput }
+          return { behavior: "deny", message: "You declined this." }
+        }
+
+        // A task run refuses. Bash gets a real decision from aide's own policy;
+        // everything else reaching here was not on the allowlist. Note this
+        // callback only sees calls the SDK has not already resolved, so it is a
+        // gate, not an audit log.
         const verdict =
           name === "Bash"
             ? checkBashCommand(
@@ -337,6 +426,35 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
   try {
     for await (const message of q) {
       while (pending.length) yield pending.shift()!
+
+      // Ask how full the context is while the query is still alive — this is a
+      // control request, so it stops being available the moment the turn ends.
+      // Guarded: an experimental control request must not be able to fail a turn
+      // that has already produced its result.
+      // Sampled on each assistant message, NOT at the result. `getContextUsage`
+      // is a control request, and by the time the result arrives the channel is
+      // already closing — it fails with "Query closed before response received",
+      // which is exactly what happened until the worker's stderr was being read.
+      // These are local IPC round trips to a process already running, so
+      // sampling a few times a turn is cheap.
+      if (opts.trackContext && (message as { type?: string }).type === "assistant") {
+        try {
+          lastUsage = await q.getContextUsage()
+        } catch {
+          /* the meter is a nicety; never fail a turn for it */
+        }
+      }
+
+      // Emitted just BEFORE the result is normalized, so the log still ends in
+      // exactly one terminal event — an invariant four consumers depend on.
+      if (lastUsage && (message as { type?: string }).type === "result") {
+        yield {
+          type: "context.usage",
+          totalTokens: lastUsage.totalTokens,
+          maxTokens: lastUsage.maxTokens,
+          percentage: lastUsage.percentage,
+        }
+      }
 
       for (const event of normalizeSdkMessage(message, {
         taskId: opts.taskId,

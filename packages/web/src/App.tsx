@@ -20,6 +20,8 @@ export function App() {
   /** Which list the second column shows, and therefore what the main pane is. */
   const [mode, setMode] = useState<"tasks" | "chats">("tasks")
   const [conversation, setConversation] = useState<ConversationSummary | null>(null)
+  /** Bumped to refetch the conversation list — a new chat has no id until it starts. */
+  const [conversationsSeq, setConversationsSeq] = useState(0)
   const [draft, setDraft] = useState({ title: "", body: "" })
 
   const refresh = useCallback(async () => {
@@ -146,11 +148,15 @@ export function App() {
                 </button>
               ))}
             </div>
-            {mode === "tasks" && (
-              <Button disabled={!project} onClick={() => setComposing((v) => !v)}>
-                new
-              </Button>
-            )}
+            <Button
+              disabled={!project}
+              onClick={() =>
+                mode === "tasks" ? setComposing((v) => !v) : setConversation(null)
+              }
+              title={mode === "tasks" ? "New task" : "Start a new conversation"}
+            >
+              new
+            </Button>
           </PaneHeader>
 
           {composing && project && (
@@ -180,6 +186,7 @@ export function App() {
 
           {mode === "chats" ? (
             <ConversationList
+              key={conversationsSeq}
               projectId={projectId}
               selected={conversation?.sessionId ?? null}
               onSelect={setConversation}
@@ -216,7 +223,13 @@ export function App() {
         </aside>
 
         {mode === "chats" ? (
-          <ConversationPane projectId={projectId} summary={conversation} />
+          <ConversationPane
+            projectId={projectId}
+            summary={conversation}
+            // A new chat has no id until its first turn starts. Bumping this
+            // makes the list refetch so the conversation appears in it.
+            onStarted={() => setConversationsSeq((n) => n + 1)}
+          />
         ) : (
           <RunPane projectId={projectId} task={task} runId={runId} onChanged={() => void refresh()} />
         )}

@@ -6,7 +6,7 @@ import type { RunAgentOptions } from "./agent.js"
 import { CONFIG } from "./config.js"
 import type { EventLog } from "./eventlog.js"
 import { runBootstrap } from "./bootstrap.js"
-import { killTree } from "./proc.js"
+import { killTree, relayWorkerOutput } from "./proc.js"
 import { readProjectDoc } from "./registry.js"
 import { patchTask, setStatus, statusAfterRun } from "./tasks.js"
 import type { FromWorker, ToWorker } from "./worker/main.js"
@@ -294,6 +294,12 @@ export class Supervisor {
       stdio: ["ignore", "pipe", "pipe", "ipc"],
     })
     record.child = child
+
+    // Forward the worker's own output. Without this the pipes opened above are
+    // never drained: everything the worker or the SDK writes is swallowed, and a
+    // chatty child eventually BLOCKS on a full pipe buffer (64KB on Windows)
+    // with no indication why. Prefixed because several workers share this stream.
+    relayWorkerOutput(child, runId)
 
     // Assignments below happen inside event callbacks, which TS control-flow
     // analysis does not track: a plain `let` would stay narrowed to "failed".

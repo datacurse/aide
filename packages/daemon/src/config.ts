@@ -58,6 +58,18 @@ export const CONFIG = {
   ]),
 
   /**
+   * Tools a CHAT auto-approves. Everything else falls through to `canUseTool`
+   * and becomes a prompt.
+   *
+   * This list is short for a load-bearing reason the SDK warns about out loud:
+   * a bare name in `allowedTools` approves the whole tool BEFORE the callback is
+   * consulted. Leaving Edit and Write here made "Manual" a lie — the mode
+   * promises to ask before each edit, and the edit would have been auto-approved
+   * before the question could be asked. Only read-only tools belong here.
+   */
+  chatAutoAllowTools: list("AIDE_CHAT_AUTO_ALLOW", ["Read", "Glob", "Grep", "TodoWrite"]),
+
+  /**
    * Bash commands the agent may run, matched as leading-word prefixes by
    * `policy.ts`. Single commands only — no pipes, no chaining.
    *

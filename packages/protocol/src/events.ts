@@ -89,6 +89,20 @@ export type RunEventBody =
     }
   | { type: "tool.end"; toolUseId: string; ok: boolean; summary: string }
   | { type: "tool.denied"; name: string; input: unknown; reason: string }
+  /**
+   * A chat turn is waiting for the human to approve a tool call.
+   *
+   * This is the difference between a chat and a task. A task run fails closed
+   * because nobody is there to answer; a chat has someone at the keyboard, so
+   * the SDK's "ask" decision becomes an event here and the turn blocks until a
+   * decision arrives. Carried on the event stream rather than a side channel so
+   * a reconnecting browser sees a pending request in the replay and can still
+   * answer it.
+   */
+  | { type: "permission.request"; requestId: string; name: string; input: unknown }
+  | { type: "permission.resolved"; requestId: string; allowed: boolean; reason: string }
+  /** Context occupancy after a turn, for the composer's meter. */
+  | { type: "context.usage"; totalTokens: number; maxTokens: number; percentage: number }
   | {
       type: "run.retry"
       attempt: number

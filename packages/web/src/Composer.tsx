@@ -1,0 +1,287 @@
+import { useEffect, useRef, useState } from "react"
+import {
+  CHAT_MODES,
+  CHAT_MODE_LABEL,
+  EFFORT_LEVELS,
+  type Attachment,
+  type ChatMode,
+  type ContextUsage,
+  type EffortLevel,
+} from "@aide/protocol"
+
+/**
+ * Pasted images are held in memory as base64 and sent with the turn. A 10MB
+ * screenshot is already past what is useful to a model and would make the
+ * request body enormous, so it is refused with a reason rather than silently
+ * dropped.
+ */
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+
+const kb = (bytes: number) =>
+  bytes > 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.round(bytes / 1024)} KB`
+
+let attachmentSeq = 0
+
+/** Strip the `data:image/png;base64,` prefix — the API wants the payload alone. */
+function splitDataUrl(dataUrl: string): { mediaType: string; data: string } | null {
+  const match = /^data:([^;]+);base64,(.*)$/s.exec(dataUrl)
+  if (!match?.[1] || !match[2]) return null
+  return { mediaType: match[1], data: match[2] }
+}
+
+function readAsAttachment(file: File): Promise<Attachment | null> {
+  return new Promise((resolve) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const parsed = typeof reader.result === "string" ? splitDataUrl(reader.result) : null
+      if (!parsed) return resolve(null)
+      attachmentSeq += 1
+      resolve({
+        id: `a${attachmentSeq}`,
+        mediaType: parsed.mediaType,
+        data: parsed.data,
+        bytes: file.size,
+      })
+    }
+    reader.onerror = () => resolve(null)
+    reader.readAsDataURL(file)
+  })
+}
+
+/** The context meter. Counts DOWN, because what matters is the room left. */
+function ContextMeter({ usage }: { usage: ContextUsage | null }) {
+  if (!usage || !usage.maxTokens) return null
+  const remaining = Math.max(0, 100 - usage.percentage)
+  const tone = remaining < 15 ? "text-err" : remaining < 35 ? "text-warn" : "text-fg-dim"
+  return (
+    <span
+      className={`flex items-center gap-1.5 text-[11px] ${tone}`}
+      title={`${usage.totalTokens.toLocaleString()} of ${usage.maxTokens.toLocaleString()} tokens used`}
+    >
+      <span className="relative inline-block h-1 w-10 overflow-hidden rounded-full bg-input">
+        <span
+          className="absolute inset-y-0 left-0 bg-current"
+          style={{ width: `${Math.min(100, Math.max(0, remaining))}%` }}
+        />
+      </span>
+      {Math.round(remaining)}% context left
+    </span>
+  )
+}
+
+function ModePicker({
+  mode,
+  effort,
+  onMode,
+  onEffort,
+}: {
+  mode: ChatMode
+  effort: EffortLevel
+  onMode: (m: ChatMode) => void
+  onEffort: (e: EffortLevel) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const box = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const away = (e: MouseEvent) => {
+      if (box.current && !box.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener("mousedown", away)
+    return () => document.removeEventListener("mousedown", away)
+  }, [open])
+
+  return (
+    <div ref={box} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-fg-muted hover:bg-hover hover:text-fg"
+      >
+        ⚡ {CHAT_MODE_LABEL[mode].label}
+      </button>
+      {open && (
+        <div className="absolute bottom-7 left-0 z-20 w-[22rem] rounded border border-line bg-chrome py-1 shadow-lg">
+          <div className="px-3 py-1 font-sans text-[11px] text-fg-dim">Modes</div>
+          {CHAT_MODES.map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => {
+                onMode(m)
+                setOpen(false)
+              }}
+              className={`flex w-full flex-col gap-0.5 px-3 py-1.5 text-left ${
+                m === mode ? "bg-active text-white" : "hover:bg-hover"
+              }`}
+            >
+              <span className="font-sans text-[12px]">{CHAT_MODE_LABEL[m].label}</span>
+              <span
+                className={`font-sans text-[11px] ${m === mode ? "text-white/70" : "text-fg-dim"}`}
+              >
+                {CHAT_MODE_LABEL[m].hint}
+              </span>
+            </button>
+          ))}
+          <div className="mt-1 flex items-center gap-2 border-t border-line px-3 py-2">
+            <span className="font-sans text-[11px] text-fg-muted">Effort</span>
+            <input
+              type="range"
+              min={0}
+              max={EFFORT_LEVELS.length - 1}
+              value={EFFORT_LEVELS.indexOf(effort)}
+              onChange={(e) => onEffort(EFFORT_LEVELS[Number(e.target.value)] ?? "high")}
+              className="flex-1 accent-accent"
+            />
+            <span className="w-12 text-right font-sans text-[11px] text-fg-dim">{effort}</span>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * The message bar.
+ *
+ * Modelled on the Claude Code extension's, because that is the shape the work
+ * actually has: type, attach what you are looking at, choose how much rope the
+ * agent gets, watch the context fill, send. The mode picker is not decoration —
+ * it maps 1:1 onto the SDK's `permissionMode`, so "Manual" genuinely means the
+ * turn will stop and ask.
+ */
+export function Composer({
+  busy,
+  usage,
+  onSend,
+  onInterrupt,
+}: {
+  busy: boolean
+  usage: ContextUsage | null
+  onSend: (msg: {
+    text: string
+    attachments: Attachment[]
+    mode: ChatMode
+    effort: EffortLevel
+  }) => void
+  onInterrupt: () => void
+}) {
+  const [text, setText] = useState("")
+  const [attachments, setAttachments] = useState<Attachment[]>([])
+  const [mode, setMode] = useState<ChatMode>("manual")
+  const [effort, setEffort] = useState<EffortLevel>("high")
+  const [note, setNote] = useState<string | null>(null)
+  const area = useRef<HTMLTextAreaElement>(null)
+
+  const canSend = !busy && (text.trim().length > 0 || attachments.length > 0)
+
+  const send = () => {
+    if (!canSend) return
+    onSend({ text: text.trim(), attachments, mode, effort })
+    setText("")
+    setAttachments([])
+    setNote(null)
+  }
+
+  const takeFiles = async (files: FileList | File[]) => {
+    const images = [...files].filter((f) => f.type.startsWith("image/"))
+    if (images.length === 0) return
+    const tooBig = images.filter((f) => f.size > MAX_ATTACHMENT_BYTES)
+    if (tooBig.length) setNote(`${tooBig.length} image(s) over ${kb(MAX_ATTACHMENT_BYTES)} skipped`)
+    const read = await Promise.all(
+      images.filter((f) => f.size <= MAX_ATTACHMENT_BYTES).map(readAsAttachment),
+    )
+    setAttachments((prev) => [...prev, ...read.filter((a): a is Attachment => a !== null)])
+  }
+
+  return (
+    <div className="shrink-0 border-t border-line bg-chrome px-3 py-2">
+      {attachments.length > 0 && (
+        <div className="mb-2 flex flex-wrap gap-1.5">
+          {attachments.map((a) => (
+            <span
+              key={a.id}
+              className="flex items-center gap-1.5 rounded border border-line bg-input px-1.5 py-0.5 font-sans text-[11px] text-fg-muted"
+            >
+              <img
+                src={`data:${a.mediaType};base64,${a.data}`}
+                alt=""
+                className="size-4 rounded-sm object-cover"
+              />
+              {a.mediaType.replace("image/", "")} {kb(a.bytes)}
+              <button
+                type="button"
+                onClick={() => setAttachments((prev) => prev.filter((x) => x.id !== a.id))}
+                className="text-fg-dim hover:text-err"
+                title="Remove"
+              >
+                ✕
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      <textarea
+        ref={area}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        // Paste is the whole point of the attachment feature: a screenshot goes
+        // straight from the clipboard into the turn, no file dialog.
+        onPaste={(e) => {
+          const files = [...e.clipboardData.files]
+          if (files.some((f) => f.type.startsWith("image/"))) {
+            e.preventDefault()
+            void takeFiles(files)
+          }
+        }}
+        onDrop={(e) => {
+          if (e.dataTransfer.files.length) {
+            e.preventDefault()
+            void takeFiles(e.dataTransfer.files)
+          }
+        }}
+        onKeyDown={(e) => {
+          // Enter sends, Shift+Enter is a newline. This is a chat box, and the
+          // multi-line case is the rarer one.
+          if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+            e.preventDefault()
+            send()
+          }
+        }}
+        rows={Math.min(10, Math.max(2, text.split(/\n/).length))}
+        placeholder={busy ? "Claude is working…" : "Ask, or paste a screenshot"}
+        className="w-full resize-none rounded border border-line-soft bg-input px-2 py-1.5 font-sans text-[13px] leading-relaxed outline-none placeholder:text-fg-dim focus:border-accent"
+      />
+
+      {note && <p className="mt-1 font-sans text-[11px] text-warn">{note}</p>}
+
+      <div className="mt-1.5 flex items-center gap-3">
+        <ModePicker mode={mode} effort={effort} onMode={setMode} onEffort={setEffort} />
+        <ContextMeter usage={usage} />
+        <div className="ml-auto flex items-center gap-2">
+          {busy ? (
+            <button
+              type="button"
+              onClick={onInterrupt}
+              className="rounded-sm bg-diff-del-fg/85 px-2.5 py-1 font-sans text-xs text-white hover:bg-diff-del-fg"
+            >
+              stop
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={send}
+              disabled={!canSend}
+              title="Enter to send, Shift+Enter for a newline"
+              className="rounded-sm bg-accent px-3 py-1 font-sans text-xs text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              send
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}

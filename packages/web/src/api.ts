@@ -1,4 +1,12 @@
-import type { ConversationSummary, Project, RunEvent, Task } from "@aide/protocol"
+import type {
+  Attachment,
+  ChatMode,
+  ConversationSummary,
+  EffortLevel,
+  Project,
+  RunEvent,
+  Task,
+} from "@aide/protocol"
 
 export type { ConversationSummary }
 
@@ -128,6 +136,28 @@ export const api = {
     call<ConversationSummary[]>(`/api/projects/${projectId}/conversations`),
   conversation: (projectId: string, sessionId: string) =>
     call<ConversationView>(`/api/projects/${projectId}/conversations/${sessionId}`),
+
+  chat: (
+    projectId: string,
+    body: {
+      sessionId: string | null
+      text: string
+      attachments: Attachment[]
+      mode: ChatMode
+      effort: EffortLevel
+    },
+  ) =>
+    call<{ runId: string }>(`/api/projects/${projectId}/chat`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  answerPermission: (runId: string, requestId: string, allowed: boolean) =>
+    call<{ ok: true }>(`/api/runs/${runId}/permissions/${requestId}`, {
+      method: "POST",
+      body: JSON.stringify({ allowed }),
+    }),
+  interruptChat: (runId: string) =>
+    call<{ interrupted: boolean }>(`/api/runs/${runId}/chat-interrupt`, { method: "POST" }),
 
   branch: (projectId: string) => call<{ branch: string | null }>(`/api/projects/${projectId}/branch`),
   draftCommit: (projectId: string, taskId: string) =>

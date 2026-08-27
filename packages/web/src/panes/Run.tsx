@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import type { RunEvent, RunStatus, TaskStatus } from "@aide/protocol"
 import { api, type CommitResult, type DiffView, type TaskView } from "../api.js"
+import { Markdown } from "../Markdown.js"
 import { Button, Empty, PaneHeader, STATUS_STYLE, money } from "../ui.js"
 import { useRunStream, type StreamState } from "../useRunStream.js"
 
@@ -25,6 +26,17 @@ interface BootstrapLine {
   ms: number
   output: string
 }
+/** A tool call a chat turn is blocked on, paired with its answer if it has one. */
+interface PermissionLine {
+  kind: "permission"
+  seq: number
+  requestId: string
+  name: string
+  input: unknown
+  /** null while still waiting on the human. */
+  allowed: boolean | null
+  reason: string
+}
 interface OutcomeLine {
   kind: "outcome"
   seq: number
@@ -43,6 +55,7 @@ type Line =
   | { kind: "user"; seq: number; text: string }
   | BootstrapLine
   | { kind: "denied"; seq: number; name: string; reason: string }
+  | PermissionLine
   | { kind: "retry"; seq: number; text: string }
   | { kind: "error"; seq: number; text: string }
 
@@ -77,6 +90,7 @@ function toLines(events: RunEvent[]): Line[] {
   const lines: Line[] = []
   const byToolId = new Map<string, ToolLine>()
   let bootstrap: BootstrapLine | null = null
+  const byRequestId = new Map<string, PermissionLine>()
 
   for (const e of events) {
     switch (e.type) {
@@ -138,6 +152,31 @@ function toLines(events: RunEvent[]): Line[] {
           bootstrap.ms = e.durationMs
           bootstrap.output = e.output
         }
+        break
+      case "permission.request": {
+        const line: PermissionLine = {
+          kind: "permission",
+          seq: e.seq,
+          requestId: e.requestId,
+          name: e.name,
+          input: e.input,
+          allowed: null,
+          reason: "",
+        }
+        byRequestId.set(e.requestId, line)
+        lines.push(line)
+        break
+      }
+      case "permission.resolved": {
+        const line = byRequestId.get(e.requestId)
+        if (line) {
+          line.allowed = e.allowed
+          line.reason = e.reason
+        }
+        break
+      }
+      case "context.usage":
+        // Consumed by the composer's meter, not drawn in the transcript.
         break
       case "tool.denied":
         lines.push({ kind: "denied", seq: e.seq, name: e.name, reason: e.reason })
@@ -213,6 +252,69 @@ function ToolRow({ line }: { line: ToolLine }) {
           {JSON.stringify(line.input, null, 2)}
           {line.summary ? `\n\n--- result ---\n${line.summary}` : ""}
         </pre>
+      )}
+    </div>
+  )
+}
+
+/**
+ * The turn is stopped here until you answer.
+ *
+ * Rendered inline in the transcript rather than as a modal so it is legible in
+ * context — what Claude was about to do, right after what it said it would do —
+ * and so a replayed transcript shows what was asked and what you decided.
+ */
+function PermissionRow({
+  line,
+  onAnswer,
+}: {
+  line: PermissionLine
+  onAnswer?: (requestId: string, allowed: boolean) => void
+}) {
+  const [open, setOpen] = useState(line.allowed === null)
+  const pending = line.allowed === null
+
+  return (
+    <div
+      className={`my-2 rounded border px-3 py-2 ${
+        pending ? "border-warn bg-warn/5" : "border-line bg-chrome"
+      }`}
+    >
+      <div className="flex items-center gap-2 font-sans text-[12px]">
+        <span className={pending ? "text-warn" : "text-fg-dim"}>
+          {pending ? "needs your approval" : line.allowed ? "you allowed" : "you declined"}
+        </span>
+        <span className="font-mono text-syn-func">{line.name}</span>
+        <span className="truncate font-mono text-[11px] text-syn-string">
+          {describeInput(line.name, line.input)}
+        </span>
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="ml-auto shrink-0 text-[11px] text-fg-dim hover:text-fg"
+        >
+          {open ? "hide" : "details"}
+        </button>
+      </div>
+
+      {open && (
+        <pre className="mt-2 max-h-48 overflow-auto rounded-sm bg-editor p-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-fg-muted">
+          {JSON.stringify(line.input, null, 2)}
+        </pre>
+      )}
+
+      {pending && onAnswer && (
+        <div className="mt-2 flex gap-1.5">
+          <Button tone="primary" onClick={() => onAnswer(line.requestId, true)}>
+            allow
+          </Button>
+          <Button onClick={() => onAnswer(line.requestId, false)}>decline</Button>
+        </div>
+      )}
+      {pending && !onAnswer && (
+        <p className="mt-1 font-sans text-[11px] text-fg-dim">
+          This turn is no longer running, so it cannot be answered.
+        </p>
       )}
     </div>
   )
@@ -430,7 +532,14 @@ function AcceptBar({
  * Sharing it is the point: a chat you had in VS Code and a task aide ran itself
  * read identically, with the same tool rows and the same outcome line.
  */
-export function Transcript({ events }: { events: RunEvent[] }) {
+export function Transcript({
+  events,
+  onPermission,
+}: {
+  events: RunEvent[]
+  /** Present only for a live chat turn; a replayed transcript cannot be answered. */
+  onPermission?: (requestId: string, allowed: boolean) => void
+}) {
   const lines = useMemo(() => toLines(events), [events])
   if (lines.length === 0) return <Empty>Nothing in this transcript.</Empty>
   return (
@@ -459,8 +568,12 @@ export function Transcript({ events }: { events: RunEvent[] }) {
                       <div className="mb-0.5 font-sans text-[10px] tracking-wide text-syn-var uppercase">
                         you
                       </div>
-                      <p className="whitespace-pre-wrap text-fg">{line.text}</p>
+                      <Markdown text={line.text} />
                     </div>
+                  )
+                if (line.kind === "permission")
+                  return (
+                    <PermissionRow key={line.seq} line={line} onAnswer={onPermission} />
                   )
                 if (line.kind === "denied")
                   return (
@@ -497,14 +610,12 @@ export function Transcript({ events }: { events: RunEvent[] }) {
                   )
                 }
                 return (
-                  <p
+                  <div
                     key={line.seq}
-                    className={`px-1 whitespace-pre-wrap text-fg ${
-                      line.nested ? "ml-4 border-l border-line pl-3" : ""
-                    }`}
+                    className={`px-1 ${line.nested ? "ml-4 border-l border-line pl-3" : ""}`}
                   >
-                    {line.text}
-                  </p>
+                    <Markdown text={line.text} />
+                  </div>
                 )
               })}
             </div>

@@ -1,6 +1,9 @@
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
+import type { Attachment, ChatMode, ContextUsage, EffortLevel, RunEvent } from "@aide/protocol"
 import { api, type ConversationSummary, type ConversationView } from "../api.js"
+import { Composer } from "../Composer.js"
 import { Empty, PaneHeader } from "../ui.js"
+import { useRunStream } from "../useRunStream.js"
 import { Transcript } from "./Run.js"
 
 /** Past this, a transcript is slow to read and slower to render; ask first. */
@@ -101,39 +104,60 @@ export function ConversationList({
 }
 
 /**
- * One conversation, replayed.
+ * One conversation: what was said before, plus whatever is being said now.
  *
- * Not streamed: this is a finished transcript read off disk, so there is nothing
- * to subscribe to. It renders through the same `Transcript` the live run pane
- * uses, because the daemon normalizes session messages into the same events a
- * run emits — so a chat from VS Code and a task aide ran itself read alike.
+ * Two sources feed one transcript. The history is read off disk — a finished
+ * file, so there is nothing to subscribe to. The turn in flight arrives on the
+ * same live event stream a task run uses. They render through the same
+ * `Transcript` because the daemon normalizes session messages into the same
+ * events a run emits.
+ *
+ * `summary` being null is not an error state: it is a NEW conversation, which
+ * has no id until the SDK assigns one on the first turn.
  */
 export function ConversationPane({
   projectId,
   summary,
+  onStarted,
 }: {
   projectId: string | null
   summary: ConversationSummary | null
+  /** A new chat learns its session id mid-turn; the list needs to know. */
+  onStarted?: (sessionId: string) => void
 }) {
   const [view, setView] = useState<ConversationView | null>(null)
   const [error, setError] = useState<string | null>(null)
   /** Set when the transcript is big enough that loading it needs a decision. */
   const [heavy, setHeavy] = useState(false)
+  /** The turn in flight, if any. */
+  const [runId, setRunId] = useState<string | null>(null)
+  /**
+   * Events from every turn sent in this sitting, keyed so a re-subscribe that
+   * replays the log does not duplicate them. Kept separate from `view` because
+   * the session file on disk is only rewritten when the turn ends.
+   */
+  const [sent, setSent] = useState<Map<string, RunEvent>>(new Map())
+  /** Known once a new conversation's first turn starts. */
+  const [liveSessionId, setLiveSessionId] = useState<string | null>(null)
 
-  const sessionId = summary?.sessionId ?? null
+  const sessionId = summary?.sessionId ?? liveSessionId
+  const { events: live } = useRunStream(runId)
 
   useEffect(() => {
     setView(null)
     setError(null)
+    setRunId(null)
+    setSent(new Map())
+    setLiveSessionId(null)
     setHeavy(Boolean(summary && summary.bytes > HEAVY_BYTES))
-  }, [sessionId, summary?.bytes])
+  }, [summary?.sessionId, summary?.bytes])
 
   useEffect(() => {
-    if (!projectId || !sessionId || heavy) return
+    if (!projectId || !summary || heavy) return
 
     let cancelled = false
     void api
-      .conversation(projectId, sessionId)
+      .conversation(projectId, summary.sessionId)
       .then((v) => {
         if (!cancelled) setView(v)
       })
@@ -143,24 +167,88 @@ export function ConversationPane({
     return () => {
       cancelled = true
     }
-  }, [projectId, sessionId, heavy])
+  }, [projectId, summary?.sessionId, heavy])
 
-  if (!summary) {
-    return (
-      <section className="flex min-h-0 min-w-0 flex-1 flex-col bg-editor">
-        <PaneHeader title="conversation" />
-        <Empty>Select a conversation to read it.</Empty>
-      </section>
-    )
+  // Fold the live stream into the accumulator. Keyed by runId+seq so the replay
+  // a reconnect delivers lands on top of what is already there.
+  useEffect(() => {
+    if (live.length === 0) return
+    setSent((prev) => {
+      const next = new Map(prev)
+      for (const e of live) next.set(`${e.runId}:${e.seq}`, e)
+      return next
+    })
+    for (const e of live) {
+      if (e.type === "run.started" && e.sessionId && !liveSessionId) {
+        setLiveSessionId(e.sessionId)
+        onStarted?.(e.sessionId)
+      }
+    }
+  }, [live, liveSessionId, onStarted])
+
+  const turnEvents = useMemo(
+    () => [...sent.values()].sort((a, b) => (a.runId === b.runId ? a.seq - b.seq : 0)),
+    [sent],
+  )
+
+  // The turn is over when its log has a terminal event — the same invariant the
+  // run pane relies on.
+  const finished = useMemo(
+    () =>
+      runId !== null &&
+      turnEvents.some(
+        (e) => e.runId === runId && (e.type === "run.finished" || e.type === "run.error"),
+      ),
+    [turnEvents, runId],
+  )
+  const busy = runId !== null && !finished
+
+  const usage = useMemo<ContextUsage | null>(() => {
+    for (let i = turnEvents.length - 1; i >= 0; i -= 1) {
+      const e = turnEvents[i]
+      if (e?.type === "context.usage") {
+        return { totalTokens: e.totalTokens, maxTokens: e.maxTokens, percentage: e.percentage }
+      }
+    }
+    return null
+  }, [turnEvents])
+
+  const events = useMemo(
+    () => [...(view?.events ?? []), ...turnEvents],
+    [view?.events, turnEvents],
+  )
+
+  const send = async (msg: {
+    text: string
+    attachments: Attachment[]
+    mode: ChatMode
+    effort: EffortLevel
+  }) => {
+    if (!projectId) return
+    setError(null)
+    try {
+      const { runId: id } = await api.chat(projectId, { sessionId, ...msg })
+      setRunId(id)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
   }
+
+  const answer = (requestId: string, allowed: boolean) => {
+    if (!runId) return
+    void api.answerPermission(runId, requestId, allowed).catch((err) => {
+      setError(err instanceof Error ? err.message : String(err))
+    })
+  }
+
+  const title = summary ? `conversation · ${summary.title}` : "new chat"
 
   return (
     <section className="flex min-h-0 min-w-0 flex-1 flex-col bg-editor">
-      <PaneHeader title={`conversation · ${summary.title}`} />
+      <PaneHeader title={title} />
+
       <div className="flex-1 overflow-auto px-3 py-2 font-mono text-xs leading-relaxed">
-        {error ? (
-          <Empty>{error}</Empty>
-        ) : heavy ? (
+        {heavy && summary ? (
           <Empty>
             This transcript is {mb(summary.bytes)} on disk.{" "}
             <button
@@ -171,25 +259,44 @@ export function ConversationPane({
               Load it anyway
             </button>
           </Empty>
-        ) : view === null ? (
+        ) : summary && view === null && !error ? (
           <Empty>Reading…</Empty>
+        ) : events.length === 0 ? (
+          <Empty>
+            {projectId
+              ? "Say something. This runs in the project root and can edit it."
+              : "Select a project."}
+          </Empty>
         ) : (
           <>
-            {view.truncated && (
+            {view?.truncated && (
               <p className="mb-2 border-b border-line pb-2 font-sans text-[11px] text-warn">
                 Showing the first part of {view.totalMessages} messages.
               </p>
             )}
-            <Transcript events={view.events} />
+            <Transcript events={events} onPermission={busy ? answer : undefined} />
           </>
         )}
+        {error && <p className="mt-2 font-sans text-[11px] text-err">{error}</p>}
       </div>
+
+      {projectId && (
+        <Composer
+          busy={busy}
+          usage={usage}
+          onSend={(msg) => void send(msg)}
+          onInterrupt={() => {
+            if (runId) void api.interruptChat(runId).catch(() => {})
+          }}
+        />
+      )}
+
       <footer className="flex h-[22px] shrink-0 items-center gap-4 border-t border-line bg-chrome px-3 font-sans text-[11px] text-fg-muted">
-        <span className={kindColor(summary)}>{kindLabel(summary)}</span>
+        {summary && <span className={kindColor(summary)}>{kindLabel(summary)}</span>}
         {view && <span>{view.totalMessages} messages</span>}
-        <span>{ago(summary.lastModified)}</span>
-        <span className="ml-auto truncate text-fg-dim" title={summary.cwd}>
-          {summary.cwd}
+        {busy && <span className="text-info">working…</span>}
+        <span className="ml-auto truncate text-fg-dim" title={summary?.cwd}>
+          {summary?.cwd ?? "runs in the project root"}
         </span>
       </footer>
     </section>

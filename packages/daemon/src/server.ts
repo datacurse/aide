@@ -1,7 +1,15 @@
 import fastifyWebsocket from "@fastify/websocket"
 import Fastify, { type FastifyReply } from "fastify"
-import type { ClientMessage, RunEvent, ServerMessage } from "@aide/protocol"
-import { worktreePath } from "@aide/protocol"
+import type {
+  Attachment,
+  ChatMode,
+  ClientMessage,
+  EffortLevel,
+  RunEvent,
+  ServerMessage,
+} from "@aide/protocol"
+import { CHAT_MODES, EFFORT_LEVELS, worktreePath } from "@aide/protocol"
+import { ChatLane } from "./chat.js"
 import { CONFIG } from "./config.js"
 import { EventLog } from "./eventlog.js"
 import { draftCommitMessage } from "./helper.js"
@@ -25,6 +33,7 @@ import {
 
 const log = new EventLog()
 const supervisor = new Supervisor(log)
+const chat = new ChatLane(log)
 
 const app = Fastify({ logger: { level: process.env["AIDE_LOG_LEVEL"] ?? "warn" } })
 await app.register(fastifyWebsocket)
@@ -405,6 +414,71 @@ app.get("/api/projects/:id/conversations/:sessionId", async (req, reply) => {
   }
 })
 
+/**
+ * Send a message. `sessionId` may be null, which starts a new conversation.
+ *
+ * Returns as soon as the turn is admitted, with a runId to subscribe to — the
+ * answer arrives on the event stream, not in this response.
+ */
+app.post("/api/projects/:id/chat", async (req, reply) => {
+  const { id } = req.params as { id: string }
+  const body = (req.body ?? {}) as {
+    sessionId?: string | null
+    text?: string
+    attachments?: Attachment[]
+    mode?: string
+    effort?: string
+  }
+  if (!body.text?.trim() && !body.attachments?.length) {
+    return reply.code(400).send({ message: "nothing to send" })
+  }
+
+  const project = await getProject(id)
+  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
+
+  // Validated rather than cast: these come from a form, and an unknown mode
+  // would otherwise reach the SDK as an undefined permission mode.
+  const mode = (CHAT_MODES as readonly string[]).includes(body.mode ?? "")
+    ? (body.mode as ChatMode)
+    : "manual"
+  const effort = (EFFORT_LEVELS as readonly string[]).includes(body.effort ?? "")
+    ? (body.effort as EffortLevel)
+    : "high"
+
+  try {
+    const runId = await chat.send({
+      project,
+      sessionId: body.sessionId ?? null,
+      text: body.text?.trim() ?? "",
+      attachments: body.attachments ?? [],
+      mode,
+      effort,
+    })
+    return { runId }
+  } catch (err) {
+    return reply.code(409).send({ message: err instanceof Error ? err.message : String(err) })
+  }
+})
+
+/** Answer a tool call the turn is blocked on. */
+app.post("/api/runs/:runId/permissions/:requestId", async (req, reply) => {
+  const { runId, requestId } = req.params as { runId: string; requestId: string }
+  const { allowed } = (req.body ?? {}) as { allowed?: boolean }
+  if (typeof allowed !== "boolean") {
+    return reply.code(400).send({ message: "body must include { allowed: boolean }" })
+  }
+  if (!chat.resolvePermission(runId, requestId, allowed)) {
+    return reply.code(404).send(notFound("that request is no longer waiting"))
+  }
+  return { ok: true }
+})
+
+app.post("/api/runs/:runId/chat-interrupt", async (req, reply) => {
+  const { runId } = req.params as { runId: string }
+  if (!chat.interrupt(runId)) return reply.code(404).send(notFound(`run ${runId} is not active`))
+  return { interrupted: true }
+})
+
 // ---------------------------------------------------------------------------
 // Live stream
 // ---------------------------------------------------------------------------
@@ -492,6 +566,7 @@ async function stopEverything(why: string): Promise<void> {
   if (stopping) return
   stopping = true
   console.log(`aide daemon stopping (${why})`)
+  chat.shutdown()
   await supervisor.shutdown()
   await app.close().catch(() => {})
   process.exit(0)
