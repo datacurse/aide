@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import type { RunEvent, RunStatus, TaskStatus } from "@aide/protocol"
 import { api, type CommitResult, type DiffView, type TaskView } from "../api.js"
 import { Markdown } from "../Markdown.js"
 import { Button, Empty, PaneHeader, STATUS_STYLE, money } from "../ui.js"
 import { useRunStream, type StreamState } from "../useRunStream.js"
+import { useStickToBottom } from "../useStickToBottom.js"
 
 /** tool.start and tool.end arrive separately; pair them into one line per call. */
 interface ToolLine {
@@ -546,6 +547,7 @@ export function Transcript({
   onPermission?: (requestId: string, allowed: boolean) => void
 }) {
   const lines = useMemo(() => toLines(events), [events])
+
   if (lines.length === 0) return <Empty>Nothing in this transcript.</Empty>
   return (
             <div className="space-y-1">
@@ -642,10 +644,26 @@ export function RunPane({
   const [tab, setTab] = useState<"stream" | "diff">("stream")
   const [diff, setDiff] = useState<DiffView | null>(null)
   const [busy, setBusy] = useState(false)
-  const scroller = useRef<HTMLDivElement>(null)
-  const pinned = useRef(true)
+  const { scroller, content, toBottom, toTop, onScroll } = useStickToBottom()
+
+  // The two tabs want opposite ends. A transcript is read newest-last, so it
+  // follows the tail; a diff is read top-down, and landing at the bottom of one
+  // is disorienting. Both panes share a scroller, so the tab has to say which.
+  useEffect(() => {
+    if (tab === "diff") toTop()
+    else toBottom()
+  }, [tab, toBottom, toTop])
+
 
   const lines = useMemo(() => toLines(events), [events])
+
+  // The two tabs want opposite ends. A transcript is read newest-last, so it
+  // follows the tail; a diff is read top-down, and landing at the bottom of one
+  // is disorienting. Both panes share a scroller, so the tab has to say which.
+  useEffect(() => {
+    if (tab === "diff") toTop()
+    else toBottom()
+  }, [tab, toBottom, toTop])
   const finished = useMemo(
     () => events.find((e) => e.type === "run.finished"),
     [events],
@@ -662,12 +680,6 @@ export function RunPane({
         cost: finished.totalCostUsd,
       })
     : null
-
-  // Follow the tail, but stop fighting the user the moment they scroll up.
-  useEffect(() => {
-    const el = scroller.current
-    if (el && pinned.current) el.scrollTop = el.scrollHeight
-  }, [lines.length])
 
   useEffect(() => {
     if (tab !== "diff" || !projectId || !task) return
@@ -738,12 +750,10 @@ export function RunPane({
 
       <div
         ref={scroller}
-        onScroll={(e) => {
-          const el = e.currentTarget
-          pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40
-        }}
+        onScroll={onScroll}
         className="flex-1 overflow-x-hidden overflow-y-auto px-3 py-2 font-mono text-xs leading-relaxed"
       >
+        <div ref={content}>
         {tab === "diff" ? (
           diff === null ? (
             <Empty>Loading diff…</Empty>
@@ -780,6 +790,7 @@ export function RunPane({
         ) : (
           <Transcript events={events} />
         )}
+        </div>
       </div>
 
       {projectId && !isActive && ACCEPTABLE.has(task.status) && (

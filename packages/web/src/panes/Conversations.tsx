@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import type { Attachment, ChatMode, ContextUsage, EffortLevel, RunEvent } from "@aide/protocol"
 import { api, type ConversationSummary, type ConversationView } from "../api.js"
 import { Composer } from "../Composer.js"
@@ -6,6 +6,7 @@ import { Markdown } from "../Markdown.js"
 import { WorkingBar } from "../Working.js"
 import { Empty, PaneHeader } from "../ui.js"
 import { useRunStream } from "../useRunStream.js"
+import { useStickToBottom } from "../useStickToBottom.js"
 import { Transcript } from "./Run.js"
 
 /**
@@ -233,22 +234,15 @@ export function ConversationPane({
   const hidden = showAll ? 0 : Math.max(0, events.length - VISIBLE_TAIL)
   const shown = hidden > 0 ? events.slice(hidden) : events
 
-  // Follow the tail, but stop fighting the user the moment they scroll up. Same
-  // rule as the run pane; without it a reply lands hundreds of messages below
-  // the fold and reads as nothing having happened at all.
-  const scroller = useRef<HTMLDivElement>(null)
-  const pinned = useRef(true)
-  useEffect(() => {
-    const el = scroller.current
-    if (el && pinned.current) el.scrollTop = el.scrollHeight
-  }, [shown.length, draft.text, draft.thinking])
+  // Follow the tail while the reader is at the tail, and leave them alone the
+  // moment they scroll up. See useStickToBottom for why this watches the content
+  // rather than a dependency array.
+  const { scroller, content, toBottom, onScroll, following } = useStickToBottom()
 
   // A newly opened conversation starts at the end, where the recent messages are.
   useEffect(() => {
-    pinned.current = true
-    const el = scroller.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [sessionId, view?.events.length])
+    toBottom()
+  }, [sessionId, view?.events.length, toBottom])
 
   const send = async (msg: {
     text: string
@@ -276,17 +270,15 @@ export function ConversationPane({
   const title = summary ? `conversation · ${summary.title}` : "new chat"
 
   return (
-    <section className="flex min-h-0 min-w-0 flex-1 flex-col bg-editor">
+    <section className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-editor">
       <PaneHeader title={title} />
 
       <div
         ref={scroller}
-        onScroll={(e) => {
-          const el = e.currentTarget
-          pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60
-        }}
-        className="flex-1 overflow-x-hidden overflow-y-auto px-3 py-2 font-mono text-xs leading-relaxed"
+        onScroll={onScroll}
+        className="relative flex-1 overflow-x-hidden overflow-y-auto px-3 py-2 font-mono text-xs leading-relaxed"
       >
+        <div ref={content}>
         {summary && view === null && !error ? (
           <Empty>Reading…</Empty>
         ) : events.length === 0 ? (
@@ -329,7 +321,20 @@ export function ConversationPane({
           </>
         )}
         {error && <p className="mt-2 font-sans text-[11px] text-err">{error}</p>}
+        </div>
       </div>
+
+      {/* Only while something is arriving: a button offering to jump to content
+          that is not moving would be noise. */}
+      {!following && busy && (
+        <button
+          type="button"
+          onClick={toBottom}
+          className="absolute right-6 bottom-32 z-10 rounded-full border border-line bg-chrome px-3 py-1 font-sans text-[11px] text-fg-muted shadow-lg hover:text-fg"
+        >
+          ↓ jump to latest
+        </button>
+      )}
 
       {busy && (
         <WorkingBar
