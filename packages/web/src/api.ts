@@ -1,4 +1,14 @@
-import type { Project, RunEvent, Task } from "@aide/protocol"
+import type { ConversationSummary, Project, RunEvent, Task } from "@aide/protocol"
+
+export type { ConversationSummary }
+
+/** A conversation's replayed transcript. */
+export interface ConversationView {
+  summary: ConversationSummary
+  events: RunEvent[]
+  truncated: boolean
+  totalMessages: number
+}
 
 export type ProjectView = Project & { activeRuns: number }
 export type TaskView = Task & { activeRunId: string | null }
@@ -113,6 +123,11 @@ export const api = {
     call<RunEvent[]>(`/api/runs/${runId}/events?fromSeq=${fromSeq}`),
   diff: (projectId: string, taskId: string) =>
     call<DiffView>(`/api/projects/${projectId}/tasks/${taskId}/diff`),
+
+  conversations: (projectId: string) =>
+    call<ConversationSummary[]>(`/api/projects/${projectId}/conversations`),
+  conversation: (projectId: string, sessionId: string) =>
+    call<ConversationView>(`/api/projects/${projectId}/conversations/${sessionId}`),
 
   branch: (projectId: string) => call<{ branch: string | null }>(`/api/projects/${projectId}/branch`),
   draftCommit: (projectId: string, taskId: string) =>

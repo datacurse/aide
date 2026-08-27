@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react"
 import { api, type Health, type ProjectView, type TaskView } from "./api.js"
+import type { ConversationSummary } from "@aide/protocol"
 import { DaemonBar } from "./Daemon.js"
+import { ConversationList, ConversationPane } from "./panes/Conversations.js"
 import { RunPane } from "./panes/Run.js"
 import { Button, Empty, PaneHeader, StatusDot, STATUS_STYLE } from "./ui.js"
 
@@ -15,6 +17,9 @@ export function App() {
   const [taskId, setTaskId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [composing, setComposing] = useState(false)
+  /** Which list the second column shows, and therefore what the main pane is. */
+  const [mode, setMode] = useState<"tasks" | "chats">("tasks")
+  const [conversation, setConversation] = useState<ConversationSummary | null>(null)
   const [draft, setDraft] = useState({ title: "", body: "" })
 
   const refresh = useCallback(async () => {
@@ -124,12 +129,28 @@ export function App() {
           </div>
         </aside>
 
-        {/* Tasks */}
+        {/* Tasks and conversations */}
         <aside className="flex w-80 shrink-0 flex-col border-r border-line bg-chrome">
-          <PaneHeader title="tasks">
-            <Button disabled={!project} onClick={() => setComposing((v) => !v)}>
-              new
-            </Button>
+          <PaneHeader title={mode}>
+            <div className="mr-1 flex overflow-hidden rounded border border-line">
+              {(["tasks", "chats"] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setMode(m)}
+                  className={`px-2 py-0.5 text-xs ${
+                    mode === m ? "bg-input text-fg" : "text-fg-muted hover:text-fg"
+                  }`}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
+            {mode === "tasks" && (
+              <Button disabled={!project} onClick={() => setComposing((v) => !v)}>
+                new
+              </Button>
+            )}
           </PaneHeader>
 
           {composing && project && (
@@ -157,6 +178,13 @@ export function App() {
             </div>
           )}
 
+          {mode === "chats" ? (
+            <ConversationList
+              projectId={projectId}
+              selected={conversation?.sessionId ?? null}
+              onSelect={setConversation}
+            />
+          ) : (
           <div className="flex-1 overflow-auto py-1">
             {!project ? (
               <Empty>Select a project.</Empty>
@@ -184,9 +212,14 @@ export function App() {
               ))
             )}
           </div>
+          )}
         </aside>
 
-        <RunPane projectId={projectId} task={task} runId={runId} onChanged={() => void refresh()} />
+        {mode === "chats" ? (
+          <ConversationPane projectId={projectId} summary={conversation} />
+        ) : (
+          <RunPane projectId={projectId} task={task} runId={runId} onChanged={() => void refresh()} />
+        )}
       </main>
     </div>
   )

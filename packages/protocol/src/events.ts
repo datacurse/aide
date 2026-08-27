@@ -68,6 +68,15 @@ export type RunEventBody =
       worktree: string
       sessionId: string | null
     }
+  /**
+   * What the human said.
+   *
+   * A task run has exactly one of these — the request — and it was invisible
+   * until now: `task.prompt` was on the wire and rendered nowhere, so a
+   * transcript read as an agent talking to itself. A replayed conversation has
+   * one per turn, and they are most of what makes it a conversation.
+   */
+  | { type: "user.message"; text: string }
   /** `parentToolUseId` is non-null for subagent output, null for the main loop. */
   | { type: "assistant.text"; text: string; parentToolUseId: string | null }
   | { type: "assistant.thinking"; text: string; parentToolUseId: string | null }

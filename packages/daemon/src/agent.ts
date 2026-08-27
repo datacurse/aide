@@ -84,6 +84,138 @@ function toModelSpend(raw: unknown): Record<string, ModelSpend> {
 
 const statusFor = (subtype: string): RunStatus => (subtype === "success" ? "success" : "failed")
 
+export interface NormalizeContext {
+  taskId: string
+  projectId: string
+  cwd: string
+  worktree: string
+  /** Used when the message does not name a model of its own. */
+  fallbackModel: string
+}
+
+/**
+ * One SDK message in, zero or more `RunEventBody` out. THE mapping.
+ *
+ * Kept as a pure function rather than inlined in the streaming loop because a
+ * session read back from `~/.claude/projects/*.jsonl` carries the same message
+ * shapes as the live stream. Sharing this means a replayed conversation renders
+ * identically to a live run — same tool rows, same outcome line — and it keeps
+ * the invariant this file exists for: the SDK's ~30-member message union is
+ * interpreted in exactly one place, so there is one thing to update when it
+ * grows.
+ */
+export function normalizeSdkMessage(
+  message: unknown,
+  ctx: NormalizeContext,
+): RunEventBody[] {
+  const m = (message ?? {}) as Record<string, unknown>
+  const type = m["type"]
+
+  if (type === "system" && m["subtype"] === "init") {
+    return [
+      {
+        type: "run.started",
+        taskId: ctx.taskId,
+        projectId: ctx.projectId,
+        model: String(m["model"] ?? ctx.fallbackModel),
+        cwd: ctx.cwd,
+        worktree: ctx.worktree,
+        sessionId: (m["session_id"] as string) ?? null,
+      },
+    ]
+  }
+
+  if (type === "system" && m["subtype"] === "api_retry") {
+    return [
+      {
+        type: "run.retry",
+        attempt: Number(m["attempt"] ?? 0),
+        maxRetries: Number(m["max_retries"] ?? 0),
+        retryDelayMs: Number(m["retry_delay_ms"] ?? 0),
+        error: String(m["error"] ?? "unknown"),
+      },
+    ]
+  }
+
+  if (type === "assistant") {
+    const parent = (m["parent_tool_use_id"] as string | null) ?? null
+    const content = (m["message"] as { content?: unknown[] })?.content ?? []
+    if (!Array.isArray(content)) return []
+    const out: RunEventBody[] = []
+    for (const b of content) {
+      const block = b as Record<string, unknown>
+      if (block["type"] === "text") {
+        const text = String(block["text"] ?? "")
+        if (text.trim()) out.push({ type: "assistant.text", text, parentToolUseId: parent })
+      } else if (block["type"] === "thinking") {
+        const text = String(block["thinking"] ?? "")
+        if (text.trim()) out.push({ type: "assistant.thinking", text, parentToolUseId: parent })
+      } else if (block["type"] === "tool_use") {
+        out.push({
+          type: "tool.start",
+          toolUseId: String(block["id"] ?? ""),
+          name: String(block["name"] ?? "?"),
+          input: block["input"],
+          parentToolUseId: parent,
+        })
+      }
+    }
+    return out
+  }
+
+  if (type === "user") {
+    // `unknown`, not `unknown[]`: a plain-text turn stores a string here, and
+    // annotating it as an array narrows the string branch below to `never`.
+    const content: unknown = (m["message"] as { content?: unknown })?.content ?? []
+    // A plain-text user turn is a string, not blocks. In a live run that only
+    // happens for the prompt we sent ourselves; in a replayed session it is
+    // every message the human typed, which is most of what makes a chat a chat.
+    if (typeof content === "string") {
+      return content.trim() ? [{ type: "user.message", text: content }] : []
+    }
+    if (!Array.isArray(content)) return []
+    const out: RunEventBody[] = []
+    for (const b of content) {
+      const block = b as Record<string, unknown>
+      if (block["type"] === "tool_result") {
+        out.push({
+          type: "tool.end",
+          toolUseId: String(block["tool_use_id"] ?? ""),
+          ok: block["is_error"] !== true,
+          summary: summarizeToolResult(block["content"]),
+        })
+      } else if (block["type"] === "text") {
+        const text = String(block["text"] ?? "")
+        if (text.trim()) out.push({ type: "user.message", text })
+      }
+    }
+    return out
+  }
+
+  if (type === "result") {
+    const subtype = String(m["subtype"] ?? "unknown")
+    const denials = (m["permission_denials"] as Array<Record<string, unknown>>) ?? []
+    return [
+      {
+        type: "run.finished",
+        subtype,
+        status: statusFor(subtype),
+        // Includes subagent spend; `usage` would not. Both are estimates.
+        totalCostUsd: Number(m["total_cost_usd"] ?? 0),
+        modelUsage: toModelSpend(m["modelUsage"]),
+        numTurns: Number(m["num_turns"] ?? 0),
+        durationMs: Number(m["duration_ms"] ?? 0),
+        permissionDenials: denials.map((d) => ({
+          tool: String(d["tool_name"] ?? d["tool"] ?? "?"),
+          reason: String(d["message"] ?? d["reason"] ?? ""),
+        })),
+      },
+    ]
+  }
+
+  return []
+}
+
 /** Cap the project doc so a runaway project.md cannot crowd out the task. */
 const MAX_PROJECT_DOC_CHARS = 8_000
 
@@ -206,90 +338,15 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
     for await (const message of q) {
       while (pending.length) yield pending.shift()!
 
-      const m = message as unknown as Record<string, unknown>
-
-      if (message.type === "system" && m["subtype"] === "init") {
-        yield {
-          type: "run.started",
-          taskId: opts.taskId,
-          projectId: opts.projectId,
-          model: String(m["model"] ?? opts.model),
-          cwd: opts.cwd,
-          worktree: opts.worktree,
-          sessionId: (m["session_id"] as string) ?? null,
-        }
-        continue
-      }
-
-      if (message.type === "system" && m["subtype"] === "api_retry") {
-        yield {
-          type: "run.retry",
-          attempt: Number(m["attempt"] ?? 0),
-          maxRetries: Number(m["max_retries"] ?? 0),
-          retryDelayMs: Number(m["retry_delay_ms"] ?? 0),
-          error: String(m["error"] ?? "unknown"),
-        }
-        continue
-      }
-
-      if (message.type === "assistant") {
-        const parent = (m["parent_tool_use_id"] as string | null) ?? null
-        const content = (m["message"] as { content?: unknown[] })?.content ?? []
-        for (const b of content) {
-          const block = b as Record<string, unknown>
-          if (block["type"] === "text") {
-            const text = String(block["text"] ?? "")
-            if (text.trim()) yield { type: "assistant.text", text, parentToolUseId: parent }
-          } else if (block["type"] === "thinking") {
-            const text = String(block["thinking"] ?? "")
-            if (text.trim()) yield { type: "assistant.thinking", text, parentToolUseId: parent }
-          } else if (block["type"] === "tool_use") {
-            yield {
-              type: "tool.start",
-              toolUseId: String(block["id"] ?? ""),
-              name: String(block["name"] ?? "?"),
-              input: block["input"],
-              parentToolUseId: parent,
-            }
-          }
-        }
-        continue
-      }
-
-      if (message.type === "user") {
-        const content = (m["message"] as { content?: unknown[] })?.content ?? []
-        if (!Array.isArray(content)) continue
-        for (const b of content) {
-          const block = b as Record<string, unknown>
-          if (block["type"] !== "tool_result") continue
-          yield {
-            type: "tool.end",
-            toolUseId: String(block["tool_use_id"] ?? ""),
-            ok: block["is_error"] !== true,
-            summary: summarizeToolResult(block["content"]),
-          }
-        }
-        continue
-      }
-
-      if (message.type === "result") {
-        finished = true
-        const subtype = String(m["subtype"] ?? "unknown")
-        const denials = (m["permission_denials"] as Array<Record<string, unknown>>) ?? []
-        yield {
-          type: "run.finished",
-          subtype,
-          status: statusFor(subtype),
-          // Includes subagent spend; `usage` would not. Both are estimates.
-          totalCostUsd: Number(m["total_cost_usd"] ?? 0),
-          modelUsage: toModelSpend(m["modelUsage"]),
-          numTurns: Number(m["num_turns"] ?? 0),
-          durationMs: Number(m["duration_ms"] ?? 0),
-          permissionDenials: denials.map((d) => ({
-            tool: String(d["tool_name"] ?? d["tool"] ?? "?"),
-            reason: String(d["message"] ?? d["reason"] ?? ""),
-          })),
-        }
+      for (const event of normalizeSdkMessage(message, {
+        taskId: opts.taskId,
+        projectId: opts.projectId,
+        cwd: opts.cwd,
+        worktree: opts.worktree,
+        fallbackModel: opts.model,
+      })) {
+        if (event.type === "run.finished") finished = true
+        yield event
       }
     }
     while (pending.length) yield pending.shift()!

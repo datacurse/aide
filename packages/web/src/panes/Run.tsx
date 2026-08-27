@@ -40,6 +40,7 @@ type Line =
   | { kind: "text"; seq: number; text: string; nested: boolean }
   | { kind: "thinking"; seq: number; text: string }
   | { kind: "queued"; seq: number; position: number }
+  | { kind: "user"; seq: number; text: string }
   | BootstrapLine
   | { kind: "denied"; seq: number; name: string; reason: string }
   | { kind: "retry"; seq: number; text: string }
@@ -79,6 +80,9 @@ function toLines(events: RunEvent[]): Line[] {
 
   for (const e of events) {
     switch (e.type) {
+      case "user.message":
+        lines.push({ kind: "user", seq: e.seq, text: e.text })
+        break
       case "assistant.text":
         lines.push({ kind: "text", seq: e.seq, text: e.text, nested: !!e.parentToolUseId })
         break
@@ -417,6 +421,96 @@ function AcceptBar({
   )
 }
 
+
+/**
+ * The transcript, as a component rather than as part of the run pane.
+ *
+ * A conversation replayed from the SDK's session store normalizes into the same
+ * `RunEvent` shapes a live run emits, so it renders through exactly this code.
+ * Sharing it is the point: a chat you had in VS Code and a task aide ran itself
+ * read identically, with the same tool rows and the same outcome line.
+ */
+export function Transcript({ events }: { events: RunEvent[] }) {
+  const lines = useMemo(() => toLines(events), [events])
+  if (lines.length === 0) return <Empty>Nothing in this transcript.</Empty>
+  return (
+            <div className="space-y-1">
+              {lines.map((line) => {
+                if (line.kind === "tool") return <ToolRow key={line.seq} line={line} />
+                if (line.kind === "bootstrap") return <BootstrapRow key={line.seq} line={line} />
+                if (line.kind === "thinking")
+                  return (
+                    <p key={line.seq} className="px-1 text-syn-comment italic">
+                      {line.text}
+                    </p>
+                  )
+                if (line.kind === "queued")
+                  return (
+                    <p key={line.seq} className="px-1 text-fg-dim">
+                      ◦ queued{line.position > 1 ? ` behind ${line.position - 1}` : ""}
+                    </p>
+                  )
+                if (line.kind === "user")
+                  return (
+                    <div
+                      key={line.seq}
+                      className="my-2 border-l-2 border-syn-var bg-chrome px-3 py-1.5"
+                    >
+                      <div className="mb-0.5 font-sans text-[10px] tracking-wide text-syn-var uppercase">
+                        you
+                      </div>
+                      <p className="whitespace-pre-wrap text-fg">{line.text}</p>
+                    </div>
+                  )
+                if (line.kind === "denied")
+                  return (
+                    <p key={line.seq} className="px-1 text-warn">
+                      ✗ denied {line.name} — {line.reason}
+                    </p>
+                  )
+                if (line.kind === "retry")
+                  return (
+                    <p key={line.seq} className="px-1 text-warn">
+                      ↻ {line.text}
+                    </p>
+                  )
+                if (line.kind === "error")
+                  return (
+                    <p key={line.seq} className="px-1 text-err" title={line.text}>
+                      ! {humanizeError(line.text)}
+                    </p>
+                  )
+                if (line.kind === "outcome") {
+                  const outcome = describeOutcome(line)
+                  return (
+                    <p
+                      key={line.seq}
+                      title={`SDK result subtype: ${line.subtype}`}
+                      className={`mt-3 border-t border-line px-1 pt-2 ${outcome.className}`}
+                    >
+                      ● {outcome.label}
+                      <span className="text-fg-dim">
+                        {" — "}
+                        {line.turns} turns · {(line.ms / 1000).toFixed(1)}s · ~{money(line.cost)} est.
+                      </span>
+                    </p>
+                  )
+                }
+                return (
+                  <p
+                    key={line.seq}
+                    className={`px-1 whitespace-pre-wrap text-fg ${
+                      line.nested ? "ml-4 border-l border-line pl-3" : ""
+                    }`}
+                  >
+                    {line.text}
+                  </p>
+                )
+              })}
+            </div>
+  )
+}
+
 export function RunPane({
   projectId,
   task,
@@ -568,68 +662,7 @@ export function RunPane({
         ) : lines.length === 0 ? (
           <Empty>Waiting for the first event…</Empty>
         ) : (
-          <div className="space-y-1">
-            {lines.map((line) => {
-              if (line.kind === "tool") return <ToolRow key={line.seq} line={line} />
-              if (line.kind === "bootstrap") return <BootstrapRow key={line.seq} line={line} />
-              if (line.kind === "thinking")
-                return (
-                  <p key={line.seq} className="px-1 text-syn-comment italic">
-                    {line.text}
-                  </p>
-                )
-              if (line.kind === "queued")
-                return (
-                  <p key={line.seq} className="px-1 text-fg-dim">
-                    ◦ queued{line.position > 1 ? ` behind ${line.position - 1}` : ""}
-                  </p>
-                )
-              if (line.kind === "denied")
-                return (
-                  <p key={line.seq} className="px-1 text-warn">
-                    ✗ denied {line.name} — {line.reason}
-                  </p>
-                )
-              if (line.kind === "retry")
-                return (
-                  <p key={line.seq} className="px-1 text-warn">
-                    ↻ {line.text}
-                  </p>
-                )
-              if (line.kind === "error")
-                return (
-                  <p key={line.seq} className="px-1 text-err" title={line.text}>
-                    ! {humanizeError(line.text)}
-                  </p>
-                )
-              if (line.kind === "outcome") {
-                const outcome = describeOutcome(line)
-                return (
-                  <p
-                    key={line.seq}
-                    title={`SDK result subtype: ${line.subtype}`}
-                    className={`mt-3 border-t border-line px-1 pt-2 ${outcome.className}`}
-                  >
-                    ● {outcome.label}
-                    <span className="text-fg-dim">
-                      {" — "}
-                      {line.turns} turns · {(line.ms / 1000).toFixed(1)}s · ~{money(line.cost)} est.
-                    </span>
-                  </p>
-                )
-              }
-              return (
-                <p
-                  key={line.seq}
-                  className={`px-1 whitespace-pre-wrap text-fg ${
-                    line.nested ? "ml-4 border-l border-line pl-3" : ""
-                  }`}
-                >
-                  {line.text}
-                </p>
-              )
-            })}
-          </div>
+          <Transcript events={events} />
         )}
       </div>
 

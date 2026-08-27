@@ -8,6 +8,7 @@ import { draftCommitMessage } from "./helper.js"
 import { writeJournalEntry } from "./journal.js"
 import { reconcileStrandedTasks } from "./reconcile.js"
 import { addProject, getProject, listProjects, removeProject } from "./registry.js"
+import { getConversation, listConversations } from "./sessions.js"
 import { Supervisor } from "./supervisor.js"
 import { createTask, deleteTask, getTask, listTasks, patchTask, setStatus } from "./tasks.js"
 import {
@@ -364,6 +365,43 @@ app.get("/api/projects/:id/branch", async (req, reply) => {
     return { branch: await currentBranch(project.root) }
   } catch {
     return { branch: null }
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Conversations
+//
+// Read straight out of the SDK's own session store, not out of anything aide
+// keeps. That is what makes a chat you had in the VS Code extension show up here
+// with no import step — and it is why a project's task runs appear alongside its
+// chats: both are sessions, told apart by the directory they ran in.
+// ---------------------------------------------------------------------------
+
+app.get("/api/projects/:id/conversations", async (req, reply) => {
+  const { id } = req.params as { id: string }
+  const project = await getProject(id)
+  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
+  try {
+    return await listConversations(project)
+  } catch (err) {
+    return reply.code(502).send({
+      message: `could not read the session store: ${err instanceof Error ? err.message : String(err)}`,
+    })
+  }
+})
+
+app.get("/api/projects/:id/conversations/:sessionId", async (req, reply) => {
+  const { id, sessionId } = req.params as { id: string; sessionId: string }
+  const project = await getProject(id)
+  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
+  try {
+    const found = await getConversation(project, sessionId)
+    if (!found) return reply.code(404).send(notFound(`no conversation ${sessionId} in this project`))
+    return found
+  } catch (err) {
+    return reply.code(502).send({
+      message: `could not read that conversation: ${err instanceof Error ? err.message : String(err)}`,
+    })
   }
 })
 
