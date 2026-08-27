@@ -15,6 +15,7 @@ import { existsSync } from "node:fs"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 import { writeJournalEntry } from "./journal.js"
 import { checkBashCommand } from "./policy.js"
@@ -143,6 +144,48 @@ console.log("\nbash policy")
   check("denies a newline", !verdict("pnpm ls\nrm -rf /").allow)
   check("denies a non-string", !verdict(undefined).allow)
   check("denial says what to do instead", verdict("cd x && pnpm t").reason.includes("--filter"))
+}
+
+console.log("\nprotocol stays browser-safe")
+{
+  // The web bundle imports the @aide/protocol barrel. If anything reachable from
+  // it pulls `node:*` or a Node-only library, Vite resolves it happily at dev
+  // time, the browser refuses it at runtime, React never mounts, and you get a
+  // blank white page with nothing in the terminal and nothing in the build.
+  // Cheap to assert, miserable to diagnose.
+  const src = fileURLToPath(new URL("../../protocol/src/", import.meta.url))
+  const seen = new Set<string>()
+  const offenders: string[] = []
+
+  const walk = async (file: string): Promise<void> => {
+    if (seen.has(file)) return
+    seen.add(file)
+    let body: string
+    try {
+      body = await readFile(join(src, file), "utf8")
+    } catch {
+      return
+    }
+    for (const m of body.matchAll(/from "([^"]+)"/g)) {
+      const spec = m[1] ?? ""
+      if (spec.startsWith("node:") || spec === "gray-matter") {
+        offenders.push(`${file} imports ${spec}`)
+      } else if (spec.startsWith("./")) {
+        await walk(spec.slice(2).replace(/\.js$/, ".ts"))
+      }
+    }
+  }
+  await walk("index.ts")
+
+  check(
+    "the barrel reaches no Node-only module",
+    offenders.length === 0,
+    offenders.join("; ") || `${seen.size} modules checked`,
+  )
+  // The counterpart: the Node entry must still exist and still carry the
+  // filesystem half, or the split has quietly collapsed back into one barrel.
+  const nodeEntry = await readFile(join(src, "node.ts"), "utf8")
+  check("the node entry still carries paths", nodeEntry.includes("./paths.js"))
 }
 
 console.log("\njournal")

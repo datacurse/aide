@@ -2,15 +2,8 @@ import { existsSync } from "node:fs"
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import type { Project, RunStatus, Task, TaskStatus } from "@aide/protocol"
-import {
-  branchName,
-  nextTaskId,
-  parseTask,
-  serializeTask,
-  taskFileName,
-  tasksDir,
-  STATE_DIR,
-} from "@aide/protocol"
+import { branchName, nextTaskId, taskFileName, STATE_DIR } from "@aide/protocol"
+import { parseTask, serializeTask, tasksDir } from "@aide/protocol/node"
 
 /**
  * Tasks live as markdown in the project repo, not in a daemon-side database.

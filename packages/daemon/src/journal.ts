@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises"
 import type { Project, RunEvent, Task } from "@aide/protocol"
-import { journalDir, journalEntryPath, slugify, STATE_DIR } from "@aide/protocol"
+import { slugify, STATE_DIR } from "@aide/protocol"
+import { journalDir, journalEntryPath } from "@aide/protocol/node"
 
 /**
  * A journal entry is assembled from the run's own event log, not written by a

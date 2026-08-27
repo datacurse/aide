@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events"
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs"
 import type { RunEvent, RunEventBody } from "@aide/protocol"
-import { runLogPath, runsDir } from "@aide/protocol"
+import { runLogPath, runsDir } from "@aide/protocol/node"
 
 /**
  * Append-only NDJSON per run, plus an in-process fan-out to live subscribers.

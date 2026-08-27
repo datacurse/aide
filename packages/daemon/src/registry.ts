@@ -3,19 +3,19 @@ import { existsSync } from "node:fs"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { basename, resolve } from "node:path"
 import type { Project, ProjectDoc } from "@aide/protocol"
+import { EMPTY_PROJECT_DOC } from "@aide/protocol"
 import {
-  EMPTY_PROJECT_DOC,
-  parseProjectDoc,
   aideHome,
   decisionsDir,
   inboxPath,
   journalDir,
+  parseProjectDoc,
   projectDocPath,
   registryPath,
   specsDir,
   stateDir,
   tasksDir,
-} from "@aide/protocol"
+} from "@aide/protocol/node"
 import { isGitRepo, repoRoot } from "./worktree.js"
 
 /** Stable across re-adds: the same path always yields the same project id. */

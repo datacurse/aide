@@ -1,5 +1,3 @@
-import matter from "gray-matter"
-import { branchName } from "./paths.js"
 
 // ---------------------------------------------------------------------------
 // Status
@@ -81,50 +79,15 @@ export interface Project {
 // ---------------------------------------------------------------------------
 
 /** YAML turns unquoted dates into Date objects and `0004` into a number. Normalize. */
-const asText = (v: unknown, field: string): string => {
+export const asText = (v: unknown, field: string): string => {
   if (v instanceof Date) return v.toISOString()
   if (typeof v === "string") return v
   if (typeof v === "number") return String(v)
   throw new Error(`task frontmatter: \`${field}\` must be a string, got ${JSON.stringify(v)}`)
 }
 
-const asStringArray = (v: unknown): string[] =>
+export const asStringArray = (v: unknown): string[] =>
   Array.isArray(v) ? v.map((x) => String(x)) : []
-
-export function parseTask(file: string, raw: string): Task {
-  const { data, content } = matter(raw)
-  const id = asText(data["id"], "id").padStart(4, "0")
-  return {
-    id,
-    title: asText(data["title"], "title"),
-    status: asStatus(data["status"]),
-    branch: data["branch"] ? asText(data["branch"], "branch") : branchName(id),
-    worktree: asText(data["worktree"], "worktree"),
-    runs: asStringArray(data["runs"]),
-    commits: asStringArray(data["commits"]),
-    created: asText(data["created"], "created"),
-    prompt: content.trim(),
-    file,
-  }
-}
-
-export function serializeTask(task: Task): string {
-  // Quote id and created so YAML keeps them as strings on the next read.
-  return matter.stringify(`${task.prompt}\n`, {
-    id: task.id,
-    title: task.title,
-    status: task.status,
-    branch: task.branch,
-    worktree: task.worktree,
-    runs: task.runs,
-    commits: task.commits,
-    created: task.created,
-  })
-}
-
-// ---------------------------------------------------------------------------
-// Naming
-// ---------------------------------------------------------------------------
 
 export function slugify(title: string): string {
   const s = title

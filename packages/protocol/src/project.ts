@@ -1,5 +1,3 @@
-import matter from "gray-matter"
-
 /**
  * `.aide/project.md` — one file with two readers.
  *
@@ -44,31 +42,3 @@ export const EMPTY_PROJECT_DOC: ProjectDoc = {
  * A throw here surfaces as `run.error` at the start of a run, which is exactly
  * where a configuration mistake should appear.
  */
-export function parseProjectDoc(raw: string): ProjectDoc {
-  const { data, content } = matter(raw)
-
-  const bootstrapRaw = data["bootstrap"]
-  let bootstrap: string | null = null
-  if (bootstrapRaw !== undefined && bootstrapRaw !== null) {
-    if (typeof bootstrapRaw !== "string") {
-      throw new Error(
-        `project.md: \`bootstrap\` must be a string, got ${JSON.stringify(bootstrapRaw)}`,
-      )
-    }
-    bootstrap = bootstrapRaw.trim() || null
-  }
-
-  const timeoutRaw = data["bootstrapTimeoutMs"]
-  let bootstrapTimeoutMs = DEFAULT_BOOTSTRAP_TIMEOUT_MS
-  if (timeoutRaw !== undefined && timeoutRaw !== null) {
-    const n = Number(timeoutRaw)
-    if (!Number.isFinite(n) || n <= 0) {
-      throw new Error(
-        `project.md: \`bootstrapTimeoutMs\` must be a positive number, got ${JSON.stringify(timeoutRaw)}`,
-      )
-    }
-    bootstrapTimeoutMs = n
-  }
-
-  return { bootstrap, bootstrapTimeoutMs, body: content.trim() }
-}

@@ -1,14 +1,8 @@
 import { homedir } from "node:os"
 import { join } from "node:path"
+import { STATE_DIR } from "./names.js"
 
-/**
- * The per-project state directory name. This lands in every repo aide manages,
- * so it is the one string in the codebase that is genuinely expensive to change.
- * Everything routes through the helpers below so a rename stays a one-line edit.
- *
- * Note: NOT `.claude` — that belongs to Claude Code itself.
- */
-export const STATE_DIR = ".aide"
+
 
 /** `<project>/.aide` */
 export const stateDir = (root: string) => join(root, STATE_DIR)
@@ -37,5 +31,3 @@ export const registryPath = () => join(aideHome(), "registry.json")
 export const runsDir = () => join(aideHome(), "runs")
 export const runLogPath = (runId: string) => join(runsDir(), `${runId}.ndjson`)
 
-/** Branch name for a task's worktree. */
-export const branchName = (taskId: string) => `aide/task-${taskId}`

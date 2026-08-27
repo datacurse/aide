@@ -8,7 +8,8 @@ import type {
   RunEvent,
   ServerMessage,
 } from "@aide/protocol"
-import { CHAT_MODES, EFFORT_LEVELS, worktreePath } from "@aide/protocol"
+import { CHAT_MODES, EFFORT_LEVELS } from "@aide/protocol"
+import { worktreePath } from "@aide/protocol/node"
 import { ChatLane } from "./chat.js"
 import { CONFIG } from "./config.js"
 import { EventLog } from "./eventlog.js"

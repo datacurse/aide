@@ -1,4 +1,15 @@
-export * from "./paths.js"
+/**
+ * The shared wire surface, and deliberately BROWSER-SAFE.
+ *
+ * Nothing exported from here may import `node:*` or a Node-only library. The web
+ * bundle imports this barrel, and the failure mode when that rule is broken is
+ * uniquely unhelpful: Vite happily resolves `node:os` at dev time, the browser
+ * refuses it at runtime, React never mounts, and you get a blank white page with
+ * nothing in the terminal. It cost an afternoon once.
+ *
+ * Anything that needs the filesystem lives in `@aide/protocol/node`.
+ */
+export * from "./names.js"
 export * from "./events.js"
 export * from "./task.js"
 export * from "./project.js"

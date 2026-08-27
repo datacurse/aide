@@ -4,7 +4,8 @@ import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { isAbsolute, join } from "node:path"
 import { promisify } from "node:util"
-import { STATE_DIR, branchName, worktreePath } from "@aide/protocol"
+import { STATE_DIR, branchName } from "@aide/protocol"
+import { worktreePath } from "@aide/protocol/node"
 
 const run = promisify(execFile)
 
