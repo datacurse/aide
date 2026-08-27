@@ -216,14 +216,32 @@ export function daemonControl(port: number): Plugin {
     const proc = child
     stopping = true
     try {
-      killTree(proc)
-      for (let i = 0; i < 40; i += 1) {
+      // Ask before killing. The daemon's own shutdown interrupts each run through
+      // the SDK's control channel, so an in-flight run ends with a result and a
+      // cost figure instead of a hole in its log — and its worker subprocesses
+      // get taken down with it. taskkill would end the daemon just as surely and
+      // leave the agents running.
+      await fetch(`http://127.0.0.1:${port}/api/shutdown`, {
+        method: "POST",
+        signal: AbortSignal.timeout(2000),
+      }).catch(() => {})
+
+      for (let i = 0; i < 100; i += 1) {
         if (proc.exitCode !== null && !(await probe(port, 200))) {
           return { ok: true, message: "stopped" }
         }
         await wait(100)
       }
-      return { ok: false, message: "the daemon did not exit within 4s" }
+
+      // It did not go quietly.
+      killTree(proc)
+      for (let i = 0; i < 40; i += 1) {
+        if (proc.exitCode !== null && !(await probe(port, 200))) {
+          return { ok: true, message: "stopped (had to be killed)" }
+        }
+        await wait(100)
+      }
+      return { ok: false, message: "the daemon did not exit within 14s" }
     } finally {
       stopping = false
     }

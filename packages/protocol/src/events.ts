@@ -26,6 +26,18 @@ export interface ModelSpend {
  * have to know their own sequence number.
  */
 export type RunEventBody =
+  /**
+   * Admitted, but waiting behind the concurrency cap.
+   *
+   * Without this a queued run's log is empty, and the run pane — which switches
+   * to the newest run the moment you press run — shows "Waiting for the first
+   * event…" for as long as the wait lasts. That is indistinguishable from a run
+   * that started and wedged.
+   *
+   * `position` is a historical fact (it was N-deep when admitted), not a live
+   * one. The live position comes from the task list, which is polled.
+   */
+  | { type: "run.queued"; taskId: string; projectId: string; position: number }
   | {
       type: "run.started"
       taskId: string

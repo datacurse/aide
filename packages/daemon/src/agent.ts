@@ -11,6 +11,7 @@
  */
 import { query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk"
 import type { ModelSpend, RunEventBody, RunStatus } from "@aide/protocol"
+import { checkBashCommand } from "./policy.js"
 
 export interface RunAgentOptions {
   runId: string
@@ -24,6 +25,11 @@ export interface RunAgentOptions {
   worktree: string
   model: string
   allowedTools: string[]
+  /** Bash prefixes the run may use. Enforced by `policy.ts`, not by the SDK. */
+  allowedBash: string[]
+  deniedBash: string[]
+  /** Merged over `process.env` for the run. */
+  env: Record<string, string>
   maxBudgetUsd: number
   maxTurns?: number
   /**
@@ -121,14 +127,28 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
       // behaves the same on anyone's machine. Measured: the host's global config
       // is only ~700 tokens, so this is for reproducibility, not for savings.
       settingSources: ["project"],
+      // Options.env REPLACES the environment rather than merging into it, so the
+      // spread is load-bearing: without it the run loses PATH and the OAuth
+      // credentials it authenticates with, and fails in a way that looks like an
+      // auth problem rather than a config one.
+      env: { ...process.env, ...opts.env },
       canUseTool: async (name, toolInput) => {
-        pending.push({
-          type: "tool.denied",
-          name,
-          input: toolInput,
-          reason: "not in this run's allowlist",
-        })
-        return { behavior: "deny", message: `${name} is not permitted in this run.` }
+        // Bash gets a real decision; everything else that reaches here was not
+        // on the allowlist and is refused. Note this callback only sees calls the
+        // SDK has not already resolved, so it is a gate, not an audit log.
+        const verdict =
+          name === "Bash"
+            ? checkBashCommand(
+                (toolInput as { command?: unknown })?.command,
+                opts.allowedBash,
+                opts.deniedBash,
+              )
+            : { allow: false, reason: "not in this run's allowlist" }
+
+        if (verdict.allow) return { behavior: "allow", updatedInput: toolInput }
+
+        pending.push({ type: "tool.denied", name, input: toolInput, reason: verdict.reason })
+        return { behavior: "deny", message: verdict.reason }
       },
     },
   })

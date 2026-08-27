@@ -40,29 +40,79 @@ export const CONFIG = {
    * Fail closed. Anything not listed is denied, because a headless run has nobody
    * to answer a permission prompt.
    *
-   * The space in "git diff *" is load-bearing: "git diff*" would also match
-   * git diff-index. No push, no remote, no commit — slice 1 leaves changes
-   * uncommitted in the worktree so the human gate is the review.
+   * Note what is NOT here any more: `Bash(...)` patterns. Bash is decided by
+   * `policy.ts` through `canUseTool` instead — see the comment there for why the
+   * most security-relevant decision aide makes should not depend on the SDK's
+   * undocumented rule-matching internals.
+   *
+   * TodoWrite is allowed because models reach for it constantly and it has no
+   * side effects; denying it costs a denial and a retry on nearly every turn.
    */
-  allowedTools: (process.env["AIDE_ALLOWED_TOOLS"] ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .concat(
-      process.env["AIDE_ALLOWED_TOOLS"]
-        ? []
-        : [
-            "Read",
-            "Glob",
-            "Grep",
-            "Edit",
-            "Write",
-            "Bash(pnpm *)",
-            "Bash(npm *)",
-            "Bash(node *)",
-            "Bash(git status *)",
-            "Bash(git diff *)",
-            "Bash(git log *)",
-          ],
-    ),
+  allowedTools: list("AIDE_ALLOWED_TOOLS", [
+    "Read",
+    "Glob",
+    "Grep",
+    "Edit",
+    "Write",
+    "TodoWrite",
+  ]),
+
+  /**
+   * Bash commands the agent may run, matched as leading-word prefixes by
+   * `policy.ts`. Single commands only — no pipes, no chaining.
+   *
+   * The git entries are usually auto-allowed by the SDK's own read-only set
+   * before they ever reach us; they are listed so the policy reads as complete
+   * rather than depending on that.
+   */
+  allowedBash: list("AIDE_ALLOWED_BASH", [
+    "pnpm",
+    "npm",
+    "git status",
+    "git diff",
+    "git log",
+    "git show",
+  ]),
+
+  /**
+   * Denied even though a prefix above would allow them. Each one is a way a run
+   * ends badly rather than a way it does damage:
+   *
+   * - `pnpm dev` / `daemon` / `web` start servers and never exit, so the run
+   *   burns its entire budget waiting for a prompt that is not coming.
+   * - `pnpm probe` spends real money on a model call.
+   * - `npx` / `npm exec` fetch and execute arbitrary packages, which makes the
+   *   allowlist above decorative.
+   */
+  deniedBash: list("AIDE_DENIED_BASH", [
+    "pnpm dev",
+    "pnpm daemon",
+    "pnpm web",
+    "pnpm probe",
+    "npm exec",
+    "npx",
+  ]),
+
+  /**
+   * Environment overrides for a run, merged over `process.env`.
+   *
+   * `CI` is the important one: pnpm otherwise asks before purging a modules
+   * directory and there is nobody to answer, and setting it here means the agent
+   * never has to type `CI=true` — which would depend on the SDK stripping an
+   * env-var prefix before matching, an internal we should not build on.
+   *
+   * The colour variables matter more than they look: ANSI escapes land in the
+   * event log and then in a browser as garbage, and `CI=true` makes many tools
+   * colourize MORE rather than less.
+   *
+   * `GIT_TERMINAL_PROMPT=0` turns "git wants credentials" from a run that hangs
+   * until its budget runs out into an error the agent can read.
+   */
+  runEnv: {
+    CI: "true",
+    NO_COLOR: "1",
+    FORCE_COLOR: "0",
+    GIT_PAGER: "cat",
+    GIT_TERMINAL_PROMPT: "0",
+  } as Record<string, string>,
 } as const

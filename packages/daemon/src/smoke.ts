@@ -5,7 +5,8 @@
  * functions against it — no mocks, no model calls, nothing to clean up in your
  * own projects. Worth running on any change to worktree.ts, because the failure
  * modes here are the expensive kind: a half-merged repo, a commit that silently
- * dropped its message body, a land that refuses forever.
+ * dropped its message body, a land that refuses forever, a shell policy that
+ * lets through what it should not.
  *
  * It is deliberately not a test framework. One file, one command, plain output.
  */
@@ -16,6 +17,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { promisify } from "node:util"
 import { writeJournalEntry } from "./journal.js"
+import { checkBashCommand } from "./policy.js"
 import {
   commitWorktree,
   currentBranch,
@@ -115,6 +117,31 @@ const scopedSha = await commitWorktree(wt, "Add a queue spec\n")
 const shown = await git(wt, ["show", "--stat", "--format=", scopedSha])
 check("commit matches the reviewed diff", !shown.includes("0009-stale.md") && shown.includes("queue.md"))
 check("worktree still holds the untracked task file", existsSync(join(wt, STATE_DIR, "tasks", "0009-stale.md")))
+
+console.log("\nbash policy")
+{
+  const allow = ["pnpm", "npm", "git status", "git diff"]
+  const deny = ["pnpm dev", "pnpm probe", "npx"]
+  const verdict = (cmd: unknown) => checkBashCommand(cmd, allow, deny)
+
+  check("allows pnpm typecheck", verdict("pnpm typecheck").allow)
+  check("allows a bare allowed word", verdict("pnpm").allow)
+  check("allows git diff with args", verdict("git diff --stat").allow)
+  check("denies an unlisted command", !verdict("curl https://example.com").allow)
+  check("denies a near-miss prefix", !verdict("pnpmx run").allow, "prefix must end at a word")
+  check("denies pnpm dev", !verdict("pnpm dev").allow, "it never exits")
+  check("denies pnpm  dev with padding", !verdict("pnpm   dev").allow, "whitespace is collapsed")
+  check("denies pnpm probe", !verdict("pnpm probe").allow, "it spends money")
+  check("denies npx", !verdict("npx cowsay").allow)
+  check("denies a pipe", !verdict("pnpm ls | head").allow)
+  check("denies chaining", !verdict("cd packages && pnpm test").allow)
+  check("denies substitution", !verdict("pnpm $(echo dev)").allow, "the payload hides in the arg")
+  check("denies backticks", !verdict("pnpm `echo dev`").allow)
+  check("denies redirection", !verdict("pnpm ls > /tmp/x").allow)
+  check("denies a newline", !verdict("pnpm ls\nrm -rf /").allow)
+  check("denies a non-string", !verdict(undefined).allow)
+  check("denial says what to do instead", verdict("cd x && pnpm t").reason.includes("--filter"))
+}
 
 console.log("\njournal")
 const project: Project = { id: "p1", name: "smoke", root, addedAt: new Date().toISOString() }

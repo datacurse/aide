@@ -6,6 +6,7 @@ import { CONFIG } from "./config.js"
 import { EventLog } from "./eventlog.js"
 import { draftCommitMessage } from "./helper.js"
 import { writeJournalEntry } from "./journal.js"
+import { reconcileStrandedTasks } from "./reconcile.js"
 import { addProject, getProject, listProjects, removeProject } from "./registry.js"
 import { Supervisor } from "./supervisor.js"
 import { createTask, deleteTask, getTask, listTasks, patchTask, setStatus } from "./tasks.js"
@@ -98,10 +99,11 @@ app.get("/api/health", async () => ({
 
 app.get("/api/projects", async () => {
   const projects = await listProjects()
-  const active = supervisor.activeRuns()
+  const runs = supervisor.runs()
   return projects.map((p) => ({
     ...p,
-    activeRuns: active.filter((r) => r.projectId === p.id).length,
+    activeRuns: runs.filter((r) => r.projectId === p.id && r.phase === "running").length,
+    queuedRuns: runs.filter((r) => r.projectId === p.id && r.phase === "queued").length,
   }))
 })
 
@@ -130,12 +132,19 @@ app.get("/api/projects/:id/tasks", async (req, reply) => {
   const project = await getProject(id)
   if (!project) return reply.code(404).send(notFound(`no project ${id}`))
 
-  const active = supervisor.activeRuns()
+  const runs = supervisor.runs()
   const tasks = await listTasks(project)
-  return tasks.map((t) => ({
-    ...t,
-    activeRunId: active.find((r) => r.taskId === t.id)?.runId ?? null,
-  }))
+  return tasks.map((t) => {
+    // Queued runs count as in-flight now. A task waiting behind the cap is not
+    // idle, and pretending otherwise is what let a second run start against the
+    // same worktree.
+    const run = runs.find((r) => r.taskId === t.id)
+    return {
+      ...t,
+      activeRunId: run?.runId ?? null,
+      activeRun: run ? { runId: run.runId, phase: run.phase, position: run.position } : null,
+    }
+  })
 })
 
 app.post("/api/projects/:id/tasks", async (req, reply) => {
@@ -157,6 +166,11 @@ app.delete("/api/projects/:id/tasks/:taskId", async (req, reply) => {
   const { id, taskId } = req.params as { id: string; taskId: string }
   const project = await getProject(id)
   if (!project) return reply.code(404).send(notFound(`no project ${id}`))
+  // Cancel before unlinking. A queued run holds its own snapshot of the task, so
+  // deleting the file underneath it meant the run woke up later, called
+  // setStatus on a file that no longer existed, and threw out of a floating
+  // promise as an unhandled rejection nobody would ever see.
+  await supervisor.cancelForTask(taskId)
   await deleteTask(project, taskId)
   return reply.code(204).send()
 })
@@ -176,7 +190,7 @@ app.post("/api/projects/:id/tasks/:taskId/run", async (req, reply) => {
     return reply.code(409).send({ message: "task already has a run in flight" })
   }
 
-  const runId = await supervisor.enqueue(project, task)
+  const runId = supervisor.enqueue(project, task)
   return { runId }
 })
 
@@ -419,8 +433,50 @@ app.get("/ws", { websocket: true }, (socket, req) => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
+
+/**
+ * Stop cleanly and say so before dying.
+ *
+ * Answering first matters: a socket that simply closes is indistinguishable
+ * from a crash, and the dev server's stop button would have no way to tell
+ * "shut down as asked" from "fell over while I was asking".
+ */
+app.post("/api/shutdown", async (_req, reply) => {
+  await reply.code(202).send({ message: "shutting down" })
+  await stopEverything("requested over HTTP")
+})
+
+let stopping = false
+async function stopEverything(why: string): Promise<void> {
+  if (stopping) return
+  stopping = true
+  console.log(`aide daemon stopping (${why})`)
+  await supervisor.shutdown()
+  await app.close().catch(() => {})
+  process.exit(0)
+}
+
+// Ctrl-C on `pnpm daemon`, and any orderly kill. Note what these CANNOT catch:
+// Windows `taskkill /F` is TerminateProcess and delivers no signal at all, which
+// is why boot reconciliation below is not optional.
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.once(signal, () => void stopEverything(signal))
+}
+
+// Before listen, deliberately. The health endpoint answering has to mean the
+// task list is honest — otherwise a browser that connects in the gap sees a task
+// filed `running` with nothing behind it, and is offered the commit button on a
+// worktree whose agent died mid-write.
+const recovered = await reconcileStrandedTasks(log)
+
 const address = await app.listen({ port: CONFIG.port, host: "127.0.0.1" })
 console.log(`aide daemon on ${address}`)
 console.log(`  task model   ${CONFIG.taskModel}`)
 console.log(`  concurrency  ${CONFIG.maxConcurrentRuns}`)
 console.log(`  budget/run   $${CONFIG.maxBudgetUsd}`)
+for (const r of recovered) {
+  console.log(`  recovered    ${r.projectName} ${r.taskId} ${r.from} → ${r.to} (${r.title})`)
+}

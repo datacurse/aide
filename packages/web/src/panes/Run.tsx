@@ -29,6 +29,7 @@ type Line =
   | OutcomeLine
   | { kind: "text"; seq: number; text: string; nested: boolean }
   | { kind: "thinking"; seq: number; text: string }
+  | { kind: "queued"; seq: number; position: number }
   | { kind: "denied"; seq: number; name: string; reason: string }
   | { kind: "retry"; seq: number; text: string }
   | { kind: "error"; seq: number; text: string }
@@ -95,6 +96,9 @@ function toLines(events: RunEvent[]): Line[] {
         }
         break
       }
+      case "run.queued":
+        lines.push({ kind: "queued", seq: e.seq, position: e.position })
+        break
       case "tool.denied":
         lines.push({ kind: "denied", seq: e.seq, name: e.name, reason: e.reason })
         break
@@ -498,6 +502,12 @@ export function RunPane({
                 return (
                   <p key={line.seq} className="px-1 text-syn-comment italic">
                     {line.text}
+                  </p>
+                )
+              if (line.kind === "queued")
+                return (
+                  <p key={line.seq} className="px-1 text-fg-dim">
+                    ◦ queued{line.position > 1 ? ` behind ${line.position - 1}` : ""}
                   </p>
                 )
               if (line.kind === "denied")

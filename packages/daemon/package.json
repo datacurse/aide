@@ -6,6 +6,7 @@
   "scripts": {
     "probe": "tsx src/probe.ts",
     "smoke": "tsx src/smoke.ts",
+    "smoke:queue": "tsx src/smoke-queue.ts",
     "watch": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"

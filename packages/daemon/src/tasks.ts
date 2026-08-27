@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs"
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
-import type { Project, Task, TaskStatus } from "@aide/protocol"
+import type { Project, RunStatus, Task, TaskStatus } from "@aide/protocol"
 import {
   branchName,
   nextTaskId,
@@ -119,6 +119,20 @@ export async function setStatus(
   status: TaskStatus,
 ): Promise<Task> {
   return patchTask(project, id, { status })
+}
+
+/**
+ * Where a task lands when its run stops.
+ *
+ * Shared by the supervisor and by boot reconciliation on purpose: a task the
+ * daemon watched finish and one recovered from a crashed daemon's log must be
+ * filed the same way, or "cancelled" quietly means two different things
+ * depending on whether anyone was watching.
+ */
+export function statusAfterRun(status: RunStatus): TaskStatus {
+  if (status === "success") return "needs-review"
+  if (status === "cancelled") return "cancelled"
+  return "failed"
 }
 
 export async function deleteTask(project: Project, id: string): Promise<void> {

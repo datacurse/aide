@@ -143,7 +143,7 @@ export function DaemonBar({ health, onChanged }: { health: Health | null; onChan
             disabled={busy !== null || !status?.managed}
             title={
               status?.managed
-                ? "Stop the daemon. Runs in flight are lost."
+                ? "Stop the daemon. Runs in flight are interrupted cleanly first."
                 : "This daemon was started outside the dev server — stop it where you started it"
             }
             onClick={() => void act("stop", api.daemonStop)}
