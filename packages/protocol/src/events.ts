@@ -38,6 +38,27 @@ export type RunEventBody =
    * one. The live position comes from the task list, which is polled.
    */
   | { type: "run.queued"; taskId: string; projectId: string; position: number }
+  /**
+   * The project's `bootstrap` command, run in a freshly created worktree before
+   * the agent starts. Emitted BEFORE `run.started`, which stays where the SDK's
+   * system/init message produces it — that event is the only carrier of
+   * `sessionId`, and moving it would cost the resume handle.
+   */
+  | { type: "bootstrap.started"; command: string; cwd: string }
+  | {
+      type: "bootstrap.finished"
+      ok: boolean
+      /** null when the process was killed by a signal or timed out. */
+      exitCode: number | null
+      durationMs: number
+      /**
+       * Tail of the combined output, capped. A tail rather than a stream because
+       * `pnpm install` emits thousands of progress lines and the whole NDJSON log
+       * is replayed on every browser subscribe — and because the reason a build
+       * failed is at the end.
+       */
+      output: string
+    }
   | {
       type: "run.started"
       taskId: string

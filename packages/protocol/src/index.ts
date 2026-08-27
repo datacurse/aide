@@ -1,3 +1,4 @@
 export * from "./paths.js"
 export * from "./events.js"
 export * from "./task.js"
+export * from "./project.js"

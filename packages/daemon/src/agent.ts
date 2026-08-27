@@ -17,8 +17,16 @@ export interface RunAgentOptions {
   runId: string
   taskId: string
   projectId: string
-  /** The task body. This is the prompt. */
+  /** The task title. Composed into the user turn — it is part of the request. */
+  title: string
+  /** The task body. May be empty; the title alone is then the request. */
   prompt: string
+  /**
+   * Prose from `.aide/project.md`. Appended to the SYSTEM prompt, not the user
+   * turn: it is a durable constraint on every task in this project, not part of
+   * what is being asked this time.
+   */
+  projectDoc: string
   /** Absolute path to the worktree the agent runs inside. */
   cwd: string
   /** Worktree path relative to the project root, for display. */
@@ -76,14 +84,32 @@ function toModelSpend(raw: unknown): Record<string, ModelSpend> {
 
 const statusFor = (subtype: string): RunStatus => (subtype === "success" ? "success" : "failed")
 
+/** Cap the project doc so a runaway project.md cannot crowd out the task. */
+const MAX_PROJECT_DOC_CHARS = 8_000
+
+/**
+ * The request, as the agent sees it.
+ *
+ * The title used to be thrown away — only the body was sent — which discarded
+ * the one line that most reliably says what the task is, and left a task with an
+ * empty body being handed an empty user message. Composed in one place so the
+ * two cannot drift.
+ */
+export function composeRequest(title: string, prompt: string): string {
+  const body = prompt.trim()
+  return body ? `# ${title}\n\n${body}` : title
+}
+
 export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventBody> {
+  const request = composeRequest(opts.title, opts.prompt)
+
   // Streaming input mode. `prompt` must be an AsyncIterable for control requests
   // (interrupt) to be available at all. We yield one message and close the
   // stream, so the run ends after its turn instead of waiting for more input.
   async function* input(): AsyncGenerator<SDKUserMessage> {
     yield {
       type: "user",
-      message: { role: "user", content: opts.prompt },
+      message: { role: "user", content: request },
       parent_tool_use_id: null,
       session_id: "",
     } as SDKUserMessage
@@ -114,12 +140,29 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
         type: "preset",
         preset: "claude_code",
         append: [
-          "You are running as an autonomous task in a git worktree. No human will",
-          "answer you during this run, so do not end your turn with a question or",
-          "ask for confirmation before making a change the task clearly implies.",
-          "Carry the task to completion. If something genuinely blocks you, say what",
-          "blocked you and what decision is needed, then stop.",
-        ].join(" "),
+          [
+            "You are running as an autonomous task in a git worktree. No human will",
+            "answer you during this run, so do not end your turn with a question or",
+            "ask for confirmation before making a change the task clearly implies.",
+            "Carry the task to completion. If something genuinely blocks you, say what",
+            "blocked you and what decision is needed, then stop.",
+          ].join(" "),
+          // The project brief goes in the SYSTEM prompt so it reads as a standing
+          // constraint rather than as part of this request, and so it survives
+          // compaction on a long run. Framed with its provenance, because an
+          // agent should know whose rules these are.
+          opts.projectDoc.trim()
+            ? [
+                "",
+                "The following is this project's brief, from .aide/project.md, written by",
+                "the human who owns it. Treat its constraints and non-goals as binding.",
+                "",
+                truncate(opts.projectDoc.trim(), MAX_PROJECT_DOC_CHARS),
+              ].join("\n")
+            : "",
+        ]
+          .filter(Boolean)
+          .join("\n"),
       },
       maxBudgetUsd: opts.maxBudgetUsd,
       ...(opts.maxTurns ? { maxTurns: opts.maxTurns } : {}),

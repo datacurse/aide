@@ -1,14 +1,16 @@
 import { fork, type ChildProcess } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { fileURLToPath } from "node:url"
-import type { Project, RunStatus, Task } from "@aide/protocol"
+import type { Project, ProjectDoc, RunStatus, Task } from "@aide/protocol"
 import type { RunAgentOptions } from "./agent.js"
 import { CONFIG } from "./config.js"
 import type { EventLog } from "./eventlog.js"
+import { runBootstrap } from "./bootstrap.js"
 import { killTree } from "./proc.js"
+import { readProjectDoc } from "./registry.js"
 import { patchTask, setStatus, statusAfterRun } from "./tasks.js"
 import type { FromWorker, ToWorker } from "./worker/main.js"
-import { ensureWorktree } from "./worktree.js"
+import { ensureWorktree, removeWorktree } from "./worktree.js"
 
 /**
  * The worker entrypoint, overridable so the queue can be exercised without
@@ -180,9 +182,25 @@ export class Supervisor {
   async #execute(record: RunRecord): Promise<void> {
     const { project, task, runId } = record
 
-    let worktree: string
+    // Read before anything else: a typo in project.md frontmatter should fail
+    // the run here, with a clear message, rather than silently skipping the
+    // bootstrap and letting the agent discover a broken tree.
+    let doc: ProjectDoc
     try {
-      worktree = await ensureWorktree(project.root, task.id)
+      doc = await readProjectDoc(project.root)
+    } catch (err) {
+      this.log.append(runId, {
+        type: "run.error",
+        message: err instanceof Error ? err.message : String(err),
+      })
+      await setStatus(project, task.id, "failed")
+      return
+    }
+
+    let worktree: string
+    let created: boolean
+    try {
+      ;({ path: worktree, created } = await ensureWorktree(project.root, task.id))
     } catch (err) {
       this.log.append(runId, {
         type: "run.error",
@@ -194,11 +212,71 @@ export class Supervisor {
 
     await setStatus(project, task.id, "running")
 
+    if (created && doc.bootstrap) {
+      this.log.append(runId, {
+        type: "bootstrap.started",
+        command: doc.bootstrap,
+        cwd: worktree,
+      })
+      const result = await runBootstrap({
+        command: doc.bootstrap,
+        cwd: worktree,
+        timeoutMs: doc.bootstrapTimeoutMs,
+        env: { ...process.env, ...CONFIG.runEnv },
+        onSpawn: (proc) => {
+          record.child = proc
+        },
+      })
+      record.child = null
+      this.log.append(runId, {
+        type: "bootstrap.finished",
+        ok: result.ok,
+        exitCode: result.exitCode,
+        durationMs: result.durationMs,
+        output: result.output,
+      })
+
+      if (!result.ok) {
+        // Remove the worktree rather than leaving it half-installed. Nothing is
+        // lost — no agent has written into it yet — and leaving it means the
+        // NEXT run sees an existing worktree, skips the bootstrap, and hands the
+        // agent a broken tree with no explanation. The diagnostic survives in
+        // the event log, which is durable.
+        this.log.append(runId, {
+          type: "run.error",
+          message: `bootstrap failed; the agent was not started. Command: ${doc.bootstrap}`,
+        })
+        await removeWorktree(project.root, task.id).catch(() => {})
+        await setStatus(project, task.id, "failed")
+        return
+      }
+    }
+
+    // Interrupted during the bootstrap. Give it a terminal event of its own —
+    // every consumer assumes a log ends in exactly one — rather than returning
+    // to a log that just stops.
+    if (record.interrupted) {
+      this.log.append(runId, {
+        type: "run.finished",
+        subtype: "cancelled_during_bootstrap",
+        status: "cancelled",
+        totalCostUsd: 0,
+        modelUsage: {},
+        numTurns: 0,
+        durationMs: Date.now() - record.enqueuedAt,
+        permissionDenials: [],
+      })
+      await setStatus(project, task.id, "cancelled")
+      return
+    }
+
     const job: RunAgentOptions = {
       runId,
       taskId: task.id,
       projectId: project.id,
+      title: task.title,
       prompt: task.prompt,
+      projectDoc: doc.body,
       cwd: worktree,
       worktree: task.worktree,
       model: CONFIG.taskModel,

@@ -15,6 +15,16 @@ interface ToolLine {
   ok: boolean | null
   summary: string
 }
+/** The project's setup command, run before the agent in a fresh worktree. */
+interface BootstrapLine {
+  kind: "bootstrap"
+  seq: number
+  command: string
+  ok: boolean | null
+  exitCode: number | null
+  ms: number
+  output: string
+}
 interface OutcomeLine {
   kind: "outcome"
   seq: number
@@ -30,6 +40,7 @@ type Line =
   | { kind: "text"; seq: number; text: string; nested: boolean }
   | { kind: "thinking"; seq: number; text: string }
   | { kind: "queued"; seq: number; position: number }
+  | BootstrapLine
   | { kind: "denied"; seq: number; name: string; reason: string }
   | { kind: "retry"; seq: number; text: string }
   | { kind: "error"; seq: number; text: string }
@@ -64,6 +75,7 @@ function humanizeError(message: string): string {
 function toLines(events: RunEvent[]): Line[] {
   const lines: Line[] = []
   const byToolId = new Map<string, ToolLine>()
+  let bootstrap: BootstrapLine | null = null
 
   for (const e of events) {
     switch (e.type) {
@@ -98,6 +110,30 @@ function toLines(events: RunEvent[]): Line[] {
       }
       case "run.queued":
         lines.push({ kind: "queued", seq: e.seq, position: e.position })
+        break
+      case "bootstrap.started": {
+        const line: BootstrapLine = {
+          kind: "bootstrap",
+          seq: e.seq,
+          command: e.command,
+          ok: null,
+          exitCode: null,
+          ms: 0,
+          output: "",
+        }
+        bootstrap = line
+        lines.push(line)
+        break
+      }
+      case "bootstrap.finished":
+        // Paired into the started line, the same way tool.end folds into
+        // tool.start, so a completed install is one row rather than two.
+        if (bootstrap) {
+          bootstrap.ok = e.ok
+          bootstrap.exitCode = e.exitCode
+          bootstrap.ms = e.durationMs
+          bootstrap.output = e.output
+        }
         break
       case "tool.denied":
         lines.push({ kind: "denied", seq: e.seq, name: e.name, reason: e.reason })
@@ -172,6 +208,43 @@ function ToolRow({ line }: { line: ToolLine }) {
         <pre className="mt-1 mb-2 max-h-64 overflow-auto rounded-sm bg-chrome p-2 text-[11px] leading-relaxed whitespace-pre-wrap text-fg-muted">
           {JSON.stringify(line.input, null, 2)}
           {line.summary ? `\n\n--- result ---\n${line.summary}` : ""}
+        </pre>
+      )}
+    </div>
+  )
+}
+
+/** Mirrors ToolRow: one collapsed row, click to see why it failed. */
+function BootstrapRow({ line }: { line: BootstrapLine }) {
+  const [open, setOpen] = useState(false)
+  const mark =
+    line.ok === null ? (
+      <span className="text-info">▸</span>
+    ) : line.ok ? (
+      <span className="text-ok">✓</span>
+    ) : (
+      <span className="text-err">✗</span>
+    )
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-baseline gap-2 rounded px-1 py-0.5 text-left hover:bg-hover"
+      >
+        {mark}
+        <span className="text-syn-keyword">bootstrap</span>
+        <span className="truncate text-syn-string">{line.command}</span>
+        {line.ok !== null && (
+          <span className="shrink-0 text-fg-dim">
+            {(line.ms / 1000).toFixed(1)}s
+            {line.ok ? "" : ` · exit ${line.exitCode ?? "killed"}`}
+          </span>
+        )}
+      </button>
+      {open && (
+        <pre className="mt-1 mb-2 max-h-64 overflow-auto rounded-sm bg-chrome p-2 text-[11px] leading-relaxed whitespace-pre-wrap text-fg-muted">
+          {line.output || "(no output captured)"}
         </pre>
       )}
     </div>
@@ -498,6 +571,7 @@ export function RunPane({
           <div className="space-y-1">
             {lines.map((line) => {
               if (line.kind === "tool") return <ToolRow key={line.seq} line={line} />
+              if (line.kind === "bootstrap") return <BootstrapRow key={line.seq} line={line} />
               if (line.kind === "thinking")
                 return (
                   <p key={line.seq} className="px-1 text-syn-comment italic">

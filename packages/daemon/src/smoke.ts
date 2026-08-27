@@ -57,8 +57,10 @@ await git(root, ["add", "-A"])
 await git(root, ["commit", "-m", "Add app entrypoint"])
 
 console.log("worktree")
-const wt = await ensureWorktree(root, "0001")
+const { path: wt, created } = await ensureWorktree(root, "0001")
 check("created", existsSync(wt), wt)
+check("reports it created one", created, "this is what gates the bootstrap command")
+check("second call reports NOT created", !(await ensureWorktree(root, "0001")).created)
 check(
   "ignored via .git/info/exclude",
   (await readFile(join(root, ".git", "info", "exclude"), "utf8")).includes(".aide/worktrees/"),

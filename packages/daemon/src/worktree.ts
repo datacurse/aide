@@ -94,13 +94,24 @@ export async function ensureIgnored(root: string): Promise<void> {
 /**
  * One worktree per task. Parallel agents sharing a working directory is instant
  * merge chaos, and it is the failure mode that looks like the model being bad.
- * Returns the absolute worktree path.
+ *
+ * `created` distinguishes "I just checked this out" from "it was already here",
+ * which is what gates the bootstrap command. Reinstalling dependencies on every
+ * re-run and every follow-up would make iteration unusable.
+ *
+ * Note what this deliberately does NOT do on an existing worktree: no reset, no
+ * stash, no clean. Everything the previous run left uncommitted is still there,
+ * and that is the point — it is what lets a follow-up continue a conversation
+ * about files that still exist.
  */
-export async function ensureWorktree(root: string, taskId: string): Promise<string> {
+export async function ensureWorktree(
+  root: string,
+  taskId: string,
+): Promise<{ path: string; created: boolean }> {
   const path = worktreePath(root, taskId)
   const branch = branchName(taskId)
 
-  if (existsSync(path)) return path
+  if (existsSync(path)) return { path, created: false }
   await ensureIgnored(root)
 
   if (await branchExists(root, branch)) {
@@ -109,7 +120,7 @@ export async function ensureWorktree(root: string, taskId: string): Promise<stri
   } else {
     await git(root, ["worktree", "add", path, "-b", branch])
   }
-  return path
+  return { path, created: true }
 }
 
 export async function removeWorktree(root: string, taskId: string): Promise<void> {

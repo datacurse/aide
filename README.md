@@ -4,13 +4,18 @@ A bird's-eye view across your projects, with Claude working tasks in each one.
 
 The file tree, the editor, and the git graph are not the product — those are solved,
 buyable components. The product is the **project state machine**: inbox → spec → roadmap →
-task → agent → verified diff. This repo is slice 1 of that: the runner.
+task → agent → verified diff. This repo is the runner, and it is now developed in itself.
 
 **What works today.** Add a git repo, write a task, watch Opus work it in an isolated
 worktree, read the diff. Interrupt it mid-run. Two run concurrently, the rest queue.
 Then accept it: Sonnet drafts a commit message from the diff, you edit it, aide commits
 to the task branch and writes a journal entry — and landing it into your branch is a
 second, separate button.
+
+Each task runs in a fresh git worktree, so the project's `bootstrap` command (from
+`.aide/project.md`) installs its dependencies once before the agent starts — a worktree
+is a complete source tree with nothing installed, and an agent that cannot typecheck
+will tell you confidently that it did.
 
 ## Requirements
 
@@ -27,7 +32,8 @@ offer claude.ai login, so bring your own — that is the only supported setup.
 ```bash
 pnpm install
 pnpm probe     # verifies auth + model access for a few cents before anything else
-pnpm smoke     # exercises the git plumbing against a throwaway repo, no model calls
+pnpm smoke     # git plumbing + shell policy, against a throwaway repo. No model calls.
+pnpm smoke:queue  # supervisor semantics against a stub worker. No model calls.
 pnpm dev       # web on :5173, which starts the daemon on :4317
 ```
 
@@ -69,6 +75,7 @@ State lives in files, not a database:
 | `~/.aide/registry.json` | the projects you have added |
 | `~/.aide/runs/<id>.ndjson` | append-only event log, one JSON object per line |
 | `<project>/.aide/` | tasks, specs, journal — git-tracked, human-readable, portable |
+| `<project>/.aide/project.md` | frontmatter the daemon reads (`bootstrap`), prose the agent reads |
 
 Adding a project is `mkdir .aide`, not an import wizard. If aide disappears, the project is
 not hostage: `.aide/` is still a readable description of the work.
@@ -88,8 +95,7 @@ Each of these is a bug that has already been paid for once.
 - **Diffs run `git add -A -N` first.** Intent-to-add is what makes files the agent *created*
   appear in `git diff`. Without it the first run looks like it did nothing.
 - **Permissions fail closed.** `permissionMode: "dontAsk"` plus an explicit allowlist. Print
-  mode starts in Manual on every plan, so an allowlist alone is not a baseline. Compound
-  commands are checked whole: `git branch -a; git push origin main` is denied.
+  mode starts in Manual on every plan, so an allowlist alone is not a baseline.
 - **Cost numbers are estimates.** `total_cost_usd` comes from a price table bundled into the
   SDK at build time. Good for a dashboard, never for billing. Read totals from
   `modelUsage`, which includes subagent spend; `usage` excludes it.
@@ -103,6 +109,26 @@ Each of these is a bug that has already been paid for once.
 - **The daemon's health is polled, not checked once.** The daemon takes a second or two to
   boot, so a single check at page load races it — and losing that race pinned the header to
   "daemon offline" for the life of the page while every other request worked fine.
+- **The daemon is never hot-reloaded.** `pnpm dev` runs plain `tsx`, not `tsx watch`.
+  tsx watch follows the import graph, and `packages/protocol/src/*` is in the daemon's
+  graph through a pnpm junction — so landing a task rewrote daemon source, chokidar
+  fired, and the daemon was SIGTERMed mid-request. The merge committed; the worktree
+  cleanup, the status update and the HTTP response did not. Restart is a button.
+- **Landing daemon code does not take effect until you restart.** Worse than
+  no-effect, actually: `fork()` reads `worker/main.ts` from disk at run time, so an
+  old daemon can fork a *new* worker and pass it a job shape it does not understand.
+- **Boot reconciliation assumes nothing is running.** It can, because the daemon is
+  the only thing that starts runs — so at boot every task filed `running` is wreckage.
+  It runs before `listen`, because the health endpoint answering has to mean the task
+  list is honest.
+- **Loopback is not a security boundary.** Any page you visit can call
+  `http://127.0.0.1:4317`, and DNS rebinding defeats the absence of CORS headers. The
+  daemon checks `Host` against an allowlist of literal loopback authorities — rebinding
+  can forge the name but not that header.
+- **Bash permissions are decided by aide, not the SDK.** `policy.ts` is a pure function
+  so `pnpm smoke` can assert it, and so a denial can say what to do instead. Expressing
+  it as `Bash(pnpm *)` meant depending on undocumented matching rules that strip env
+  prefixes, split compound commands, and change between releases.
 - **Journal entries are assembled, not written by a model.** Every line comes from the run's
   own event log — what the agent said, which tools it called, what it cost, what it was
   denied. A narrated journal is indistinguishable from an invented one by the time anyone

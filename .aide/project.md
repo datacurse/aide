@@ -1,7 +1,50 @@
-# Project
+---
+bootstrap: pnpm install --frozen-lockfile
+bootstrapTimeoutMs: 600000
+---
 
-<!-- Why this exists. Written by you, read by every agent that works here. -->
+# aide
+
+A bird's-eye view across projects, with Claude working tasks in each one.
+
+The product is the **project state machine**: inbox → spec → roadmap → task →
+agent → verified diff. The file tree, the editor and the git graph are not the
+product — those are solved, buyable components that happen to be needed in order
+to review the work without leaving.
 
 ## Constraints
 
+- **State lives in files, not a database.** `~/.aide/` for daemon-global state,
+  `<project>/.aide/` for per-project state, both plain and human-readable. If
+  aide disappears, `.aide/` is still a description of the project.
+- **No login flow.** aide drives the Claude Agent SDK and inherits whatever
+  credentials the machine already has. Anthropic does not permit third-party
+  products to offer claude.ai login, so bring your own — there is no other
+  supported setup, and adding one is not an option.
+- **Two human gates, not one.** `needs-review` → `committed` → `done`.
+  Committing is recoverable; merging is what the rest of the repo has to live
+  with. Collapsing them into one button is not a simplification, it is removing
+  the review.
+- **Cost figures are estimates.** They come from a price table bundled into the
+  SDK at build time. Fine for a dashboard, never for billing, and anything that
+  displays one should say so.
+- **Fail closed.** A headless run has nobody to answer a permission prompt, so
+  anything not explicitly permitted is denied — and the denial should say what to
+  do instead.
+- **The daemon must survive the browser.** Runs continue with the tab closed.
+
 ## Non-goals
+
+- Being an IDE. No go-to-definition, no blame, no extension host. Reading and
+  reviewing code in aide is in scope; replacing the editor is not.
+- A git graph. Fun, and the least useful thing on the list.
+- Supporting a database until run-history queries actually hurt.
+- Multi-user, remote access, or anything that assumes this is not running on
+  your own machine behind loopback.
+
+## Current milestone
+
+Developing aide in aide. Phases 1–3 (landing works, runs survive restarts, the
+agent gets project context and installed dependencies) are done by hand; the
+iteration loop and the code-reading surface are meant to be built through aide
+itself.

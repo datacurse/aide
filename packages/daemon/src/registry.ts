@@ -2,8 +2,10 @@ import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { basename, resolve } from "node:path"
-import type { Project } from "@aide/protocol"
+import type { Project, ProjectDoc } from "@aide/protocol"
 import {
+  EMPTY_PROJECT_DOC,
+  parseProjectDoc,
   aideHome,
   decisionsDir,
   inboxPath,
@@ -37,9 +39,35 @@ async function saveProjects(projects: Project[]): Promise<void> {
   await writeFile(registryPath(), `${JSON.stringify(projects, null, 2)}\n`, "utf8")
 }
 
-const PROJECT_DOC = `# Project
+/**
+ * The frontmatter is commented out on purpose. aide manages arbitrary repos, and
+ * guessing a package manager is worse than doing nothing — a wrong bootstrap
+ * command fails every run until someone notices.
+ */
+const PROJECT_DOC = `---
+# Uncomment and set this to whatever makes a fresh checkout of this project
+# buildable. It runs ONCE in each new task worktree, before the agent starts,
+# because \`git worktree add\` checks out tracked files only — no node_modules,
+# no vendor/, no venv.
+#
+# aide already sets CI=true, NO_COLOR=1 and GIT_TERMINAL_PROMPT=0 for you.
+# Inline VAR=value prefixes are not portable here; the command runs through the
+# platform shell.
+#
+# bootstrap: pnpm install --frozen-lockfile
+# bootstrapTimeoutMs: 600000
+---
 
-<!-- Why this exists. Written by you, read by every agent that works here. -->
+# Project
+
+<!--
+Why this exists. Read by every agent that works here, as a standing constraint
+rather than as part of any one task.
+
+This is the WHY. For HOW to work in the codebase — commands, conventions, what
+never to run — use a CLAUDE.md at the repo root instead: it is versioned with the
+code it describes, and agents read it from their own worktree.
+-->
 
 ## Constraints
 
@@ -78,6 +106,35 @@ export async function scaffoldState(root: string): Promise<void> {
   ]
   for (const [path, content] of seed) {
     if (!existsSync(path)) await writeFile(path, content, "utf8")
+  }
+}
+
+/**
+ * Read `.aide/project.md` from the project's MAIN checkout.
+ *
+ * The main tree, not the worktree, for two reasons: it is where the human edits
+ * the file, and it is the only copy that exists when `.aide/` is untracked.
+ * Reading the worktree's copy would hand the agent whatever the doc said at the
+ * branch point.
+ *
+ * A missing file is normal — `.aide/` may predate this, or the human may have
+ * deleted it — and means "no project context", not an error.
+ */
+export async function readProjectDoc(root: string): Promise<ProjectDoc> {
+  let raw: string
+  try {
+    raw = await readFile(projectDocPath(root), "utf8")
+  } catch {
+    return EMPTY_PROJECT_DOC
+  }
+  try {
+    return parseProjectDoc(raw)
+  } catch (err) {
+    // Re-thrown with the path, because "bootstrap must be a string" is not
+    // actionable without knowing which file said it.
+    throw new Error(
+      `${projectDocPath(root)}: ${err instanceof Error ? err.message : String(err)}`,
+    )
   }
 }
 
