@@ -1,13 +1,25 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import type { Attachment, ChatMode, ContextUsage, EffortLevel, RunEvent } from "@aide/protocol"
 import { api, type ConversationSummary, type ConversationView } from "../api.js"
 import { Composer } from "../Composer.js"
+import { WorkingBar } from "../Working.js"
 import { Empty, PaneHeader } from "../ui.js"
 import { useRunStream } from "../useRunStream.js"
 import { Transcript } from "./Run.js"
 
 /** Past this, a transcript is slow to read and slower to render; ask first. */
 const HEAVY_BYTES = 2 * 1024 * 1024
+
+/**
+ * How many events to render without being asked.
+ *
+ * A long conversation is thousands of events, every assistant turn of which goes
+ * through a markdown parser. Rendering all of it makes the pane janky enough
+ * that a reply arriving looks like nothing happening — the same symptom as a
+ * broken stream, from a completely different cause. The tail is what anyone
+ * actually wants to see on open.
+ */
+const VISIBLE_TAIL = 250
 
 function ago(ms: number): string {
   const s = Math.round((Date.now() - ms) / 1000)
@@ -178,13 +190,17 @@ export function ConversationPane({
       for (const e of live) next.set(`${e.runId}:${e.seq}`, e)
       return next
     })
+    // Only a NEW conversation needs this: it has no id until the SDK assigns one,
+    // and the list has no row for it yet. An existing one already knows its id,
+    // and telling the list to refetch mid-turn just churns it.
+    if (summary) return
     for (const e of live) {
       if (e.type === "run.started" && e.sessionId && !liveSessionId) {
         setLiveSessionId(e.sessionId)
         onStarted?.(e.sessionId)
       }
     }
-  }, [live, liveSessionId, onStarted])
+  }, [live, liveSessionId, onStarted, summary])
 
   const turnEvents = useMemo(
     () => [...sent.values()].sort((a, b) => (a.runId === b.runId ? a.seq - b.seq : 0)),
@@ -218,6 +234,27 @@ export function ConversationPane({
     [view?.events, turnEvents],
   )
 
+  const [showAll, setShowAll] = useState(false)
+  const hidden = showAll ? 0 : Math.max(0, events.length - VISIBLE_TAIL)
+  const shown = hidden > 0 ? events.slice(hidden) : events
+
+  // Follow the tail, but stop fighting the user the moment they scroll up. Same
+  // rule as the run pane; without it a reply lands hundreds of messages below
+  // the fold and reads as nothing having happened at all.
+  const scroller = useRef<HTMLDivElement>(null)
+  const pinned = useRef(true)
+  useEffect(() => {
+    const el = scroller.current
+    if (el && pinned.current) el.scrollTop = el.scrollHeight
+  }, [shown.length])
+
+  // A newly opened conversation starts at the end, where the recent messages are.
+  useEffect(() => {
+    pinned.current = true
+    const el = scroller.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [sessionId, view?.events.length])
+
   const send = async (msg: {
     text: string
     attachments: Attachment[]
@@ -247,7 +284,14 @@ export function ConversationPane({
     <section className="flex min-h-0 min-w-0 flex-1 flex-col bg-editor">
       <PaneHeader title={title} />
 
-      <div className="flex-1 overflow-auto px-3 py-2 font-mono text-xs leading-relaxed">
+      <div
+        ref={scroller}
+        onScroll={(e) => {
+          const el = e.currentTarget
+          pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60
+        }}
+        className="flex-1 overflow-auto px-3 py-2 font-mono text-xs leading-relaxed"
+      >
         {heavy && summary ? (
           <Empty>
             This transcript is {mb(summary.bytes)} on disk.{" "}
@@ -274,11 +318,30 @@ export function ConversationPane({
                 Showing the first part of {view.totalMessages} messages.
               </p>
             )}
-            <Transcript events={events} onPermission={busy ? answer : undefined} />
+            {hidden > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowAll(true)}
+                className="mb-2 w-full border-b border-line pb-2 font-sans text-[11px] text-fg-dim hover:text-fg"
+              >
+                {hidden} earlier events hidden — show all
+              </button>
+            )}
+            <Transcript events={shown} onPermission={busy ? answer : undefined} />
           </>
         )}
         {error && <p className="mt-2 font-sans text-[11px] text-err">{error}</p>}
       </div>
+
+      {busy && (
+        <WorkingBar
+          events={turnEvents}
+          runId={runId}
+          onInterrupt={() => {
+            if (runId) void api.interruptChat(runId).catch(() => {})
+          }}
+        />
+      )}
 
       {projectId && (
         <Composer
