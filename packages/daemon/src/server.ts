@@ -536,7 +536,17 @@ app.get("/ws", { websocket: true }, (socket, req) => {
       if (backlog.length) send({ type: "events", runId: msg.runId, events: backlog })
       send({ type: "caught-up", runId: msg.runId, seq: backlog.at(-1)?.seq ?? msg.fromSeq })
 
-      subs.set(msg.runId, unsub)
+      // Deltas ride the same socket but come from the chat lane rather than the
+      // log, because they are never stored. A run that is not a live chat turn
+      // simply has no watchers and this costs nothing.
+      const unwatch = chat.watchDeltas(msg.runId, (delta) => {
+        send({ type: "delta", runId: msg.runId, delta })
+      })
+
+      subs.set(msg.runId, () => {
+        unsub()
+        unwatch()
+      })
     }
   })
 

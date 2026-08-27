@@ -1,7 +1,7 @@
 import { fork, type ChildProcess } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { fileURLToPath } from "node:url"
-import type { Attachment, ChatMode, EffortLevel, Project } from "@aide/protocol"
+import type { Attachment, ChatMode, EffortLevel, Project, RunDelta } from "@aide/protocol"
 import type { RunAgentOptions } from "./agent.js"
 import { CONFIG } from "./config.js"
 import type { EventLog } from "./eventlog.js"
@@ -66,6 +66,23 @@ export interface SendOptions {
 
 export class ChatLane {
   #turns = new Map<string, TurnRecord>()
+  /**
+   * Live delta listeners, per run. Separate from the EventLog on purpose: these
+   * are thousands of token-sized messages per turn, and the log is an
+   * append-only file replayed in full to every new subscriber.
+   */
+  #watchers = new Map<string, Set<(d: RunDelta) => void>>()
+
+  /** Returns an unsubscribe. A run with no watchers simply drops its deltas. */
+  watchDeltas(runId: string, fn: (d: RunDelta) => void): () => void {
+    const set = this.#watchers.get(runId) ?? new Set()
+    set.add(fn)
+    this.#watchers.set(runId, set)
+    return () => {
+      set.delete(fn)
+      if (set.size === 0) this.#watchers.delete(runId)
+    }
+  }
 
   constructor(private readonly log: EventLog) {}
 
@@ -150,6 +167,11 @@ export class ChatLane {
         child.send({ cmd: "start", job } satisfies ToWorker)
         return
       }
+      if (msg.type === "delta") {
+        const watchers = this.#watchers.get(runId)
+        if (watchers) for (const fn of watchers) fn(msg.body)
+        return
+      }
       if (msg.type === "permission") {
         record.pending.add(msg.requestId)
         this.log.append(runId, {
@@ -179,6 +201,7 @@ export class ChatLane {
       }
       if (msg.type === "done") {
         this.#turns.delete(runId)
+        this.#watchers.delete(runId)
       }
     })
 

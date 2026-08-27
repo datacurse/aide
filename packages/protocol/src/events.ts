@@ -144,8 +144,28 @@ export type ClientMessage =
   | { type: "subscribe"; runId: string; fromSeq: number }
   | { type: "unsubscribe"; runId: string }
 
+/**
+ * Token-by-token output, while a turn is still producing it.
+ *
+ * Deliberately NOT a `RunEventBody`, and deliberately never written to the event
+ * log. A turn emits thousands of these; appending each one would turn an
+ * append-only NDJSON file into a token stream and replay all of it to every
+ * browser that subscribes. The durable record is the completed message that
+ * follows — this is the same content arriving early, and it is fine to lose.
+ *
+ * Which is also why a reconnecting client misses nothing: it replays the events
+ * and simply skips the animation.
+ */
+export type RunDelta =
+  | { kind: "text"; text: string }
+  | { kind: "thinking"; text: string }
+  /** Cumulative for the message in flight, straight off the API's message_delta. */
+  | { kind: "usage"; outputTokens: number }
+
 export type ServerMessage =
   | { type: "events"; runId: string; events: RunEvent[] }
+  /** Ephemeral; see RunDelta. Only ever sent live, never replayed. */
+  | { type: "delta"; runId: string; delta: RunDelta }
   /** Sent once the replayed backlog is drained and the client is live. */
   | { type: "caught-up"; runId: string; seq: number }
   | { type: "error"; message: string }

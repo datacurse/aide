@@ -58,10 +58,13 @@ export function describeActivity(events: readonly RunEvent[], runId: string | nu
 export function WorkingBar({
   events,
   runId,
+  outputTokens,
   onInterrupt,
 }: {
   events: readonly RunEvent[]
   runId: string | null
+  /** Cumulative output tokens for the message in flight, straight off the stream. */
+  outputTokens: number
   onInterrupt: () => void
 }) {
   const [startedAt] = useState(() => Date.now())
@@ -89,6 +92,11 @@ export function WorkingBar({
       <span className="text-fg-dim">
         {seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`}
       </span>
+      {outputTokens > 0 && (
+        <span className="text-fg-dim" title="Output tokens in the message being written">
+          {outputTokens.toLocaleString()} tokens
+        </span>
+      )}
       <button
         type="button"
         onClick={onInterrupt}

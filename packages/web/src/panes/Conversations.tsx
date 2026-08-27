@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import type { Attachment, ChatMode, ContextUsage, EffortLevel, RunEvent } from "@aide/protocol"
 import { api, type ConversationSummary, type ConversationView } from "../api.js"
 import { Composer } from "../Composer.js"
+import { Markdown } from "../Markdown.js"
 import { WorkingBar } from "../Working.js"
 import { Empty, PaneHeader } from "../ui.js"
 import { useRunStream } from "../useRunStream.js"
@@ -153,7 +154,7 @@ export function ConversationPane({
   const [liveSessionId, setLiveSessionId] = useState<string | null>(null)
 
   const sessionId = summary?.sessionId ?? liveSessionId
-  const { events: live } = useRunStream(runId)
+  const { events: live, draft } = useRunStream(runId)
 
   useEffect(() => {
     setView(null)
@@ -246,7 +247,7 @@ export function ConversationPane({
   useEffect(() => {
     const el = scroller.current
     if (el && pinned.current) el.scrollTop = el.scrollHeight
-  }, [shown.length])
+  }, [shown.length, draft.text, draft.thinking])
 
   // A newly opened conversation starts at the end, where the recent messages are.
   useEffect(() => {
@@ -328,6 +329,18 @@ export function ConversationPane({
               </button>
             )}
             <Transcript events={shown} onPermission={busy ? answer : undefined} />
+            {busy && (draft.thinking || draft.text) && (
+              <div className="space-y-1">
+                {draft.thinking && (
+                  <p className="px-1 text-syn-comment italic">{draft.thinking}</p>
+                )}
+                {draft.text && (
+                  <div className="px-1">
+                    <Markdown text={draft.text} />
+                  </div>
+                )}
+              </div>
+            )}
           </>
         )}
         {error && <p className="mt-2 font-sans text-[11px] text-err">{error}</p>}
@@ -337,6 +350,7 @@ export function ConversationPane({
         <WorkingBar
           events={turnEvents}
           runId={runId}
+          outputTokens={draft.outputTokens}
           onInterrupt={() => {
             if (runId) void api.interruptChat(runId).catch(() => {})
           }}

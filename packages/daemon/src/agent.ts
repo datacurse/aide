@@ -16,6 +16,7 @@ import type {
   ChatMode,
   EffortLevel,
   ModelSpend,
+  RunDelta,
   RunEventBody,
   RunStatus,
 } from "@aide/protocol"
@@ -76,6 +77,12 @@ export interface RunAgentOptions {
   onPermission?: (req: { requestId: string; name: string; input: unknown }) => Promise<boolean>
   /** Emit a `context.usage` event at the end of the turn. Chat only. */
   trackContext?: boolean
+  /**
+   * Receives token-by-token output while the turn is producing it. Setting this
+   * turns on the SDK's partial-message stream; leaving it unset keeps a run to
+   * whole messages, which is all a headless task needs.
+   */
+  onDelta?: (delta: RunDelta) => void
 
   /**
    * Receives a handle to interrupt the run. This is a control message over the
@@ -131,6 +138,41 @@ const CHAT_TO_SDK_MODE: Record<ChatMode, "default" | "acceptEdits" | "plan" | "a
   acceptEdits: "acceptEdits",
   plan: "plan",
   auto: "auto",
+}
+
+/**
+ * One `stream_event` into zero or more deltas.
+ *
+ * The payload is a raw Messages API streaming event, so the shapes worth
+ * handling are `content_block_delta` (text and thinking, arriving in pieces) and
+ * `message_delta` (cumulative output tokens for the message in flight). The
+ * rest — block starts and stops, message_start — carry nothing a reader needs
+ * that the finished message will not say better.
+ */
+function toDeltas(message: unknown): RunDelta[] {
+  const event = (message as { event?: Record<string, unknown> }).event
+  if (!event) return []
+
+  if (event["type"] === "content_block_delta") {
+    const d = event["delta"] as Record<string, unknown> | undefined
+    if (d?.["type"] === "text_delta") {
+      const text = String(d["text"] ?? "")
+      return text ? [{ kind: "text", text }] : []
+    }
+    if (d?.["type"] === "thinking_delta") {
+      const text = String(d["thinking"] ?? "")
+      return text ? [{ kind: "thinking", text }] : []
+    }
+    return []
+  }
+
+  if (event["type"] === "message_delta") {
+    const usage = event["usage"] as Record<string, unknown> | undefined
+    const out = Number(usage?.["output_tokens"] ?? 0)
+    return out > 0 ? [{ kind: "usage", outputTokens: out }] : []
+  }
+
+  return []
 }
 
 export interface NormalizeContext {
@@ -373,6 +415,15 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
           .filter(Boolean)
           .join("\n"),
       },
+      // Without `display: "summarized"` the reasoning arrives as thinking blocks
+      // with EMPTY text — "omitted" is the default on Opus 5 and its siblings —
+      // so a UI that renders thinking shows nothing at all and the model looks
+      // like it is stalling before it answers. Display costs nothing: the
+      // thinking happens and is billed identically either way.
+      thinking: { type: "adaptive", display: "summarized" },
+      // Only when someone is watching. Partial messages are thousands of events
+      // per turn, and a headless task has nobody to show them to.
+      ...(opts.onDelta ? { includePartialMessages: true } : {}),
       maxBudgetUsd: opts.maxBudgetUsd,
       ...(opts.maxTurns ? { maxTurns: opts.maxTurns } : {}),
       // Load the target project's .claude/ but not the host's ~/.claude, so a run
@@ -431,6 +482,14 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
       // control request, so it stops being available the moment the turn ends.
       // Guarded: an experimental control request must not be able to fail a turn
       // that has already produced its result.
+      // Partial messages are the live typing. They are handed to onDelta and
+      // then dropped: `normalizeSdkMessage` ignores `stream_event`, so nothing
+      // token-sized ever reaches the durable event log.
+      if (opts.onDelta && (message as { type?: string }).type === "stream_event") {
+        for (const delta of toDeltas(message)) opts.onDelta(delta)
+        continue
+      }
+
       // Sampled on each assistant message, NOT at the result. `getContextUsage`
       // is a control request, and by the time the result arrives the channel is
       // already closing — it fails with "Query closed before response received",

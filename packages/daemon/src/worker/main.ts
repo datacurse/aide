@@ -4,7 +4,7 @@
  * The isolation is the point: an agent run that crashes, wedges, or eats memory
  * takes down a worker, not the daemon holding every other project's state.
  */
-import type { RunEventBody } from "@aide/protocol"
+import type { RunDelta, RunEventBody } from "@aide/protocol"
 import { runAgent, type RunAgentOptions } from "../agent.js"
 
 /** The job needs `chatMode` set for the worker to ask instead of failing closed. */
@@ -16,6 +16,8 @@ export type ToWorker =
 export type FromWorker =
   | { type: "ready" }
   | { type: "event"; body: RunEventBody }
+  /** Ephemeral live output; never written to the event log. */
+  | { type: "delta"; body: RunDelta }
   | { type: "permission"; requestId: string; name: string; input: unknown }
   | { type: "done"; interrupted: boolean }
 
@@ -73,6 +75,8 @@ async function main(job: RunAgentOptions): Promise<void> {
         // An interrupt that arrived before the SDK was ready still applies.
         if (interrupted) void c.interrupt().catch(() => {})
       },
+      // Only a chat streams deltas — a headless task has nobody watching.
+      ...(job.chatMode ? { onDelta: (delta: RunDelta) => send({ type: "delta", body: delta }) } : {}),
       // Only chat turns ask. A task run leaves chatMode unset and keeps the
       // fail-closed path in agent.ts, because nobody is there to answer.
       ...(job.chatMode
