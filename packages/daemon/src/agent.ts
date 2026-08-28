@@ -200,23 +200,33 @@ const HUMAN_ONLY_COMMANDS = ["git commit", "git push"]
  * So `Bash(*)` goes into the flag-settings layer, which is resolved before the
  * classifier is reached, and what follows is what is left of the gate.
  *
- * Be exact about what that is. These are prefix rules matched by the SDK against
- * the leading words of a command: `git commit -am x` is stopped, `true; git
- * commit -am x` may well not be. It is a backstop against the two ways a run
- * wastes an afternoon, not a security boundary. The boundary is the one the
- * brief describes — your own machine, behind loopback, one agent at a time, over
- * a checkpoint taken before the turn began.
+ * What that gate is worth was read out of the CLI the SDK spawns rather than
+ * guessed at — it is a Bun binary, so its JavaScript is still text inside it:
+ *
+ * - `Bash(*)` is normalized to the bare tool name. The rule parser returns no
+ *   rule content for `""` or `"*"`, so this really is the whole tool, and it is
+ *   the same widening a `.claude/settings.json` would do. That file is still a
+ *   red flag; this is the one use of the layer that has a home in code.
+ * - A denied command is not string-matched. The CLI parses it into a syntax
+ *   tree, walks env-var prefixes and options, and evaluates each subcommand of a
+ *   compound line separately — there is a `subcommandResults` denial reason for
+ *   exactly that case. So `git commit` in the list is not trivially dodged by
+ *   writing `true; git commit`.
+ *
+ * It is still a list of command prefixes rather than a security boundary. The
+ * boundary is the one the brief describes: your own machine, behind loopback,
+ * one agent at a time, over a checkpoint taken before the turn began.
  */
 function fastBashSettings(deniedBash: readonly string[]): Settings {
-  // Three shapes per prefix, because the SDK's rule matching is undocumented and
-  // has differed between prefix and wildcard forms between releases — the same
-  // reason `policy.ts` refuses to decide anything through it. A redundant deny
-  // costs nothing. A deny that quietly fails to match costs the thing it was
-  // written to stop.
+  // Two shapes per prefix. The rule validator in that same binary accepts both
+  // `Bash(pnpm dev *)` and `Bash(pnpm dev:*)` and labels the second "(legacy)",
+  // and the matcher strips either two-character suffix and prefix-matches what
+  // is left — so they are one rule wearing two spellings, and the bare form is
+  // the exact match. Emitting both costs nothing and survives whichever spelling
+  // a later release retires.
   const deny = [...deniedBash, ...HUMAN_ONLY_COMMANDS].flatMap((prefix) => [
     `Bash(${prefix})`,
     `Bash(${prefix} *)`,
-    `Bash(${prefix}:*)`,
   ])
   return { permissions: { allow: ["Bash(*)"], deny } }
 }
