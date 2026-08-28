@@ -109,6 +109,12 @@ export const CONFIG = {
    * consulted. Leaving Edit and Write here made "Manual" a lie — the mode
    * promises to ask before each edit, and the edit would have been auto-approved
    * before the question could be asked. Only read-only tools belong here.
+   *
+   * Bash does not belong here either, however slow leaving it out looks — and it
+   * does look slow, because Auto classifies every command with a model call. The
+   * reason is that this list is not per-mode: adding Bash would hand Manual and
+   * Plan an unannounced shell as well. That cost is paid in `fastBashSettings`
+   * (agent.ts) instead, which is scoped to Auto alone.
    */
   chatAutoAllowTools: list("AIDE_CHAT_AUTO_ALLOW", ["Read", "Glob", "Grep", "TodoWrite"]),
 

@@ -11,7 +11,7 @@
  * single control request, so neither ever sees a message union to normalize.
  */
 import { randomUUID } from "node:crypto"
-import { query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk"
+import { query, type SDKUserMessage, type Settings } from "@anthropic-ai/claude-agent-sdk"
 import type {
   Attachment,
   ChatMode,
@@ -169,6 +169,56 @@ function summarizeToolResult(content: unknown): string {
     return clip(text.trim())
   }
   return ""
+}
+
+/**
+ * Commands a chat may not run even on the fast path below.
+ *
+ * `deniedBash` already carries the ways a run ends badly — the servers that
+ * never exit, the script that spends money, the fetch-and-execute. These two are
+ * a different category: they are the ways a run ends the REVIEW. The product is
+ * that you read the diff and you commit it, so a run that commits its own work
+ * has removed the gate rather than passed it.
+ */
+const HUMAN_ONLY_COMMANDS = ["git commit", "git push"]
+
+/**
+ * What a chat in Auto mode may do with a shell, decided by aide instead of by a
+ * model that guards it.
+ *
+ * Auto mode classifies every Bash command before it runs. That classification is
+ * a model call and costs what one costs: over 942 Bash calls in this machine's
+ * run logs, a trivial command took a median of 3.3s and one that ran a program
+ * with a pipe in it took 6.0s — against 140ms for the shell spawn itself, and
+ * 0-1ms for the very same tool on runs where nothing classified it. A turn that
+ * shells out sixty times pays minutes of wall clock for it.
+ *
+ * And it buys less than it appears to. Across sixty run logs the classifier
+ * escalated to asking the human exactly zero times: it either allows, slowly, or
+ * refuses outright — and a refusal lands on an agent with no way to ask.
+ *
+ * So `Bash(*)` goes into the flag-settings layer, which is resolved before the
+ * classifier is reached, and what follows is what is left of the gate.
+ *
+ * Be exact about what that is. These are prefix rules matched by the SDK against
+ * the leading words of a command: `git commit -am x` is stopped, `true; git
+ * commit -am x` may well not be. It is a backstop against the two ways a run
+ * wastes an afternoon, not a security boundary. The boundary is the one the
+ * brief describes — your own machine, behind loopback, one agent at a time, over
+ * a checkpoint taken before the turn began.
+ */
+function fastBashSettings(deniedBash: readonly string[]): Settings {
+  // Three shapes per prefix, because the SDK's rule matching is undocumented and
+  // has differed between prefix and wildcard forms between releases — the same
+  // reason `policy.ts` refuses to decide anything through it. A redundant deny
+  // costs nothing. A deny that quietly fails to match costs the thing it was
+  // written to stop.
+  const deny = [...deniedBash, ...HUMAN_ONLY_COMMANDS].flatMap((prefix) => [
+    `Bash(${prefix})`,
+    `Bash(${prefix} *)`,
+    `Bash(${prefix}:*)`,
+  ])
+  return { permissions: { allow: ["Bash(*)"], deny } }
 }
 
 function toModelSpend(raw: unknown): Record<string, ModelSpend> {
@@ -554,6 +604,12 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
       // exists; `allowedTools` decides what skips the question. A task run leaves
       // this alone and keeps the narrow set it was given.
       ...(opts.chatMode ? { tools: { type: "preset" as const, preset: "claude_code" as const } } : {}),
+      // Auto decides its own shell commands, in aide, at zero latency.
+      //
+      // See `fastBashSettings` for the measurement and for what is given up.
+      // Deliberately scoped to `auto` alone: Manual promises to ask, Plan
+      // promises not to act, and both would be lies if this reached them.
+      ...(opts.chatMode === "auto" ? { settings: fastBashSettings(opts.deniedBash) } : {}),
       ...(opts.effort ? { effort: opts.effort } : {}),
       // Append rather than fork: a chat keeps one stable session id, the way it
       // does in the CLI. See the field's comment for why forking is wrong here.

@@ -33,7 +33,13 @@ export const CHAT_MODE_LABEL: Record<ChatMode, { label: string; hint: string }> 
   manual: { label: "Manual", hint: "Claude will ask for approval before making each edit" },
   acceptEdits: { label: "Edit automatically", hint: "Claude will edit files without asking" },
   plan: { label: "Plan", hint: "Claude will explore and present a plan before editing" },
-  auto: { label: "Auto", hint: "Claude approves what passes a safety check, pauses for anything risky" },
+  // The hint used to say "approves what passes a safety check". It no longer
+  // does one: aide decides Auto's shell commands itself, because the check was a
+  // model call in front of every command and cost seconds of every turn. See
+  // `fastBashSettings` in the daemon's agent.ts for the numbers and the short
+  // list that is still refused. The picker is where someone chooses this, so the
+  // picker is where it has to say so.
+  auto: { label: "Auto", hint: "Claude runs commands without asking. Fastest, and the least supervised" },
 }
 
 /**

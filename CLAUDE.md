@@ -123,3 +123,10 @@ Do not create `.claude/settings.json`. Its `permissions.allow` entries widen a
 run's allowlist before aide's own policy sees the call, so aide's repo
 deliberately has none — which makes that file appearing in a diff a red flag
 rather than a detail.
+
+aide writes that same layer itself, in code, for one case: a chat on Auto gets
+`Bash(*)` allowed and a short deny list, because the alternative is a model call
+in front of every shell command. That lives in `fastBashSettings` in
+`daemon/src/agent.ts`, where it is scoped to Auto and reviewable in a diff. The
+rule above is unchanged: the *file* is still a red flag, precisely because the
+one legitimate use of the layer already has a home.
