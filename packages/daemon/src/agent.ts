@@ -580,6 +580,33 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
             "implies. Carry the task to completion. If something genuinely blocks you,",
             "say what blocked you and what decision is needed, then stop.",
           ].join(" "),
+          // A shell call is the most expensive thing a run does that nobody
+          // budgets for.
+          //
+          // Measured over one 988-second run in this repository: 67 Bash calls,
+          // not one of them under 3.1s and a median of 5.1s, against 0-1ms for
+          // every Read, Grep, Edit and Write in the same run. Forty-two of those
+          // Bash calls were reading or editing a file — 228 seconds, near enough
+          // a quarter of the run, spent starting shells to do what the file
+          // tools do instantly. The same log shows 62 assistant turns carrying
+          // 75 tool calls, so almost every turn paid a round trip to make one
+          // call.
+          //
+          // This belongs in the system prompt rather than in a project's
+          // CLAUDE.md because the cost is the harness and the platform, not the
+          // project — every run aide drives pays it. It is worth saying out loud
+          // because the SDK's own auto mode says the OPPOSITE: it asks for cat,
+          // grep and sed in place of the file tools, which is fair advice where
+          // a shell is cheap and expensive advice on Windows, where it is not.
+          [
+            "Use Read, Grep, Glob, Edit and Write for anything to do with files — reading",
+            "them, searching them, changing them. Keep Bash for what genuinely needs a",
+            "shell: git, the package manager, running something. A Bash call costs several",
+            "seconds on this machine where the file tools return in about a millisecond,",
+            "so reaching for cat or sed in their place is time spent waiting and nothing",
+            "else. When several calls do not depend on each other, make them in one",
+            "message instead of one per turn.",
+          ].join(" "),
           // The project brief goes in the SYSTEM prompt so it reads as a standing
           // constraint rather than as part of this request, and so it survives
           // compaction on a long run. Framed with its provenance, because an
