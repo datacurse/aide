@@ -518,6 +518,20 @@ function CheckpointRow({ line }: { line: CheckpointLine }) {
  * text going into the history verbatim, and rendering it would show you
  * something the history will not have.
  */
+function CommitMessageBox({ message, note }: { message: string; note: ReactNode }) {
+  return (
+    <div className="my-2 rounded border border-line bg-chrome px-3 py-2">
+      <div className="mb-1 flex flex-wrap items-baseline gap-2 font-sans text-[10px] text-fg-dim">
+        <span className="tracking-wide text-syn-var uppercase">commit message</span>
+        {note}
+      </div>
+      <pre className="overflow-auto font-mono text-[12px] leading-relaxed whitespace-pre-wrap text-fg">
+        {message}
+      </pre>
+    </div>
+  )
+}
+
 function CommitMessageRow({
   message,
   model,
@@ -528,16 +542,32 @@ function CommitMessageRow({
   specChanged: boolean
 }) {
   return (
-    <div className="my-2 rounded border border-line bg-chrome px-3 py-2">
-      <div className="mb-1 flex flex-wrap items-baseline gap-2 font-sans text-[10px] text-fg-dim">
-        <span className="tracking-wide text-syn-var uppercase">commit message</span>
-        <span>drafted by {model}</span>
-        {specChanged && <span className="text-warn">· .aide/spec.md rewritten with it</span>}
-      </div>
-      <pre className="overflow-auto font-mono text-[12px] leading-relaxed whitespace-pre-wrap text-fg">
-        {message}
-      </pre>
-    </div>
+    <CommitMessageBox
+      message={message}
+      note={
+        <>
+          <span>drafted by {model}</span>
+          {specChanged && <span className="text-warn">· .aide/spec.md rewritten with it</span>}
+        </>
+      }
+    />
+  )
+}
+
+/**
+ * The message as it is being typed, in the box the finished one lands in.
+ *
+ * Deliberately not the markdown blob a chat turn's draft renders into. A commit
+ * message is preformatted text with a 72-column body, and rendering it as prose
+ * for ten seconds and then as a `pre` reflows the one thing the reader is in the
+ * middle of reading.
+ */
+export function CommitMessageDraft({ text, model }: { text: string; model: string }) {
+  return (
+    <CommitMessageBox
+      message={text}
+      note={<span>{model ? `${model} is writing it` : "being written"}</span>}
+    />
   )
 }
 

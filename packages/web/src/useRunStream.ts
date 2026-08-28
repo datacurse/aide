@@ -88,8 +88,11 @@ export function useRunStream(runId: string | null): {
         setEvents((prev) => [...prev, ...fresh])
 
         // A completed block supersedes whatever was being typed into it, so the
-        // draft is cleared rather than left to render twice.
-        if (fresh.some((e) => e.type === "assistant.text")) {
+        // draft is cleared rather than left to render twice. `commit.drafted` is
+        // the commit run's version of the same thing — it carries the finished
+        // message, and without it here the message the model just streamed stays
+        // on screen underneath its own final copy.
+        if (fresh.some((e) => e.type === "assistant.text" || e.type === "commit.drafted")) {
           setDraft((prev) => ({ ...prev, text: "" }))
         }
         if (fresh.some((e) => e.type === "assistant.thinking")) {

@@ -1,5 +1,3 @@
-This is purely a UI layout refactor (removing the header bar, moving daemon controls into the projects rail footer). It doesn't add, change, or remove any capability described in the spec — no new behavior, no fixed limitation. The file comes back unchanged.
-
 # What aide can and cannot do
 
 The capability list. One line per thing, present tense, only what is true of the
@@ -79,8 +77,8 @@ This file is what it currently does.
   the session — the browser is not in that path.
 - Commits a conversation's work as a run of its own, narrated live in its
   transcript: reads the diff, drafts the message and the spec update with it,
-  then writes both. There is no panel to review either in first — the
-  transcript afterwards is the review.
+  streaming the message into view as it is written, then writes both. There is
+  no panel to review either in first — the transcript afterwards is the review.
 - Measures that diff against the conversation's checkpoint rather than against
   HEAD, so it is the agent's work and not the agent's work plus whatever was
   already uncommitted — and commits exactly the paths in it, leaving anything

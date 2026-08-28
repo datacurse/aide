@@ -373,8 +373,9 @@ export class ChatLane {
    *
    * Everything the agent path needs and this does not is simply absent: no
    * worker, no checkpoint (the conversation's own is what it measures against),
-   * no permissions. `work` gets an `emit` for progress and a `stopped` it can
-   * check before it writes anything, and the terminal event is appended here so
+   * no permissions. `work` gets an `emit` for progress, a `delta` for text still
+   * arriving, and a `stopped` it can check before it writes anything, and the
+   * terminal event is appended here so
    * the invariant every reader depends on — a log ends in exactly one — cannot
    * be broken by a caller that forgot.
    */
@@ -388,6 +389,8 @@ export class ChatLane {
     work: (run: {
       runId: string
       emit: (body: RunEventBody) => void
+      /** Live-only, never logged — the same channel a turn's tokens go down. */
+      delta: (d: RunDelta) => void
       stopped: () => boolean
     }) => Promise<{ costUsd: number; modelUsage: Record<string, ModelSpend> }>
   }): string {
@@ -437,6 +440,10 @@ export class ChatLane {
           runId,
           emit: (body) => {
             this.log.append(runId, body)
+          },
+          delta: (d) => {
+            const watchers = this.#watchers.get(runId)
+            if (watchers) for (const fn of watchers) fn(d)
           },
           stopped: () => record.interrupted,
         })

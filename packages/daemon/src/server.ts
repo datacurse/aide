@@ -588,6 +588,7 @@ app.post("/api/projects/:id/conversations/:sessionId/commit", async (req, reply)
           checkpoint: found.checkpoint,
           request: row?.text ?? "",
           emit: run.emit,
+          delta: run.delta,
           stopped: run.stopped,
         }),
     })
@@ -828,8 +829,9 @@ app.get("/ws", { websocket: true }, (socket, req) => {
       send({ type: "caught-up", runId: msg.runId, seq: backlog.at(-1)?.seq ?? msg.fromSeq })
 
       // Deltas ride the same socket but come from the chat lane rather than the
-      // log, because they are never stored. A run that is not a live chat turn
-      // simply has no watchers and this costs nothing.
+      // log, because they are never stored. Any live run may have them — a turn's
+      // tokens, or a commit's message as it is written — and a run that is over
+      // simply never fires this, so subscribing to history costs nothing.
       const unwatch = chat.watchDeltas(msg.runId, (delta) => {
         send({ type: "delta", runId: msg.runId, delta })
       })

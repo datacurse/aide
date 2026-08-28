@@ -53,6 +53,14 @@ export interface DraftCommitMessageOptions {
   diff: string
   /** Recent subjects from the project's own log, newest first. */
   recentSubjects: string[]
+  /**
+   * Text as it arrives, for a caller that has somewhere to put it.
+   *
+   * Absent by default, and its absence turns partial messages off at the SDK
+   * rather than just ignoring them: a helper call nobody is watching should not
+   * be paying to stream.
+   */
+  onText?: (text: string) => void
 }
 
 /** Models sometimes wrap the answer in a fence despite being told not to. */
@@ -85,13 +93,32 @@ export interface Drafted {
  * process has so far only ever needed its types; loading the whole run machinery
  * to normalize five numbers would be a strange trade for a duplicate this size.
  */
-async function drain(q: AsyncIterable<unknown>): Promise<Drafted> {
+async function drain(
+  q: AsyncIterable<unknown>,
+  onText?: (text: string) => void,
+): Promise<Drafted> {
   const chunks: string[] = []
   let costUsd = 0
   const modelUsage: Record<string, ModelSpend> = {}
 
   for await (const raw of q) {
     const message = raw as Record<string, unknown>
+    // The same characters as the finished `assistant` message below, arriving
+    // early. `chunks` is still built from that message and not from these, so a
+    // dropped delta costs the animation and nothing else.
+    if (message["type"] === "stream_event") {
+      if (onText) {
+        const event = message["event"] as Record<string, unknown> | undefined
+        if (event?.["type"] === "content_block_delta") {
+          const d = event["delta"] as Record<string, unknown> | undefined
+          if (d?.["type"] === "text_delta") {
+            const text = String(d["text"] ?? "")
+            if (text) onText(text)
+          }
+        }
+      }
+      continue
+    }
     if (message["type"] === "result") {
       costUsd = Number(message["total_cost_usd"] ?? 0)
       const entries = Object.entries(
@@ -165,6 +192,8 @@ export async function draftCommitMessage(opts: DraftCommitMessageOptions): Promi
       options: {
         model: opts.model,
         systemPrompt: SYSTEM,
+        // Only when somebody asked for the text as it is written.
+        ...(opts.onText ? { includePartialMessages: true } : {}),
         // No tools at all. This is text generation, not a session: nothing to
         // execute, nothing to permit, no working directory to reach.
         tools: [],
@@ -177,6 +206,7 @@ export async function draftCommitMessage(opts: DraftCommitMessageOptions): Promi
         maxBudgetUsd: HELPER_BUDGET_USD,
       },
     }),
+    opts.onText,
   )
 
   if (!drafted.text) throw new Error("the model returned an empty commit message")

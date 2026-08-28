@@ -18,7 +18,7 @@ import { WorkingBar } from "../Working.js"
 import { Confirm, Empty, PaneHeader } from "../ui.js"
 import { useRunStream } from "../useRunStream.js"
 import { useStickToBottom } from "../useStickToBottom.js"
-import { Transcript } from "./Transcript.js"
+import { CommitMessageDraft, Transcript } from "./Transcript.js"
 
 /**
  * How many events to render without being asked.
@@ -488,6 +488,23 @@ export function ConversationPane({
   // come back. Something has to say when to come back.
   useDoneChime(busy, runId)
 
+  /**
+   * The commit run's model, while it is still writing the message.
+   *
+   * A commit is the one run that streams text without being a chat turn: it has
+   * `commit.step` and never an assistant message, so what is arriving is the
+   * commit message and it belongs in the box the finished one lands in. Null
+   * once `commit.drafted` has landed, because that box is now the real one.
+   */
+  const draftingCommit = useMemo<string | null>(() => {
+    if (!runId) return null
+    const mine = turnEvents.filter((e) => e.runId === runId)
+    if (!mine.some((e) => e.type === "commit.step")) return null
+    if (mine.some((e) => e.type === "commit.drafted")) return null
+    const started = mine.find((e) => e.type === "run.started")
+    return started?.type === "run.started" ? started.model : ""
+  }, [turnEvents, runId])
+
   const usage = useMemo<ContextUsage | null>(() => {
     for (let i = turnEvents.length - 1; i >= 0; i -= 1) {
       const e = turnEvents[i]
@@ -614,11 +631,14 @@ export function ConversationPane({
                   {draft.thinking && (
                     <p className="px-1 text-syn-comment italic">{draft.thinking}</p>
                   )}
-                  {draft.text && (
-                    <div className="px-1">
-                      <Markdown text={draft.text} />
-                    </div>
-                  )}
+                  {draft.text &&
+                    (draftingCommit !== null ? (
+                      <CommitMessageDraft text={draft.text} model={draftingCommit} />
+                    ) : (
+                      <div className="px-1">
+                        <Markdown text={draft.text} />
+                      </div>
+                    ))}
                 </>
               ) : null}
             </Transcript>

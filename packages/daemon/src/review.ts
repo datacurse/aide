@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises"
 import { dirname } from "node:path"
-import type { ModelSpend, Project, RunEventBody } from "@aide/protocol"
+import type { ModelSpend, Project, RunDelta, RunEventBody } from "@aide/protocol"
 import { specPath } from "@aide/protocol/node"
 import { rowForSession } from "./board.js"
 import { commitRun, recentSubjects, runChanges, withRowTrailers } from "./changes.js"
@@ -61,6 +61,8 @@ export interface CommitConversationOptions {
   request: string
   /** Progress, straight onto the conversation's event stream. */
   emit: (body: RunEventBody) => void
+  /** The message as the model types it. Live only — `commit.drafted` is the record. */
+  delta: (d: RunDelta) => void
   /** Whether the human has pressed stop. Read once, at the last moment it helps. */
   stopped: () => boolean
 }
@@ -111,6 +113,20 @@ export async function commitConversation(
     label: `drafting the message and the spec update · ${CONFIG.helperModel}`,
   })
   const spec = await readSpec(project)
+  /**
+   * The half that finishes first says so, and only it.
+   *
+   * These two calls take about as long as each other but never exactly, and
+   * whichever lands first leaves the screen still for the remainder — which is
+   * the whole complaint this narration exists to answer. The one that lands
+   * second says nothing: by then the drafted message is on its way and there is
+   * nothing left to be waiting for.
+   */
+  let outstanding = 2
+  const landed = (label: string) => {
+    outstanding -= 1
+    if (outstanding > 0) emit({ type: "commit.step", label })
+  }
   // In parallel: they read the same diff and neither depends on the other's
   // output, so making them sequential would double the wait.
   const [message, proposed] = await Promise.all([
@@ -121,6 +137,14 @@ export async function commitConversation(
       diffStat: changes.stat,
       diff: changes.diff,
       recentSubjects: await recentSubjects(project.root),
+      // Only this one streams. The spec call returns a whole file, mostly
+      // unchanged, and the two arriving down one channel at once would
+      // interleave into nonsense — so what you watch being written is the
+      // message, which is the half worth reading.
+      onText: (text) => opts.delta({ kind: "text", text }),
+    }).then((r) => {
+      landed("message written · still on the spec update")
+      return r
     }),
     draftSpecUpdate({
       model: CONFIG.helperModel,
@@ -128,6 +152,9 @@ export async function commitConversation(
       request: opts.request,
       diffStat: changes.stat,
       diff: changes.diff,
+    }).then((r) => {
+      landed("spec update drafted · still writing the message")
+      return r
     }),
   ])
   const spend = {
