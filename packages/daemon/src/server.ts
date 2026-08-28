@@ -388,6 +388,29 @@ app.get("/api/projects/:id/git", async (req, reply) => {
   }
 })
 
+/**
+ * What is still uncommitted, cheap enough to poll from an always-visible rail.
+ *
+ * Separate from `/git` above rather than folded into it: that one draws a
+ * history graph and is only read while the git pane is open, this one is read on
+ * every beat from every pane. It is also the exact question the new-conversation
+ * gate below asks, and the two must never be able to disagree — the indicator
+ * saying "clean" while the daemon refuses to start a chat would be unexplainable
+ * from the screen.
+ */
+app.get("/api/projects/:id/git/pending", async (req, reply) => {
+  const { id } = req.params as { id: string }
+  const project = await getProject(id)
+  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
+  try {
+    return await repo.pending(project.root)
+  } catch (err) {
+    return reply.code(502).send({
+      message: `could not read ${project.root}: ${err instanceof Error ? err.message : String(err)}`,
+    })
+  }
+})
+
 app.get("/api/projects/:id/git/working", async (req, reply) => {
   const { id } = req.params as { id: string }
   const project = await getProject(id)
@@ -538,18 +561,43 @@ app.post("/api/projects/:id/conversations/:sessionId/review/draft", async (req, 
   }
 })
 
+/**
+ * Commit a conversation's work.
+ *
+ * An absent `message` is not an error, it is the one-click path: the drafter
+ * writes the message and the spec update, and the commit takes both. The two
+ * gates are still two — a human pressed this, and the verdict below is still
+ * separate — but the diff is read AFTER rather than before, which is a trade the
+ * button that offers it has to say out loud.
+ *
+ * The drafted message comes back in the response for the same reason: a commit
+ * you did not write the message for is one you have to be shown.
+ */
 app.post("/api/projects/:id/conversations/:sessionId/commit", async (req, reply) => {
   const { id, sessionId } = req.params as { id: string; sessionId: string }
-  const { message, spec } = (req.body ?? {}) as { message?: string; spec?: string }
-  if (!message?.trim()) return reply.code(400).send({ message: "body must include { message }" })
+  const body = (req.body ?? {}) as { message?: string; spec?: string }
 
   const project = await getProject(id)
   if (!project) return reply.code(404).send(notFound(`no project ${id}`))
   const found = await reviewable(project, sessionId, reply)
   if (!found) return
 
+  let message = body.message?.trim() ?? ""
+  let spec = body.spec ?? ""
+  if (!message) {
+    const row = found.rowId ? await findTodo(project, found.rowId) : undefined
+    try {
+      const drafted = await draftReview(project, found.checkpoint, row?.text ?? "")
+      message = drafted.message
+      spec = drafted.spec
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err)
+      return reply.code(detail.startsWith("nothing to commit") ? 409 : 502).send({ message: detail })
+    }
+  }
+
   try {
-    return await commitReview({
+    const { sha } = await commitReview({
       project,
       sessionId,
       rowId: found.rowId,
@@ -557,6 +605,7 @@ app.post("/api/projects/:id/conversations/:sessionId/commit", async (req, reply)
       message,
       ...(spec ? { spec } : {}),
     })
+    return { sha, message }
   } catch (err) {
     return reply.code(409).send({ message: err instanceof Error ? err.message : String(err) })
   }
@@ -614,6 +663,37 @@ app.post("/api/projects/:id/chat", async (req, reply) => {
 
   const project = await getProject(id)
   if (!project) return reply.code(404).send(notFound(`no project ${id}`))
+
+  /**
+   * One conversation's work is committed before the next one begins.
+   *
+   * Not tidiness. Every conversation measures its diff against a checkpoint
+   * taken when it started, so a chat opened on top of uncommitted work inherits
+   * that work as its baseline — and when the two touch the same file, git cannot
+   * separate them again and neither review can be honest about what it is
+   * committing. Refusing here is what keeps `mixed` empty in the ordinary case.
+   *
+   * Only for a NEW conversation. Refusing a follow-up would be the opposite of
+   * the rule: the way out of this state is to finish the chat you are in.
+   *
+   * A repo that cannot be read at all lets the message through rather than
+   * blocking it — the exception to fail-closed, because the very next thing this
+   * turn does is take a checkpoint of that same tree, which will fail loudly and
+   * say why. Guessing "dirty" here would answer a broken repository with a
+   * lecture about committing.
+   */
+  if (!body.sessionId) {
+    const outstanding = await repo.pending(project.root).catch(() => null)
+    if (outstanding && outstanding.files.length > 0) {
+      const n = outstanding.files.length
+      return reply.code(409).send({
+        message:
+          `${n} uncommitted file${n === 1 ? "" : "s"} on ${outstanding.branch ?? "this checkout"}. ` +
+          "Commit from the conversation that made them — the commit button beside send does it in " +
+          "one press — or commit them yourself if they are not aide's.",
+      })
+    }
+  }
 
   // Validated rather than cast: these come from a form, and an unknown mode
   // would otherwise reach the SDK as an undefined permission mode.

@@ -44,6 +44,8 @@ import {
   log as readLog,
   overview,
   parseStatus,
+  pending,
+  status as repoStatus,
   workingTree,
 } from "./repo.js"
 import { commitRun, currentBranch, recentSubjects, runChanges, withRowTrailers } from "./changes.js"
@@ -300,6 +302,51 @@ check(
   "the backlog file is still on disk, uncommitted",
   existsSync(join(root, STATE_DIR, "todos.md")),
 )
+
+console.log("\nwhat is left to commit — the indicator, and the gate it drives")
+{
+  // The state left by the section above is the exact trap: `.aide/todos.md` is
+  // sitting untracked and can never be committed, because the daemon owns it.
+  // A new conversation is refused while `pending` is non-empty, so if this list
+  // counted that file the refusal would be permanent on every aide-managed
+  // project and nothing a human could do would clear it.
+  const backlog = `${STATE_DIR}/todos.md`
+  check(
+    "git itself lists the backlog file",
+    (await repoStatus(root)).some((f) => f.path === backlog),
+    "it really is there and really is untracked",
+  )
+  const before = await pending(root)
+  check(
+    "but it is never outstanding work",
+    !before.files.some((f) => f.path === backlog),
+    "otherwise the block on starting a new chat would never lift",
+  )
+  check("and it knows the branch", before.branch === "main", before.branch ?? "(detached)")
+
+  await writeFile(join(root, "app.ts"), "export const n = 99\n", "utf8")
+  const dirty = await pending(root)
+  check(
+    "a fresh edit does show",
+    dirty.files.some((f) => f.path === "app.ts"),
+    `${dirty.files.length} file(s)`,
+  )
+  // The invariant tying the rail to the gate: what the indicator lights on and
+  // what a commit would take have to be the same set, or the screen explains
+  // neither the refusal nor the button that clears it.
+  const takeable = await runChanges(root, scopedSha)
+  check(
+    "and the list is exactly what a commit would take",
+    [...takeable.paths].sort().join(",") ===
+      dirty.files.map((f) => f.path).sort().join(","),
+    takeable.paths.join(",") || "(nothing)",
+  )
+  await git(root, ["checkout", "--", "app.ts"])
+  check(
+    "putting it back drops it from the list again",
+    !(await pending(root)).files.some((f) => f.path === "app.ts"),
+  )
+}
 
 console.log("\nbash policy")
 {

@@ -5,12 +5,13 @@ import type {
   GitFileChange,
   GitFileState,
   GitGraphRow,
+  GitPending,
   GitRef,
 } from "@aide/protocol"
 import { api, type GitCommitDetail, type GitSummary, type GitWorkingTree } from "../api.js"
 import { Diff } from "../Diff.js"
 import { GraphCell, ROW_H, WorkingTreeCell, graphWidth } from "../GitGraph.js"
-import { Button, Empty } from "../ui.js"
+import { Button, Empty, PaneHeader } from "../ui.js"
 
 /**
  * The project's own repository: what is committed, and what is not yet.
@@ -21,11 +22,12 @@ import { Button, Empty } from "../ui.js"
  * tree are the thing most likely to be forgotten and least likely to be
  * anywhere else in this UI.
  *
- * Strictly a reader. There is no stage, no commit, no discard, and that is not
- * an oversight: aide's two gates are commit and land, both of which belong to a
- * task and both of which already exist in the run pane. A second way to commit,
- * reachable from a page with no diff review attached to it, would be the exact
- * shortcut the two-gate rule exists to prevent.
+ * Strictly a reader — the rail below included. There is no stage, no commit, no
+ * discard, and that is not an oversight: aide's two gates both belong to a
+ * conversation, which is where the work has a description and a checkpoint to be
+ * measured against. A second way to commit, reachable from a page showing you a
+ * project rather than a change, would be the exact shortcut the two-gate rule
+ * exists to prevent.
  */
 
 /** How often the list refreshes. Slower than the task poll — history is not live. */
@@ -99,6 +101,125 @@ function RefBadge({ gitRef: r }: { gitRef: GitRef }) {
     >
       {r.kind === "tag" ? `⌂ ${r.name}` : r.name}
     </span>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// The rail
+// ---------------------------------------------------------------------------
+
+/** One letter, in the state's colour — all a 16rem column can spare. */
+const MARK: Record<GitFileState, string> = {
+  added: "A",
+  untracked: "U",
+  modified: "M",
+  deleted: "D",
+  renamed: "R",
+  copied: "C",
+  "type-changed": "T",
+  conflicted: "!",
+  ignored: "I",
+  unknown: "?",
+}
+
+/**
+ * The uncommitted-work indicator, and nothing else.
+ *
+ * On screen at all times, beside every pane, because it is the one fact that
+ * decides what you are allowed to do next: a new conversation is refused while
+ * this list has anything in it. A status you have to go to a tab to read cannot
+ * carry that job — you would meet the refusal before you met the reason.
+ *
+ * Deliberately without a message box and without a single button. Committing
+ * belongs to a conversation, where the work has a description and a checkpoint
+ * to measure against; a commit button reachable from a rail that is showing you
+ * a project rather than a change would be a commit with no review attached and
+ * no idea whose work it was taking. The button lives next to send.
+ *
+ * `.aide/todos.md` is absent from this list by construction — see `pending` in
+ * the daemon. It would otherwise sit here permanently, and since the block on
+ * new conversations reads the same list, it would never lift.
+ */
+export function PendingRail({
+  projectId,
+  pending,
+  error,
+}: {
+  projectId: string | null
+  pending: GitPending | null
+  /** A failed poll, reported above the last good answer rather than replacing it. */
+  error: string | null
+}) {
+  const files = pending?.files ?? []
+  return (
+    <aside className="flex w-64 shrink-0 flex-col border-l border-line bg-chrome">
+      <PaneHeader title="uncommitted">
+        {files.length > 0 && (
+          <span className="rounded-sm bg-warn/15 px-1.5 py-0.5 font-sans text-[10px] text-warn">
+            {files.length}
+          </span>
+        )}
+      </PaneHeader>
+
+      {error && (
+        <div className="shrink-0 border-b border-line px-3 py-1 font-sans text-[11px] text-err">
+          {error}
+        </div>
+      )}
+
+      {!projectId ? (
+        <Empty>Select a project.</Empty>
+      ) : pending === null ? (
+        <Empty>Reading the working tree…</Empty>
+      ) : files.length === 0 ? (
+        <Empty>
+          Nothing uncommitted on {pending.branch ?? "this checkout"}. A new chat can start.
+        </Empty>
+      ) : (
+        <>
+          <div className="shrink-0 border-b border-line px-3 py-2 font-sans text-[11px] leading-relaxed text-fg-dim">
+            {/* Said here rather than only at the refusal. Meeting the rule for
+                the first time as an error, after typing a message, is how a
+                deliberate constraint reads as a bug. */}
+            <span className="text-warn">
+              {files.length} file{files.length === 1 ? "" : "s"}
+            </span>{" "}
+            uncommitted on {pending.branch ?? "a detached checkout"}. Commit this work before
+            starting another chat.
+          </div>
+          <div className="flex-1 overflow-auto py-1">
+            {files.map((f) => (
+              <PendingRow key={`${f.code} ${f.path}`} file={f} />
+            ))}
+          </div>
+        </>
+      )}
+    </aside>
+  )
+}
+
+function PendingRow({ file }: { file: GitFileChange }) {
+  // The working-tree half when there is one, because that is the newer edit;
+  // a file staged as added and then changed again is still, to a reader, changed.
+  const state = file.unstaged ?? file.staged ?? "unknown"
+  const cut = file.path.lastIndexOf("/")
+  const dir = cut === -1 ? "" : file.path.slice(0, cut + 1)
+  const name = cut === -1 ? file.path : file.path.slice(cut + 1)
+  return (
+    <div
+      className="flex items-baseline gap-2 px-3 py-[3px] font-sans text-[12px]"
+      title={`${file.from ? `${file.from} → ` : ""}${file.path} · ${STATE_STYLE[state].label}`}
+    >
+      <span className="min-w-0 flex-1 truncate text-fg-muted">
+        {/* Directory first and dimmed, so the eye lands on the filename — the
+            column is too narrow to show both at full weight. */}
+        {dir && <span className="text-fg-dim">{dir}</span>}
+        {name}
+      </span>
+      <span className={`shrink-0 font-mono text-[10px] ${STATE_STYLE[state].text}`}>
+        {MARK[state]}
+      </span>
+    </div>
   )
 }
 

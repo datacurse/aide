@@ -161,6 +161,26 @@ export interface GitSummary {
   log: GitLog
 }
 
+/**
+ * What has not been committed yet, in the scope a commit would actually take.
+ *
+ * Deliberately neither `GitDirty` nor `GitWorkingTree`. Counts cannot name a
+ * file, and the working tree carries a whole patch, which is far too much to
+ * poll on every beat — this is the middle, enough to say "these three files"
+ * without reading any of their contents.
+ *
+ * `files` EXCLUDES `.aide/todos.md`. The daemon rewrites that file in the same
+ * tree as rows open and close, so it is dirty almost permanently and is never
+ * committable; counting it would leave every aide-managed project showing
+ * uncommitted work forever — and since a new conversation is refused while this
+ * list is non-empty, the block would never lift.
+ */
+export interface GitPending {
+  /** Null when HEAD is detached — the indicator says so rather than guessing. */
+  branch: string | null
+  files: GitFileChange[]
+}
+
 export interface GitWorkingTree {
   /**
    * Carried along because the working tree cannot be described without it —

@@ -7,6 +7,7 @@ import type {
   ConversationSummary,
   EffortLevel,
   GitCommitDetail,
+  GitPending,
   GitSummary,
   GitWorkingTree,
   Health,
@@ -15,7 +16,7 @@ import type {
   Todo,
 } from "@aide/protocol"
 
-export type { ConversationSummary, GitCommitDetail, GitSummary, GitWorkingTree, Health }
+export type { ConversationSummary, GitCommitDetail, GitPending, GitSummary, GitWorkingTree, Health }
 
 /**
  * A conversation plus what the board knows about it.
@@ -190,11 +191,18 @@ export const api = {
     call<ReviewDraft>(`/api/projects/${projectId}/conversations/${sessionId}/review/draft`, {
       method: "POST",
     }),
-  commitChat: (projectId: string, sessionId: string, message: string, spec: string) =>
-    call<{ sha: string }>(`/api/projects/${projectId}/conversations/${sessionId}/commit`, {
-      method: "POST",
-      body: JSON.stringify({ message, spec }),
-    }),
+  /**
+   * Commit this conversation's work.
+   *
+   * An omitted message is the one-click path: the daemon drafts one and hands it
+   * back, because a commit whose message you did not write is one you have to be
+   * shown afterwards.
+   */
+  commitChat: (projectId: string, sessionId: string, message?: string, spec?: string) =>
+    call<{ sha: string; message: string }>(
+      `/api/projects/${projectId}/conversations/${sessionId}/commit`,
+      { method: "POST", body: JSON.stringify(message === undefined ? {} : { message, spec }) },
+    ),
   /** The verdict. Nothing an agent runs can reach this. */
   closeChat: (projectId: string, sessionId: string, verdict: ChatVerdict) =>
     call<{ rowId: string | null; rowRemoved: boolean; warning: string | null }>(
@@ -237,6 +245,11 @@ export const api = {
   /** Branch, ahead/behind, dirt counts and the log — one poll's worth. */
   git: (projectId: string, limit: number) =>
     call<GitSummary>(`/api/projects/${projectId}/git?limit=${limit}`),
+  /**
+   * What is still uncommitted, in the scope a commit would take. Cheap: no
+   * patch, no log, so the always-visible rail can poll it on the app's beat.
+   */
+  gitPending: (projectId: string) => call<GitPending>(`/api/projects/${projectId}/git/pending`),
   /** Split out because it carries a whole patch, and is only read when shown. */
   gitWorking: (projectId: string) =>
     call<GitWorkingTree>(`/api/projects/${projectId}/git/working`),

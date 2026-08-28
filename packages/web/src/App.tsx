@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react"
 import type { BoardRow } from "@aide/protocol"
-import { api, type BoardView, type Health, type ProjectView } from "./api.js"
+import { api, type BoardView, type GitPending, type Health, type ProjectView } from "./api.js"
 import { CHIME_KEY } from "./chime.js"
 import { DaemonBar } from "./Daemon.js"
 import { carryDraft, draftKey, openNewChat, readDraft, saveDraft } from "./drafts.js"
@@ -8,7 +8,7 @@ import { PANES, useAppLocation } from "./useAppLocation.js"
 import { useRemembered } from "./useRemembered.js"
 import { BoardList, BoardSummary, SpecPane } from "./panes/Board.js"
 import { ConversationList, ConversationPane } from "./panes/Conversations.js"
-import { GitList, GitPane } from "./panes/Git.js"
+import { GitList, GitPane, PendingRail } from "./panes/Git.js"
 import { Button, Empty, PaneHeader } from "./ui.js"
 
 /** While anything is in flight the lists need to move on their own. */
@@ -19,6 +19,16 @@ export function App() {
   const [projects, setProjects] = useState<ProjectView[]>([])
   const [board, setBoard] = useState<BoardView>({ rows: [], spec: "", warnings: [] })
   const [error, setError] = useState<string | null>(null)
+  /**
+   * What the project has left to commit.
+   *
+   * Polled here rather than inside the rail, because two things read it: the
+   * rail that shows it and the composer that refuses to start a new chat while
+   * it is non-empty. Two pollers would let those two disagree for a second at a
+   * time, which is exactly long enough to look like a bug.
+   */
+  const [pending, setPending] = useState<GitPending | null>(null)
+  const [pendingError, setPendingError] = useState<string | null>(null)
   /**
    * Which project, which list, which conversation — all of it in the
    * URL, so a reload lands you back where you were and Back steps through what
@@ -66,6 +76,21 @@ export function App() {
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
+    // Its own try: the git rail is beside every pane, so a repo that has moved
+    // out from under us must not take the projects list down with it — and a
+    // failure here must not read as "nothing uncommitted", which would offer a
+    // new chat the daemon is about to refuse.
+    if (!projectId) {
+      setPending(null)
+      setPendingError(null)
+      return
+    }
+    try {
+      setPending(await api.gitPending(projectId))
+      setPendingError(null)
+    } catch (err) {
+      setPendingError(err instanceof Error ? err.message : String(err))
+    }
   }, [projectId, mode])
 
   useEffect(() => {
@@ -74,7 +99,17 @@ export function App() {
     return () => clearInterval(timer)
   }, [refresh])
 
+  // Dropped the instant the project changes, not when the next poll answers.
+  // Holding the old one for a beat would put another repository's uncommitted
+  // files under this project's name, which is the one thing a rail that gates
+  // your next action must never do.
+  useEffect(() => {
+    setPending(null)
+    setPendingError(null)
+  }, [projectId])
+
   const project = projects.find((p) => p.id === projectId) ?? null
+  const uncommitted = pending?.files.length ?? 0
 
   const addProject = async () => {
     const path = window.prompt("Absolute path to a git repository")
@@ -104,6 +139,15 @@ export function App() {
     if (!projectId) return
     if (row.sessionId) {
       navigate({ pane: "chats", sessionId: row.sessionId })
+      return
+    }
+    // Same gate as "new", because this is the same act. Reported rather than
+    // silently ignored: a row that does nothing when clicked is indistinguishable
+    // from a broken one.
+    if (uncommitted > 0) {
+      setError(
+        `${uncommitted} uncommitted file${uncommitted === 1 ? "" : "s"} in this project. Commit that work before starting another chat.`,
+      )
       return
     }
     const key = draftKey(projectId, null)
@@ -244,7 +288,11 @@ export function App() {
                 the repo, and the board has its own one-line input. */}
             {mode === "chats" && (
               <Button
-                disabled={!project}
+                // Held back by uncommitted work, for the same reason the daemon
+                // refuses the message: a conversation opened on top of somebody
+                // else's edits takes them as its own baseline. Disabled rather
+                // than hidden — a button that vanishes teaches you nothing.
+                disabled={!project || uncommitted > 0}
                 onClick={() => {
                   // Idempotent on purpose: a second press is you looking for the
                   // chat you already started, not asking for another one.
@@ -252,7 +300,11 @@ export function App() {
                   setPendingRow(null)
                   navigate({ sessionId: null })
                 }}
-                title="Start a new conversation. Pressing this again opens the one you already started."
+                title={
+                  uncommitted > 0
+                    ? `${uncommitted} uncommitted file${uncommitted === 1 ? "" : "s"} — commit this work before starting another chat.`
+                    : "Start a new conversation. Pressing this again opens the one you already started."
+                }
               >
                 new
               </Button>
@@ -303,6 +355,7 @@ export function App() {
             projectId={projectId}
             openSessionId={sessionId}
             pendingTodoId={pendingRow}
+            uncommitted={uncommitted}
             // A verdict rewrites todos.md and unlinks the row, so both lists are
             // stale the moment it lands.
             onChanged={() => {
@@ -328,6 +381,11 @@ export function App() {
             }}
           />
         )}
+
+        {/* Always on screen, whichever pane is showing. It is not a view of the
+            repository — the git pane is that — it is the answer to "can I start
+            the next thing", which has to be visible before you try. */}
+        <PendingRail projectId={projectId} pending={pending} error={pendingError} />
       </main>
     </div>
   )

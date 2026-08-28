@@ -44,8 +44,15 @@ import { git, gitOr, withWorkingTreeIndex } from "./git.js"
  */
 const AGENT_SCOPE = [".", `:(top,exclude)${STATE_DIR}/todos.md`] as const
 
-/** Same pathspec, appended after a `--`. */
-const scoped = (args: string[]): string[] => [...args, "--", ...AGENT_SCOPE]
+/**
+ * Same pathspec, appended after a `--`.
+ *
+ * Exported because the uncommitted-work indicator has to ask its question in
+ * exactly this scope. An indicator that counted `todos.md` would be permanently
+ * lit on any project aide manages, and nothing a human could do would put it
+ * out — the daemon rewrites that file, and a commit is forbidden from taking it.
+ */
+export const scoped = (args: string[]): string[] => [...args, "--", ...AGENT_SCOPE]
 
 // ---------------------------------------------------------------------------
 // What the run did

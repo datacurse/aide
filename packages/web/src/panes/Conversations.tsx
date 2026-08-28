@@ -329,11 +329,19 @@ export function ConversationPane({
   projectId,
   openSessionId,
   pendingTodoId,
+  uncommitted,
   onStarted,
   onChanged,
 }: {
   projectId: string | null
   openSessionId: string | null
+  /**
+   * How many files are uncommitted in the project, in the scope a commit would
+   * take. Passed down rather than polled here: the git rail already asks on the
+   * app's beat, and two pollers would let the box and the rail disagree about
+   * whether a new chat is allowed.
+   */
+  uncommitted: number
   /**
    * The board row this new chat was started from, if any. Sent with the first
    * message because the row and the session are paired the moment the SDK names
@@ -365,6 +373,9 @@ export function ConversationPane({
    * tracked by definition.
    */
   const [tracked, setTracked] = useState(false)
+  /** The one-click commit: in flight, and what it produced. */
+  const [committing, setCommitting] = useState(false)
+  const [committed, setCommitted] = useState<{ sha: string; subject: string } | null>(null)
 
   const summary = view?.summary ?? null
   const sessionId = openSessionId ?? liveSessionId
@@ -390,6 +401,7 @@ export function ConversationPane({
     setRunId(null)
     setSent(new Map())
     setLiveSessionId(null)
+    setCommitted(null)
   }, [openSessionId])
 
   useEffect(() => {
@@ -517,6 +529,10 @@ export function ConversationPane({
   }) => {
     if (!projectId) return
     setError(null)
+    // The last commit's receipt belongs to the work that came before this
+    // message. Leaving it up would have it read as a report on the turn about to
+    // start.
+    setCommitted(null)
     // A first message is sent before the conversation has an id, so for the next
     // second or two the list has nothing to show for the thing now running —
     // unless the draft row is there to stand in for it. Usually it already is;
@@ -537,6 +553,29 @@ export function ConversationPane({
       setRunId(id)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  /**
+   * Commit what this conversation changed, message and all, in one press.
+   *
+   * The daemon drafts the message because nothing was typed — see the commit
+   * route. What comes back is shown rather than swallowed: a commit you did not
+   * write the message for is one you have to be able to read afterwards, and the
+   * git rail beside this is already redrawing itself empty.
+   */
+  const commitWork = async () => {
+    if (!projectId || !sessionId) return
+    setCommitting(true)
+    setError(null)
+    try {
+      const r = await api.commitChat(projectId, sessionId)
+      setCommitted({ sha: r.sha, subject: r.message.split("\n", 1)[0] ?? "" })
+      onChanged?.()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setCommitting(false)
     }
   }
 
@@ -666,6 +705,15 @@ export function ConversationPane({
         />
       )}
 
+      {committed && (
+        <div className="flex shrink-0 items-baseline gap-2 border-t border-line bg-chrome px-3 py-1.5 font-sans text-[11px]">
+          <span className="shrink-0 text-diff-add-fg">committed {committed.sha.slice(0, 7)}</span>
+          <span className="min-w-0 truncate text-fg-muted" title={committed.subject}>
+            {committed.subject}
+          </span>
+        </div>
+      )}
+
       {projectId && (
         <Composer
           busy={busy}
@@ -675,6 +723,26 @@ export function ConversationPane({
           inheritedMode={summary?.lastMode ?? null}
           // For a live conversation the board is the only thing that knows.
           tracked={sessionId ? summary?.status.rowId != null : tracked || pendingTodoId != null}
+          // Only a conversation that has not started is held back, and only by
+          // uncommitted work. The way out of the block is to finish the chat
+          // that caused it, so a follow-up is never refused — and neither is a
+          // first turn already in flight, which for its first few seconds has no
+          // session id yet while its own edits pile up in the tree.
+          blocked={
+            sessionId || busy || uncommitted === 0
+              ? null
+              : `${uncommitted} uncommitted file${uncommitted === 1 ? "" : "s"} in this project. Commit that work — from the chat that made it — before starting another.`
+          }
+          commit={
+            !sessionId
+              ? { kind: "hidden" }
+              : committing
+                ? { kind: "committing" }
+                : uncommitted === 0
+                  ? { kind: "nothing" }
+                  : { kind: "ready" }
+          }
+          onCommit={() => void commitWork()}
           onTracked={setTracked}
           onSend={(msg) => void send(msg)}
           onInterrupt={() => {

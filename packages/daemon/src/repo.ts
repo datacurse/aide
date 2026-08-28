@@ -10,9 +10,11 @@ import type {
   GitLane,
   GitLog,
   GitOverview,
+  GitPending,
   GitRef,
   GitWorkingTree,
 } from "@aide/protocol"
+import { scoped } from "./changes.js"
 import { git, gitDiffing, gitOr } from "./git.js"
 
 /**
@@ -196,6 +198,34 @@ export async function status(root: string): Promise<GitFileChange[]> {
   // in the UI as one mystery entry instead of the six files it stands for.
   const z = await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
   return parseStatus(z)
+}
+
+/**
+ * What is left to commit, as opposed to what git happens to call dirty.
+ *
+ * `status()` above answers "what does git say"; this answers "what work is
+ * outstanding", and the two differ by exactly the files aide owns — see
+ * `AGENT_SCOPE` in changes.ts. Asked in the commit's own scope rather than
+ * filtered afterwards, so the two can never drift apart: this is the list the
+ * indicator lights on, and it must mean the same thing as "there is something a
+ * commit could take".
+ *
+ * The branch comes from one `rev-parse` rather than a whole `overview()`. This
+ * is polled from the always-visible rail, and three extra round trips per beat
+ * to learn ahead/behind counts nothing here shows would be paid on every beat.
+ */
+export async function pending(root: string): Promise<GitPending> {
+  const named = await gitOr("HEAD", async () =>
+    (await git(root, ["rev-parse", "--abbrev-ref", "HEAD"])).trim(),
+  )
+  const z = await git(
+    root,
+    scoped(["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
+  )
+  return {
+    branch: named === "HEAD" || named === "" ? null : named,
+    files: parseStatus(z),
+  }
 }
 
 /**

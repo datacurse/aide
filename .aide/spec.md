@@ -87,6 +87,9 @@ This file is what it currently does.
 - Writes the approved spec as part of the same commit, so the claim and the code
   that earns it are one commit and one revert. An empty spec box leaves the file
   alone rather than blanking it.
+- Commits that same work in one press from beside the send button, drafting the
+  message and the spec update itself and showing the subject it wrote. The diff
+  is read afterwards rather than before; the panel above is still the slow path.
 - Cannot merge anything. There is no branch to merge, and no `land`.
 - Stamps each commit with `Aide-Row` and `Aide-Session`, so the transcript is
   one command away long after the backlog line is gone.
@@ -109,6 +112,16 @@ This file is what it currently does.
   diff, for the project's own checkout.
 - Is not an editor and has no blame, no go-to-definition and no staging UI.
 - Labels commits with the board row that asked for them, read from `Aide-Row`.
+- Keeps a rail of uncommitted files on screen beside every pane, naming them and
+  the branch they are on. It has no message box and no buttons at all —
+  committing belongs to a conversation, which is the only thing that knows whose
+  work it is taking.
+- Leaves `.aide/todos.md` out of that list, because the daemon rewrites it and a
+  commit is forbidden from taking it — counting it would light the indicator
+  permanently.
+- Refuses to start a NEW conversation while anything is uncommitted, naming the
+  count and what to do about it. A follow-up is never refused: finishing the chat
+  you are in is the way out.
 
 ## The daemon
 
