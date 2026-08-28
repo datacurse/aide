@@ -5,9 +5,10 @@
  * messages. Keeping the boundary here means the SDK's ~30-member message union
  * has exactly one place to be updated when it grows.
  *
- * `helper.ts` is the only other file that imports the SDK, and deliberately
- * touches none of this: it makes one-shot text calls with no tools and returns a
- * string, so it never sees a message union to normalize.
+ * `helper.ts` and `usage.ts` are the other two files that import the SDK, and
+ * deliberately touch none of this: one makes one-shot text calls with no tools
+ * and returns a string, the other sends no prompt at all and asks the session a
+ * single control request, so neither ever sees a message union to normalize.
  */
 import { randomUUID } from "node:crypto"
 import { query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk"

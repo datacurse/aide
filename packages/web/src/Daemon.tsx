@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react"
 import { api, type DaemonStatus, type Health } from "./api.js"
 import { Button } from "./ui.js"
+import { PlanUsageMeter } from "./Usage.js"
 
 /** Fast enough that pressing start feels answered, slow enough to be invisible. */
 const POLL_MS = 2000
@@ -78,6 +79,9 @@ export function DaemonBar({
         <span className="truncate text-[11px] text-fg-dim">
           {health ? `${health.taskModel} · one run at a time` : "daemon offline"}
         </span>
+        {/* The plan meter is served by the daemon, not by the dev server, so it
+            is just as available in a built bundle with no control plane. */}
+        <PlanUsageMeter enabled={health !== null} />
         {children}
       </div>
     )
@@ -162,6 +166,10 @@ export function DaemonBar({
           {health.taskModel} · one run at a time
         </span>
       )}
+
+      {/* Under the model line, because it answers the same question that line
+          does: whether what you are about to ask for can actually happen. */}
+      <PlanUsageMeter enabled={state !== "stopped"} />
 
       {staleNote && (
         <span className="text-[11px] leading-relaxed text-warn" title={staleNote.title}>

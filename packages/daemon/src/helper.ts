@@ -1,10 +1,11 @@
 /**
  * Short, single-shot model calls that are not runs.
  *
- * This and `agent.ts` are the only two files that import the Agent SDK. The
- * split is by shape, not by model: `agent.ts` drives a long tool-using session
- * that streams events; everything here is one prompt in, one string out, with
- * `tools: []` so there is no filesystem access and nothing to permit.
+ * One of three files that import the Agent SDK, split by shape rather than by
+ * model: `agent.ts` drives a long tool-using session that streams events,
+ * `usage.ts` opens one and sends no prompt at all, and everything here is one
+ * prompt in, one string out, with `tools: []` so there is no filesystem access
+ * and nothing to permit.
  *
  * It goes through the Agent SDK rather than the Messages API for one reason:
  * aide has no login of its own. The Agent SDK inherits whatever credentials the

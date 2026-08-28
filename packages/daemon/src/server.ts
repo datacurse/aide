@@ -7,6 +7,7 @@ import type {
   ClientMessage,
   EffortLevel,
   Health,
+  PlanUsage,
   Project,
   RunEvent,
   ServerMessage,
@@ -29,6 +30,7 @@ import * as repo from "./repo.js"
 import { BOOT_SOURCE_ID, currentSourceId, isStale } from "./source.js"
 import { getConversation, listConversations } from "./sessions.js"
 import { spendBySession } from "./spend.js"
+import { planUsage } from "./usage.js"
 
 const log = new EventLog()
 const chat = new ChatLane(log)
@@ -172,6 +174,18 @@ app.get("/api/health", async (): Promise<Health> => ({
   },
   idleMs: Date.now() - lastWriteFinishedAt,
 }))
+
+/**
+ * How much of the plan is left, and when each window resets.
+ *
+ * Its own route rather than a field on health, because it is the one answer here
+ * that is not free: a cold reading opens a session with the CLI and takes a
+ * second or so. Health is polled on the app's beat and decides whether a daemon
+ * can be restarted; it must not start waiting on the network to say so.
+ *
+ * Cached in `usage.ts` for a minute, so a second tab costs nothing.
+ */
+app.get("/api/usage", async (): Promise<PlanUsage> => planUsage())
 
 /**
  * Every project, and who has its checkout.

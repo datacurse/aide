@@ -34,6 +34,7 @@ record. They are all rows in the same list, in that order of urgency.
 | What a conversation changed, and what a commit stages | `packages/daemon/src/changes.ts` |
 | The commit run: read the diff, write a message, commit | `packages/daemon/src/review.ts` |
 | Which chats are ticked off (`~/.aide/board.json`) | `packages/daemon/src/board.ts` |
+| What is left of the plan, and when it resets | `packages/daemon/src/usage.ts` |
 | What a run's shell may and may not do | `packages/daemon/src/policy.ts` |
 
 Decisions already taken, which are not gaps to fill:

@@ -7,11 +7,12 @@ import type {
   EffortLevel,
   GitPending,
   Health,
+  PlanUsage,
   Project,
   RunEvent,
 } from "@aide/protocol"
 
-export type { ConversationSummary, GitPending, Health }
+export type { ConversationSummary, GitPending, Health, PlanUsage }
 
 /**
  * A conversation, plus the two things aide knows about it that the session file
@@ -94,6 +95,13 @@ async function daemonCall(path: string, init?: RequestInit): Promise<unknown | n
 
 export const api = {
   health: () => call<Health>("/api/health"),
+
+  /**
+   * What is left of the plan. Slower than everything else here — a cold reading
+   * opens a session with the CLI — so it is polled on its own long beat rather
+   * than on the app's.
+   */
+  usage: () => call<PlanUsage>("/api/usage"),
 
   daemonStatus: () => daemonCall("/status") as Promise<DaemonStatus | null>,
   daemonLog: () => daemonCall("/log") as Promise<{ lines: string[] } | null>,
