@@ -46,7 +46,37 @@ function ago(ms: number): string {
   return `${Math.floor(s / 86_400)}d ago`
 }
 
-const mb = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)} MB`
+/** Token counts, short enough for a tooltip: 940, 12.4k, 3.20M. */
+const compact = (n: number): string =>
+  n < 1000
+    ? String(n)
+    : n < 1_000_000
+      ? `${(n / 1000).toFixed(1)}k`
+      : `${(n / 1_000_000).toFixed(2)}M`
+
+/** Coarse on purpose: a row is read at a glance, and 4m 12s is two facts. */
+function dur(ms: number): string {
+  const s = Math.round(ms / 1000)
+  if (s < 60) return `${s}s`
+  const m = Math.round(s / 60)
+  return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`
+}
+
+/**
+ * Two decimals, and a floor rather than `$0.00`.
+ *
+ * Rounding a real spend down to nothing reads as "this was free", which is the
+ * one thing a cost figure must never say — the same reason the whole line is
+ * captioned as an estimate.
+ */
+const money = (usd: number) => (usd > 0 && usd < 0.01 ? "<$0.01" : `$${usd.toFixed(2)}`)
+
+/** A share of everything aide has spent, as a percentage that never reads as zero. */
+function share(fraction: number): string {
+  const pct = fraction * 100
+  if (pct > 0 && pct < 0.1) return "<0.1%"
+  return `${pct.toFixed(pct < 10 ? 1 : 0)}%`
+}
 
 type Kinded = { kind: string; taskId: string | null }
 const kindLabel = (c: Kinded) => (c.kind === "task" ? `task ${c.taskId}` : "chat")
@@ -247,6 +277,111 @@ function DoneCheck({ done, onToggle }: { done: boolean; onToggle: () => void }) 
 }
 
 /**
+ * One conversation, as a row.
+ *
+ * Two lines: what it was about, and what it took. Nothing else fits in 320px
+ * without becoming a wall, so what went was the part that never varied — every
+ * row said "chat" on the left, and every row said "main" underneath, and neither
+ * of them told you anything you did not already know from the list you were
+ * looking at. The kind is printed only when it is NOT a chat, which is the case
+ * that is genuinely surprising: an old task run in a worktree that no longer
+ * exists.
+ *
+ * The branch and the directory moved into the row's hover title rather than
+ * being deleted, because they are still the only place a conversation from
+ * before the worktrees went says so.
+ */
+function ChatRow({
+  chat,
+  selected,
+  onOpen,
+  onToggleDone,
+}: {
+  chat: ConversationRow
+  selected: boolean
+  onOpen: () => void
+  onToggleDone: () => void
+}) {
+  const closed = chat.status.state === "closed"
+  const spend = chat.spend
+  // Dim enough to stay behind the title, but not on the row you have selected:
+  // fg-dim on the selection blue is the one place it stops being readable.
+  const meta = selected ? "text-white/70" : "text-fg-dim"
+  return (
+    <div
+      className={`group flex w-full items-start gap-2 px-3 py-1.5 font-sans ${
+        selected ? "bg-active text-white" : "text-fg-muted hover:bg-hover"
+      }`}
+    >
+      <button
+        type="button"
+        onClick={onOpen}
+        title={chat.gitBranch ? `${chat.cwd} · ${chat.gitBranch}` : chat.cwd}
+        className="flex min-w-0 flex-1 flex-col gap-0.5 text-left"
+      >
+        <div className="flex items-baseline gap-2">
+          {chat.kind !== "chat" && (
+            <span className={`shrink-0 text-[10px] ${kindColor(chat)}`}>{kindLabel(chat)}</span>
+          )}
+          <span
+            className={`flex-1 truncate text-[13px] ${
+              closed ? "line-through decoration-1 opacity-60" : ""
+            }`}
+          >
+            {chat.title}
+          </span>
+          <StatusBadge status={chat.status} />
+        </div>
+        {/* Tabular figures, so the money column does not shuffle sideways as you
+            read down a list of costs that differ only in the cents. */}
+        <div className={`flex items-baseline gap-1.5 text-[10px] tabular-nums ${meta}`}>
+          <span>{ago(chat.lastModified)}</span>
+          {spend && spend.activeMs > 0 && (
+            <>
+              <Dot />
+              <span title={WORKING_TIME(spend.turns)}>{dur(spend.activeMs)}</span>
+            </>
+          )}
+          {spend && spend.costUsd > 0 && (
+            <>
+              <Dot />
+              <span title={COST_IS_AN_ESTIMATE}>{money(spend.costUsd)}</span>
+            </>
+          )}
+          {spend && spend.usageShare > 0 && (
+            <>
+              <Dot />
+              <span title={USAGE_SHARE(spend.tokens)}>{share(spend.usageShare)}</span>
+            </>
+          )}
+        </div>
+      </button>
+      <DoneCheck done={closed} onToggle={onToggleDone} />
+    </div>
+  )
+}
+
+/** Dimmer than what it separates, or the eye reads the list as dots. */
+const Dot = () => <span className="text-line-soft">·</span>
+
+/**
+ * What the three figures mean, on hover.
+ *
+ * Out here because each of them is a sentence with a caveat in it, and a caveat
+ * is the one thing a two-line row has no space for. The cost one is not
+ * optional: the brief says anything that shows a cost figure has to say what
+ * kind of number it is.
+ */
+const WORKING_TIME = (turns: number) =>
+  `Time the turns were actually running, over ${turns} turn${turns === 1 ? "" : "s"} — not the hours you were somewhere else.`
+
+const COST_IS_AN_ESTIMATE =
+  "An estimate, from a price table bundled into the SDK at build time. Fine for a list, never for billing."
+
+const USAGE_SHARE = (tokens: number) =>
+  `${compact(tokens)} tokens, as a share of every token aide has spent on this machine. Not your plan's usage — that window counts every client at once.`
+
+/**
  * The list of a project's conversations, and the only list there is.
  *
  * Three kinds of row, in one column, because they are all the same thing at
@@ -384,38 +519,13 @@ export function ConversationList({
         )}
         {items !== null &&
           sortChats(items).map((c) => (
-            <div
+            <ChatRow
               key={c.sessionId}
-              className={`group flex w-full items-start gap-2 px-3 py-1.5 font-sans ${
-                c.sessionId === selected ? "bg-active text-white" : "text-fg-muted hover:bg-hover"
-              }`}
-            >
-              <button
-                type="button"
-                onClick={() => onSelect(c.sessionId)}
-                className="flex min-w-0 flex-1 flex-col gap-0.5 text-left"
-              >
-                <div className="flex items-baseline gap-2">
-                  <span className={`shrink-0 text-[10px] ${kindColor(c)}`} title={c.cwd}>
-                    {kindLabel(c)}
-                  </span>
-                  <span
-                    className={`flex-1 truncate text-[13px] ${
-                      c.status.state === "closed" ? "line-through decoration-1 opacity-60" : ""
-                    }`}
-                  >
-                    {c.title}
-                  </span>
-                  <StatusBadge status={c.status} />
-                </div>
-                <div className="flex items-baseline gap-2 text-[10px] text-fg-dim">
-                  <span>{ago(c.lastModified)}</span>
-                  {c.bytes > 0 && <span>{mb(c.bytes)}</span>}
-                  {c.gitBranch && <span className="min-w-0 truncate">{c.gitBranch}</span>}
-                </div>
-              </button>
-              <DoneCheck done={c.status.state === "closed"} onToggle={() => toggleDone(c)} />
-            </div>
+              chat={c}
+              selected={c.sessionId === selected}
+              onOpen={() => onSelect(c.sessionId)}
+              onToggleDone={() => toggleDone(c)}
+            />
           ))}
       </div>
     </div>

@@ -28,6 +28,7 @@ import { commitConversation, conversationBaseline } from "./review.js"
 import * as repo from "./repo.js"
 import { BOOT_SOURCE_ID, currentSourceId, isStale } from "./source.js"
 import { getConversation, listConversations } from "./sessions.js"
+import { spendBySession } from "./spend.js"
 
 const log = new EventLog()
 const chat = new ChatLane(log)
@@ -347,7 +348,15 @@ app.get("/api/projects/:id/conversations", async (req, reply) => {
     // board is aide's own bookkeeping and does not belong in it.
     const list = await listConversations(project, activeChatRun)
     const statuses = await chatStatuses(project, list, liveChat)
-    return list.map((c) => ({ ...c, status: statuses[c.sessionId] ?? UNTRACKED }))
+    // Spend is attached here for the same reason status is: it is aide's own
+    // bookkeeping, read out of aide's event logs, and `listConversations` is a
+    // reader of the SDK's session store and nothing else.
+    const spend = await spendBySession()
+    return list.map((c) => ({
+      ...c,
+      status: statuses[c.sessionId] ?? UNTRACKED,
+      spend: spend.get(c.sessionId) ?? null,
+    }))
   } catch (err) {
     return reply.code(502).send({
       message: `could not read the session store: ${err instanceof Error ? err.message : String(err)}`,
@@ -363,7 +372,15 @@ app.get("/api/projects/:id/conversations/:sessionId", async (req, reply) => {
     const found = await getConversation(project, sessionId, activeChatRun, liveChatTurn)
     if (!found) return reply.code(404).send(notFound(`no conversation ${sessionId} in this project`))
     const statuses = await chatStatuses(project, [found.summary], liveChat)
-    return { ...found, summary: { ...found.summary, status: statuses[sessionId] ?? UNTRACKED } }
+    const spend = await spendBySession()
+    return {
+      ...found,
+      summary: {
+        ...found.summary,
+        status: statuses[sessionId] ?? UNTRACKED,
+        spend: spend.get(sessionId) ?? null,
+      },
+    }
   } catch (err) {
     return reply.code(502).send({
       message: `could not read that conversation: ${err instanceof Error ? err.message : String(err)}`,

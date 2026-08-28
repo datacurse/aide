@@ -35,6 +35,34 @@ export interface ChatStatus {
 }
 
 /**
+ * What a conversation cost, summed over the turns aide itself ran.
+ *
+ * Null on a row rather than zeroed: a chat held in the CLI or the VS Code
+ * extension appears in the same list, and aide has no event log for it. Zeroes
+ * would read as a conversation that was free.
+ *
+ * Every number here is an estimate. `costUsd` comes from a price table bundled
+ * into the SDK at build time — good enough for a list, never for billing.
+ */
+export interface ChatSpend {
+  /** Turns with a log, including the commit run, if there was one. */
+  turns: number
+  /**
+   * The turns' own time, added up.
+   *
+   * Not the span from the first message to the last: that is mostly the hours
+   * you were somewhere else, which is the one part of a conversation nobody
+   * needs measured.
+   */
+  activeMs: number
+  costUsd: number
+  /** Input, output and cache, together. */
+  tokens: number
+  /** 0-1, this conversation's tokens against every token aide has logged. */
+  usageShare: number
+}
+
+/**
  * Chat-list order: what it costs to ignore, then how recent.
  *
  * `blocked` first because an agent is literally stopped on a click. `closed`

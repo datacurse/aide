@@ -1,5 +1,6 @@
 import type {
   Attachment,
+  ChatSpend,
   ChatStatus,
   ChatMode,
   ConversationSummary,
@@ -13,13 +14,21 @@ import type {
 export type { ConversationSummary, GitPending, Health }
 
 /**
- * A conversation plus its status.
+ * A conversation, plus the two things aide knows about it that the session file
+ * does not: whether you are finished with it, and what it spent.
  *
  * Attached by the daemon rather than stored in the session file: the SDK owns
  * the transcript, aide owns the lifecycle, and merging them on the wire keeps
  * the list to one request.
+ *
+ * `spend` is null for a conversation aide never ran a turn of — a chat held in
+ * the CLI or the VS Code extension shows up in the same list, and there is no
+ * event log behind it to measure.
  */
-export type ConversationRow = ConversationSummary & { status: ChatStatus }
+export type ConversationRow = ConversationSummary & {
+  status: ChatStatus
+  spend: ChatSpend | null
+}
 
 /** A conversation's replayed transcript. */
 export interface ConversationView {

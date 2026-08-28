@@ -19,13 +19,9 @@
  * rather than the gate on the code, which is why it sits beside the diff instead
  * of inside it.
  */
-import { createReadStream } from "node:fs"
-import { readdir } from "node:fs/promises"
-import { join } from "node:path"
-import { createInterface } from "node:readline"
 import type { ModelSpend, Project, RunEvent, RunStatus } from "@aide/protocol"
-import { runsDir } from "@aide/protocol/node"
 import type { EventLog } from "./eventlog.js"
+import { runIndex } from "./spend.js"
 
 /** The whole artifact. `markdown` is the thing; the rest is for the UI's header. */
 export interface Receipt {
@@ -37,15 +33,6 @@ export interface Receipt {
 
 /** Tools that change the tree. Used only for the "before the first edit" signal. */
 const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"])
-
-/**
- * How far into a run log to look for `run.started` before giving up.
- *
- * It is line 2 or 3 — `user.message`, `checkpoint.taken`, then the SDK's init.
- * The bound is not an optimisation, it is a refusal to read a whole log looking
- * for an event that a turn which died before it spawned is never going to have.
- */
-const HEADER_LINES = 8
 
 export interface ToolCall {
   name: string
@@ -280,76 +267,22 @@ export function summarizeRun(runId: string, events: RunEvent[]): RunSummary {
 /**
  * Which run logs belong to a conversation, oldest first.
  *
- * A linear scan of `~/.aide/runs`, because there is no index from session to run
- * and the brief is explicit about not adding a database until run-history
- * queries hurt. This is the query that will eventually hurt: O(every run on this
- * machine) to answer a question about one conversation. It is a button press
- * rather than a poll, and at a few hundred logs it is a few hundred
- * milliseconds — when that stops being true, an index goes in front of THIS
- * function and nothing else in the file changes.
- *
- * Each log is read only as far as its `run.started`; breaking the loop closes
- * the stream. Reading a fixed prefix of bytes instead would have been simpler
- * and quietly wrong: `user.message` is line 1 and carries pasted screenshots
- * inline as base64, so any turn with an attachment puts megabytes in front of
- * the line being looked for.
+ * The scan itself lives in `spend.ts`, which the chat list already asks on every
+ * poll and which remembers what it read. There is still no index from session to
+ * run and no database — the brief is explicit about not adding one until
+ * run-history queries hurt — but a receipt that reuses the list's cache pays for
+ * nothing twice, and the two had the same subtle header-scan in them.
  *
  * A turn that died before the SDK named its session has no `run.started` and is
  * invisible here. That omission is real and there is nothing to fix it with —
  * the log never learned which conversation it belonged to.
  */
 async function runsForSession(sessionId: string): Promise<string[]> {
-  let files: string[]
-  try {
-    files = await readdir(runsDir())
-  } catch {
-    // No runs directory at all: a daemon that has never taken a turn.
-    return []
-  }
-
-  const found: Array<{ runId: string; at: number }> = []
-  for (const file of files) {
-    if (!file.endsWith(".ndjson")) continue
-    const hit = await sessionOf(join(runsDir(), file))
-    if (hit?.sessionId === sessionId) {
-      found.push({ runId: file.slice(0, -".ndjson".length), at: hit.at })
-    }
-  }
+  const runs = (await runIndex()).filter((r) => r.sessionId === sessionId)
   // By when the log opened, not by filename: run ids are random, and mtime is
   // when the turn ENDED, which reorders a long turn behind a short one that
   // started after it.
-  return found.sort((a, b) => a.at - b.at).map((f) => f.runId)
-}
-
-/** The session a run log belongs to, and when that log opened. */
-async function sessionOf(path: string): Promise<{ sessionId: string; at: number } | null> {
-  const rl = createInterface({
-    input: createReadStream(path, { encoding: "utf8" }),
-    crlfDelay: Infinity,
-  })
-  try {
-    let seen = 0
-    let openedAt = 0
-    for await (const line of rl) {
-      if (!line.trim()) continue
-      if (++seen > HEADER_LINES) return null
-      let event: RunEvent
-      try {
-        event = JSON.parse(line) as RunEvent
-      } catch {
-        // A torn line can only be one being written right now, in a run this
-        // receipt is too early to be asked about anyway.
-        continue
-      }
-      if (!openedAt) openedAt = event.ts
-      if (event.type === "run.started" && event.sessionId) {
-        return { sessionId: event.sessionId, at: openedAt || event.ts }
-      }
-    }
-    return null
-  } finally {
-    rl.close()
-  }
+  return runs.sort((a, b) => a.openedAt - b.openedAt).map((r) => r.runId)
 }
 
 // ---------------------------------------------------------------------------
