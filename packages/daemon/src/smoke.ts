@@ -205,6 +205,40 @@ try {
 }
 check("refuses an empty commit", threw.includes("nothing to commit"), threw)
 
+{
+  // A run that removes a file with `git rm` has already staged that deletion:
+  // the path is gone from the worktree AND from the index. `git add` answers a
+  // pathspec matching neither with a fatal, and that used to abort the whole
+  // commit — over the one part of the change that was already staged correctly.
+  await writeFile(join(root, "doomed.ts"), "export const doomed = true\n", "utf8")
+  await git(root, ["add", "doomed.ts"])
+  await git(root, ["commit", "-m", "Add a file for the next run to delete", "--", "doomed.ts"])
+
+  const rmSession = "7f1c0e2a-0000-4000-8000-000000000009"
+  const rmPoint = await takeCheckpoint(root, rmSession)
+  await git(root, ["rm", "-q", "doomed.ts"])
+  await writeFile(join(root, "kept.ts"), "export const kept = true\n", "utf8")
+
+  const rmChanges = await runChanges(root, rmPoint.sha)
+  check(
+    "a `git rm`-ed file is in the run's paths",
+    rmChanges.paths.includes("doomed.ts"),
+    rmChanges.paths.join(","),
+  )
+  const rmSha = await commitRun(root, rmChanges.paths, "Delete doomed.ts\n")
+  const named = await git(root, ["show", "--name-status", "--format=", rmSha])
+  check(
+    "and the commit records the deletion",
+    named.includes("D\tdoomed.ts"),
+    "`git add` on a path in neither the worktree nor the index is a fatal",
+  )
+  check("beside the file the same run created", named.includes("kept.ts"))
+  check(
+    "and the human's hand-staged file is still theirs",
+    (await git(root, ["status", "--porcelain"])).includes("A  staged-by-hand.txt"),
+  )
+}
+
 console.log("\nundo — the checkpoint is the whole safety net")
 {
   const undoSession = "7f1c0e2a-0000-4000-8000-000000000002"

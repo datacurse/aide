@@ -81,6 +81,9 @@ This file is what it currently does.
   HEAD, so it is the agent's work and not the agent's work plus whatever was
   already uncommitted — and commits exactly the paths in it, leaving anything
   the human had staged or left lying around alone.
+- Commits a file the run deleted, including one the run staged the deletion of
+  itself with `git rm` — a path in neither the worktree nor the index is a fatal
+  error to `git add`, and it used to take the whole commit down with it.
 - Names the files the run changed that were ALREADY modified before it started,
   because git cannot separate two people's edits inside one file and committing
   one takes both.
@@ -108,10 +111,6 @@ This file is what it currently does.
 
 ## Git
 
-- Shows the working tree, the commit log with a drawn graph, and any commit's
-  diff, for the project's own checkout.
-- Is not an editor and has no blame, no go-to-definition and no staging UI.
-- Labels commits with the board row that asked for them, read from `Aide-Row`.
 - Keeps a rail of uncommitted files on screen beside every pane, naming them and
   the branch they are on. It has no message box and no buttons at all —
   committing belongs to a conversation, which is the only thing that knows whose
@@ -122,6 +121,10 @@ This file is what it currently does.
 - Refuses to start a NEW conversation while anything is uncommitted, naming the
   count and what to do about it. A follow-up is never refused: finishing the chat
   you are in is the way out.
+- Cannot browse the repository: there is no history list, no commit view and no
+  graph. A diff is read in the conversation that produced it, where there is a
+  description and a checkpoint to measure it against; the rail is all that is
+  left of the project-shaped view.
 
 ## The daemon
 

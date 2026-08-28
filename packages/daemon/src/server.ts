@@ -391,9 +391,9 @@ app.get("/api/projects/:id/git", async (req, reply) => {
 /**
  * What is still uncommitted, cheap enough to poll from an always-visible rail.
  *
- * Separate from `/git` above rather than folded into it: that one draws a
- * history graph and is only read while the git pane is open, this one is read on
- * every beat from every pane. It is also the exact question the new-conversation
+ * Separate from `/git` above rather than folded into it: that one builds a
+ * history graph nothing in the UI asks for any more, this one is read on every
+ * beat from every pane. It is also the exact question the new-conversation
  * gate below asks, and the two must never be able to disagree — the indicator
  * saying "clean" while the daemon refuses to start a chat would be unexplainable
  * from the screen.

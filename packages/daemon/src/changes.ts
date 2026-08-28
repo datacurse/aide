@@ -1,4 +1,4 @@
-import { rm, writeFile } from "node:fs/promises"
+import { access, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { STATE_DIR } from "@aide/protocol"
@@ -174,10 +174,33 @@ export async function commitRun(
   }
 
   const specs = paths.map((p) => `:(top,literal)${p}`)
+
+  // `add` is given only the paths git can still see, which is not all of them:
+  // a run that removed a file with `git rm` has already staged that deletion, so
+  // the path is in neither the worktree nor the index, and `add` answers a
+  // pathspec matching nothing with `fatal: pathspec ... did not match any files`
+  // — killing the whole commit over work that was already staged correctly.
+  // `commit` below is given the full list either way; it is happy to record a
+  // path in that state, so what is staged and what is committed stay one set.
+  const inIndex = new Set<string>()
+  for (const chunk of chunked(specs)) {
+    for (const known of splitZ(await git(root, ["ls-files", "-z", "--", ...chunk]))) {
+      inIndex.add(known)
+    }
+  }
+  const stageable: string[] = []
+  for (const path of paths) {
+    // On disk covers what the run created; in the index covers what it edited or
+    // deleted without staging — an unstaged deletion still has its index entry,
+    // and `add -A` is what turns that into a staged one.
+    if (inIndex.has(path) || (await exists(join(root, path)))) {
+      stageable.push(`:(top,literal)${path}`)
+    }
+  }
   // Chunked because a pathspec per file is a long command line and Windows caps
   // one at about 32k characters. A run that touched three hundred files is
   // unusual and must not fail at the last step.
-  for (const chunk of chunked(specs)) {
+  for (const chunk of chunked(stageable)) {
     await git(root, ["add", "-A", "--", ...chunk])
   }
 
@@ -193,6 +216,8 @@ export async function commitRun(
   }
   return (await git(root, ["rev-parse", "HEAD"])).trim()
 }
+
+const exists = (path: string) => access(path).then(() => true, () => false)
 
 /** Pathspecs grouped so no single command line gets near the platform limit. */
 function chunked(specs: readonly string[], maxChars = 6_000): string[][] {

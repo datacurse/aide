@@ -8,7 +8,7 @@ import { PANES, useAppLocation } from "./useAppLocation.js"
 import { useRemembered } from "./useRemembered.js"
 import { BoardList, BoardSummary, SpecPane } from "./panes/Board.js"
 import { ConversationList, ConversationPane } from "./panes/Conversations.js"
-import { GitList, GitPane, PendingRail } from "./panes/Git.js"
+import { PendingRail } from "./panes/Pending.js"
 import { Button, Empty, PaneHeader } from "./ui.js"
 
 /** While anything is in flight the lists need to move on their own. */
@@ -34,7 +34,7 @@ export function App() {
    * URL, so a reload lands you back where you were and Back steps through what
    * you had open. See useAppLocation.
    */
-  const [{ projectId, pane: mode, sessionId, sha }, navigate] = useAppLocation()
+  const [{ projectId, pane: mode, sessionId }, navigate] = useAppLocation()
   /** Bumped to refetch the conversation list — a new chat has no id until it starts. */
   const [conversationsSeq, setConversationsSeq] = useState(0)
   /**
@@ -76,10 +76,10 @@ export function App() {
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
-    // Its own try: the git rail is beside every pane, so a repo that has moved
-    // out from under us must not take the projects list down with it — and a
-    // failure here must not read as "nothing uncommitted", which would offer a
-    // new chat the daemon is about to refuse.
+    // Its own try: the uncommitted rail is beside every pane, so a repo that
+    // has moved out from under us must not take the projects list down with it
+    // — and a failure here must not read as "nothing uncommitted", which would
+    // offer a new chat the daemon is about to refuse.
     if (!projectId) {
       setPending(null)
       setPendingError(null)
@@ -259,15 +259,8 @@ export function App() {
           </div>
         </aside>
 
-        {/* Tasks, conversations, history */}
-        {/* Wider for git: the history column carries a graph, and a lane costs
-            real width — squeezing it into the task list's 20rem leaves nothing
-            for the subject, which is the part anyone actually reads. */}
-        <aside
-          className={`flex shrink-0 flex-col border-r border-line bg-chrome ${
-            mode === "git" ? "w-96" : "w-80"
-          }`}
-        >
+        {/* Tasks and conversations */}
+        <aside className="flex w-80 shrink-0 flex-col border-r border-line bg-chrome">
           <PaneHeader title={mode}>
             {mode === "board" && <BoardSummary rows={board.rows} />}
             <div className="mr-1 flex overflow-hidden rounded border border-line">
@@ -284,8 +277,8 @@ export function App() {
                 </button>
               ))}
             </div>
-            {/* Only the chat list has something to create. The git pane reads
-                the repo, and the board has its own one-line input. */}
+            {/* Only the chat list has something to create — the board has its
+                own one-line input. */}
             {mode === "chats" && (
               <Button
                 // Held back by uncommitted work, for the same reason the daemon
@@ -321,12 +314,6 @@ export function App() {
               onAdd={(text) => void addRow(text)}
               onDelete={(row) => void deleteRow(row)}
             />
-          ) : mode === "git" ? (
-            <GitList
-              projectId={projectId}
-              selected={sha}
-              onSelect={(next) => navigate({ sha: next })}
-            />
           ) : (
             <ConversationList
               key={conversationsSeq}
@@ -345,11 +332,6 @@ export function App() {
 
         {mode === "board" ? (
           <SpecPane spec={board.spec} />
-        ) : mode === "git" ? (
-          <section className="flex min-h-0 min-w-0 flex-1 flex-col bg-editor">
-            <PaneHeader title={sha ? `commit ${sha.slice(0, 7)}` : "working tree"} />
-            <GitPane projectId={projectId} sha={sha} />
-          </section>
         ) : (
           <ConversationPane
             projectId={projectId}
@@ -382,9 +364,10 @@ export function App() {
           />
         )}
 
-        {/* Always on screen, whichever pane is showing. It is not a view of the
-            repository — the git pane is that — it is the answer to "can I start
-            the next thing", which has to be visible before you try. */}
+        {/* Always on screen, whichever pane is showing. Not a view of the
+            repository — reading a diff belongs to the conversation that made it
+            — but the answer to "can I start the next thing", which has to be
+            visible before you try. */}
         <PendingRail projectId={projectId} pending={pending} error={pendingError} />
       </main>
     </div>

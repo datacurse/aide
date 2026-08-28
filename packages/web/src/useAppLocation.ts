@@ -20,52 +20,42 @@ import { useCallback, useEffect, useState } from "react"
 
 const REMEMBERED = "aide.location"
 
-export const PANES = ["board", "chats", "git"] as const
+export const PANES = ["board", "chats"] as const
 export type Pane = (typeof PANES)[number]
-
-/** What the `git` pane shows when nothing is selected: the uncommitted work. */
-export const WORKING = "working"
 
 export interface AppLocation {
   projectId: string | null
   pane: Pane
   /** null in the `chats` pane means a new conversation. */
   sessionId: string | null
-  /** A commit sha, or null for the working tree. */
-  sha: string | null
 }
 
 const EMPTY: AppLocation = {
   projectId: null,
   pane: "board",
   sessionId: null,
-  sha: null,
 }
 
 export function parseLocation(hash: string): AppLocation {
-  // "#/p/<projectId>/board", "#/p/<projectId>/chats/<sessionId>" or
-  // "#/p/<projectId>/git/<sha>".
+  // "#/p/<projectId>/board" or "#/p/<projectId>/chats/<sessionId>".
   const parts = hash.replace(/^#\/?/, "").split("/").filter(Boolean)
   if (parts[0] !== "p" || !parts[1]) return EMPTY
 
   const named = parts[2] as Pane | undefined
-  // The board is the front door: it is the one view that answers "what now".
+  // The board is the front door: it is the one view that answers "what now" —
+  // and so it is also where an unrecognised pane lands, including a saved
+  // location left over from the `git` pane this app used to have.
   const pane: Pane = named && PANES.includes(named) ? named : "board"
-  const id = parts[3] ?? null
   return {
     projectId: parts[1],
     pane,
-    sessionId: pane === "chats" ? id : null,
-    // `working` is spelled out in the URL rather than left implicit, so a link
-    // to the uncommitted diff is a link to something rather than to a default
-    // that later changes.
-    sha: pane === "git" && id !== WORKING ? id : null,
+    sessionId: pane === "chats" ? (parts[3] ?? null) : null,
   }
 }
 
 export function formatLocation(loc: AppLocation): string {
   if (!loc.projectId) return "#/"
-  const id = loc.pane === "chats" ? loc.sessionId : loc.pane === "git" ? (loc.sha ?? WORKING) : null
+  const id = loc.pane === "chats" ? loc.sessionId : null
   return `#/p/${loc.projectId}/${loc.pane}${id ? `/${id}` : ""}`
 }
 
@@ -110,11 +100,10 @@ export function useAppLocation(): [AppLocation, (patch: Partial<AppLocation>) =>
   const navigate = useCallback((patch: Partial<AppLocation>) => {
     setLoc((prev) => {
       const next = { ...prev, ...patch }
-      // Selecting a different project cannot keep the old selections: a session
-      // id or a commit sha from another project resolves to nothing.
+      // Selecting a different project cannot keep the old selection: a session
+      // id from another project resolves to nothing.
       if (patch.projectId !== undefined && patch.projectId !== prev.projectId) {
         next.sessionId = null
-        next.sha = null
       }
       const href = formatLocation(next)
       if (href !== formatLocation(prev)) {

@@ -6,17 +6,14 @@ import type {
   ChatMode,
   ConversationSummary,
   EffortLevel,
-  GitCommitDetail,
   GitPending,
-  GitSummary,
-  GitWorkingTree,
   Health,
   Project,
   RunEvent,
   Todo,
 } from "@aide/protocol"
 
-export type { ConversationSummary, GitCommitDetail, GitPending, GitSummary, GitWorkingTree, Health }
+export type { ConversationSummary, GitPending, Health }
 
 /**
  * A conversation plus what the board knows about it.
@@ -242,17 +239,9 @@ export const api = {
 
   branch: (projectId: string) => call<{ branch: string | null }>(`/api/projects/${projectId}/branch`),
 
-  /** Branch, ahead/behind, dirt counts and the log — one poll's worth. */
-  git: (projectId: string, limit: number) =>
-    call<GitSummary>(`/api/projects/${projectId}/git?limit=${limit}`),
   /**
    * What is still uncommitted, in the scope a commit would take. Cheap: no
    * patch, no log, so the always-visible rail can poll it on the app's beat.
    */
   gitPending: (projectId: string) => call<GitPending>(`/api/projects/${projectId}/git/pending`),
-  /** Split out because it carries a whole patch, and is only read when shown. */
-  gitWorking: (projectId: string) =>
-    call<GitWorkingTree>(`/api/projects/${projectId}/git/working`),
-  gitCommit: (projectId: string, sha: string) =>
-    call<GitCommitDetail>(`/api/projects/${projectId}/git/commits/${sha}`),
 }
