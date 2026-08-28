@@ -202,57 +202,6 @@ function TrackToggle({
   )
 }
 
-/**
- * `hidden` for a conversation that cannot commit at all — a new chat has no
- * session and therefore no checkpoint to measure against.
- */
-export type CommitState =
-  | { kind: "hidden" }
-  | { kind: "ready" }
-  | { kind: "nothing" }
-  | { kind: "committing" }
-
-/**
- * Committing this conversation's work, in one press.
- *
- * Here rather than in the git rail because a commit needs to know WHOSE work it
- * is taking: the diff is measured against this conversation's checkpoint, and
- * the message is drafted from that diff. The rail knows about a project; only
- * the composer knows about a change.
- *
- * The trade it makes is worth naming, because the review gate is the product's
- * whole point: pressing this commits without you having read the diff first. It
- * does not remove the gate — a human still presses it, and the verdict below is
- * still a separate decision about whether the work is DONE — but it moves the
- * reading to after the fact, which is why the drafted subject is shown as soon
- * as it lands and the review panel above still offers the slow path.
- */
-function CommitButton({
-  state,
-  onCommit,
-}: {
-  state: CommitState
-  onCommit: () => void
-}) {
-  if (state.kind === "hidden") return null
-  const busy = state.kind === "committing"
-  return (
-    <button
-      type="button"
-      onClick={onCommit}
-      disabled={busy || state.kind === "nothing"}
-      title={
-        state.kind === "nothing"
-          ? "This conversation has not changed anything since it started."
-          : "Draft a commit message with the helper model and commit everything this conversation changed, plus any spec update it earns. You read the diff afterwards."
-      }
-      className="rounded-sm border border-line-soft bg-input px-2.5 py-1 font-sans text-xs text-fg transition-colors hover:bg-raised disabled:cursor-not-allowed disabled:opacity-40"
-    >
-      {busy ? "committing…" : "commit work"}
-    </button>
-  )
-}
-
 export function Composer({
   busy,
   usage,
@@ -261,8 +210,6 @@ export function Composer({
   inheritedMode,
   tracked,
   blocked,
-  commit,
-  onCommit,
   onTracked,
   onSend,
   onInterrupt,
@@ -291,13 +238,11 @@ export function Composer({
   /**
    * Why this box cannot send, or null. Only ever set on a NEW conversation, and
    * only for uncommitted work: the rule is that one chat's work is committed
-   * before the next one starts. Stated here as well as in the rail, because the
-   * refusal has to be readable from the box it applies to.
+   * before the next one starts. Stated here as well as in the rail — which is
+   * where the commit button lives — because the refusal has to be readable from
+   * the box it applies to.
    */
   blocked: string | null
-  /** Whether this conversation has work to commit, and whether it is mid-commit. */
-  commit: CommitState
-  onCommit: () => void
   onTracked: (next: boolean) => void
   onSend: (msg: {
     text: string
@@ -453,9 +398,6 @@ export function Composer({
         <TrackToggle locked={sessionId !== null} tracked={tracked} onChange={onTracked} />
         <ContextMeter usage={usage} />
         <div className="ml-auto flex items-center gap-2">
-          {/* Left of send, and quieter than it: this is the end of a piece of
-              work, not the thing you do every few seconds. */}
-          {!busy && <CommitButton state={commit} onCommit={onCommit} />}
           {busy ? (
             <button
               type="button"

@@ -702,5 +702,131 @@ console.log("\nthe receipt")
   )
 }
 
+// ---------------------------------------------------------------------------
+console.log("\ncommitting is a run of its own")
+// `hold` is the lane's non-agent entry point, and the commit is its only caller.
+// Nothing here touches git or a model: what is being checked is the envelope the
+// commit gets to run inside — a log a conversation can be found by, exactly one
+// terminal event, and a project held for precisely as long as the work takes.
+{
+  const session = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+
+  let unblock = () => {}
+  const gate = new Promise<void>((resolve) => {
+    unblock = resolve
+  })
+  let stoppedDuringWork: boolean | null = null
+
+  const held = lane.hold({
+    project,
+    sessionId: session,
+    text: "committing this conversation's work",
+    model: "helper-model",
+    work: async (run) => {
+      run.emit({ type: "commit.step", label: "reading what this conversation changed" })
+      await gate
+      stoppedDuringWork = run.stopped()
+      run.emit({ type: "commit.landed", sha: "a".repeat(40), paths: ["app.ts"] })
+      return { costUsd: 0.02, modelUsage: {} }
+    },
+  })
+
+  check(
+    "the project is held for the duration",
+    lane.holderFor(project.id)?.runId === held,
+    "otherwise a chat could start on top of a commit in flight",
+  )
+
+  let refusal = ""
+  try {
+    lane.hold({
+      project,
+      sessionId: session,
+      text: "again",
+      model: "helper-model",
+      work: async () => ({ costUsd: 0, modelUsage: {} }),
+    })
+  } catch (err) {
+    refusal = err instanceof Error ? err.message : String(err)
+  }
+  check(
+    "a second press is refused",
+    refusal.includes("already has a turn in flight"),
+    refusal || "it was admitted",
+  )
+
+  const opening = log.read(held)[0]
+  check(
+    "run.started names the conversation",
+    opening?.type === "run.started" && opening.sessionId === session,
+    "nothing else on the wire carries it, so without this the log belongs to nobody",
+  )
+
+  unblock()
+  await wait(200)
+
+  const events = log.read(held)
+  const terminal = events.at(-1)
+  check("it was not stopped", stoppedDuringWork === false)
+  check(
+    "the log ends in exactly one terminal event",
+    terminal?.type === "run.finished" &&
+      events.filter((e) => e.type === "run.finished" || e.type === "run.error").length === 1,
+    terminal?.type,
+  )
+  check(
+    "and it reports what the drafting spent",
+    terminal?.type === "run.finished" && terminal.totalCostUsd === 0.02,
+    "a commit billing $0 would quietly shrink every receipt that adds these up",
+  )
+  check(
+    "the steps are in it, in order",
+    events.findIndex((e) => e.type === "commit.step") <
+      events.findIndex((e) => e.type === "commit.landed"),
+  )
+  check(
+    "and the project is free again",
+    lane.holderFor(project.id) === null,
+    "a record nothing clears would hold the repo for the life of the daemon",
+  )
+}
+
+// ---------------------------------------------------------------------------
+console.log("\nstopping a commit before it writes")
+// The stop button over a commit is real, and it is real only up to a point:
+// there is a moment after which there is a commit, and stopping would mean
+// undoing history rather than declining to make it.
+{
+  let unblock = () => {}
+  const gate = new Promise<void>((resolve) => {
+    unblock = resolve
+  })
+  let stoppedDuringWork: boolean | null = null
+
+  const held = lane.hold({
+    project,
+    sessionId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+    text: "committing this conversation's work",
+    model: "helper-model",
+    work: async (run) => {
+      await gate
+      stoppedDuringWork = run.stopped()
+      return { costUsd: 0.01, modelUsage: {} }
+    },
+  })
+
+  check("interrupt finds it", lane.interrupt(held), "a held run has no worker to tell")
+  unblock()
+  await wait(200)
+
+  check("the work sees the stop", stoppedDuringWork === true)
+  const terminal = log.read(held).at(-1)
+  check(
+    "and the run reads as cancelled, not as a success",
+    terminal?.type === "run.finished" && terminal.status === "cancelled",
+    terminal?.type === "run.finished" ? terminal.status : terminal?.type,
+  )
+}
+
 console.log(`\n${failures === 0 ? "all checks passed" : `${failures} FAILED`}`)
 process.exit(failures === 0 ? 0 : 1)

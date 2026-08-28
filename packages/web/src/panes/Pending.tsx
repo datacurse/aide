@@ -1,5 +1,5 @@
 import type { GitFileChange, GitFileState, GitPending } from "@aide/protocol"
-import { Empty, PaneHeader } from "../ui.js"
+import { Button, Empty, PaneHeader } from "../ui.js"
 
 /**
  * What the project has left to commit, and nothing else.
@@ -10,8 +10,10 @@ import { Empty, PaneHeader } from "../ui.js"
  * copy beside a project-shaped page was one more place to look and no more
  * review. What could not go is this rail — see below.
  *
- * Strictly a reader. There is no stage, no commit, no discard, and that is not
- * an oversight: aide's two gates both belong to a conversation.
+ * What stayed is the list and the one button that acts on it. There is still no
+ * staging and no discard, and that is not an oversight: a commit here is the
+ * whole of what one conversation changed, measured against its checkpoint, and
+ * anything narrower would be a second review with no diff attached.
  */
 
 /** Same palette VS Code uses in its own SCM view, so the colours are not a new language. */
@@ -50,11 +52,12 @@ const MARK: Record<GitFileState, string> = {
  * this list has anything in it. A status you have to go to a tab to read cannot
  * carry that job — you would meet the refusal before you met the reason.
  *
- * Deliberately without a message box and without a single button. Committing
- * belongs to a conversation, where the work has a description and a checkpoint
- * to measure against; a commit button reachable from a rail that is showing you
- * a project rather than a change would be a commit with no review attached and
- * no idea whose work it was taking. The button lives next to send.
+ * The commit button is here, next to the list of what it would take, and it
+ * still commits a CONVERSATION's work rather than the rail's: it is pressed with
+ * a chat open, it measures against that chat's checkpoint, and the run it starts
+ * streams into that chat's transcript. The rail is where the work is visible;
+ * the conversation is where it means something. This is the one place both are
+ * true at once, which is why the button ended up here and not next to send.
  *
  * `.aide/todos.md` is absent from this list by construction — see `pending` in
  * the daemon. It would otherwise sit here permanently, and since the block on
@@ -64,11 +67,24 @@ export function PendingRail({
   projectId,
   pending,
   error,
+  commitBlocked,
+  committing,
+  onCommit,
 }: {
   projectId: string | null
   pending: GitPending | null
   /** A failed poll, reported above the last good answer rather than replacing it. */
   error: string | null
+  /**
+   * Why this work cannot be committed from here, or null when it can.
+   *
+   * A sentence rather than a boolean, and it goes on the disabled button's
+   * title: "commit is greyed out" with no reason is the shape of a bug, and the
+   * usual reason — no conversation open — is something you can act on.
+   */
+  commitBlocked: string | null
+  committing: boolean
+  onCommit: () => void
 }) {
   const files = pending?.files ?? []
   return (
@@ -106,6 +122,19 @@ export function PendingRail({
             </span>{" "}
             uncommitted on {pending.branch ?? "a detached checkout"}. Commit this work before
             starting another chat.
+            <div className="mt-2">
+              <Button
+                tone="primary"
+                onClick={onCommit}
+                disabled={committing || commitBlocked !== null}
+                title={
+                  commitBlocked ??
+                  "Draft a message from this conversation's diff and commit everything in it. Both happen in the chat, where you can watch them."
+                }
+              >
+                {committing ? "committing…" : "commit"}
+              </Button>
+            </div>
           </div>
           <div className="flex-1 overflow-auto py-1">
             {files.map((f) => (

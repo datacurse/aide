@@ -46,6 +46,18 @@ export function App() {
    */
   const [pendingRow, setPendingRow] = useState<string | null>(null)
   /**
+   * The commit in flight, and the run it is happening in.
+   *
+   * Held here rather than in the rail that starts it or the pane that shows it,
+   * because it is the one thing both need: the rail presses the button, and the
+   * conversation is where the run has to appear. `starting` covers the half
+   * second before the daemon has answered, in which the projects list still
+   * reports the repo as free and the button would otherwise invite a second
+   * press.
+   */
+  const [commitRunId, setCommitRunId] = useState<string | null>(null)
+  const [starting, setStarting] = useState(false)
+  /**
    * Whether a finished run makes a sound. Remembered rather than a session
    * toggle: a chime you have to silence again after every reload is worse than
    * no chime, because you stop trusting the reload.
@@ -108,8 +120,51 @@ export function App() {
     setPendingError(null)
   }, [projectId])
 
+  // A run id belongs to the conversation it was started from. Carrying it across
+  // a move would replay one chat's commit under another chat's transcript.
+  useEffect(() => {
+    setCommitRunId(null)
+  }, [projectId, sessionId])
+
   const project = projects.find((p) => p.id === projectId) ?? null
   const uncommitted = pending?.files.length ?? 0
+
+  /**
+   * Whether the commit we started is the thing currently holding the repo.
+   *
+   * Derived from the lock the daemon already publishes rather than from a flag
+   * set on press: the run outlives the request that started it, so a local
+   * "committing" would clear while the drafting was still going.
+   */
+  const committing = starting || (commitRunId !== null && project?.holder?.runId === commitRunId)
+  const commitBlocked = !sessionId
+    ? "Open the conversation that made these changes. A commit is measured against the checkpoint that conversation started from, so there is nothing to measure without one."
+    : project?.holder && project.holder.runId !== commitRunId
+      ? `"${project.holder.title}" has the repo right now.`
+      : null
+
+  /**
+   * Commit what the open conversation changed.
+   *
+   * Returns as soon as the daemon has a run id — the work itself takes model
+   * calls and lands in the transcript. The refresh is not a nicety: until the
+   * projects list reports the commit as holding the repo, `committing` above is
+   * false and the button reads as pressable over a commit already running.
+   */
+  const commitWork = async () => {
+    if (!projectId || !sessionId) return
+    setStarting(true)
+    setError(null)
+    try {
+      const { runId } = await api.commitChat(projectId, sessionId)
+      setCommitRunId(runId)
+      await refresh()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setStarting(false)
+    }
+  }
 
   const addProject = async () => {
     const path = window.prompt("Absolute path to a git repository")
@@ -338,6 +393,7 @@ export function App() {
             openSessionId={sessionId}
             pendingTodoId={pendingRow}
             uncommitted={uncommitted}
+            adoptRunId={commitRunId}
             // A verdict rewrites todos.md and unlinks the row, so both lists are
             // stale the moment it lands.
             onChanged={() => {
@@ -365,10 +421,17 @@ export function App() {
         )}
 
         {/* Always on screen, whichever pane is showing. Not a view of the
-            repository — reading a diff belongs to the conversation that made it
-            — but the answer to "can I start the next thing", which has to be
-            visible before you try. */}
-        <PendingRail projectId={projectId} pending={pending} error={pendingError} />
+            repository — reading a change belongs to the conversation that made
+            it — but the answer to "can I start the next thing", which has to be
+            visible before you try, and the button that makes the answer yes. */}
+        <PendingRail
+          projectId={projectId}
+          pending={pending}
+          error={pendingError}
+          commitBlocked={commitBlocked}
+          committing={committing}
+          onCommit={() => void commitWork()}
+        />
       </main>
     </div>
   )

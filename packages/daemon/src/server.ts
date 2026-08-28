@@ -28,7 +28,7 @@ import { CONFIG } from "./config.js"
 import { EventLog } from "./eventlog.js"
 import { addProject, getProject, listProjects, readProjectDoc, removeProject } from "./registry.js"
 import { conversationReceipt } from "./receipt.js"
-import { commitReview, conversationBaseline, draftReview } from "./review.js"
+import { commitConversation, conversationBaseline } from "./review.js"
 import * as repo from "./repo.js"
 import { BOOT_SOURCE_ID, currentSourceId, isStale } from "./source.js"
 import { getConversation, listConversations } from "./sessions.js"
@@ -485,9 +485,13 @@ app.get("/api/projects/:id/conversations/:sessionId", async (req, reply) => {
  *
  * There is no `land` here any more, because there is no branch to merge. What
  * used to be two gates on the code — commit to a branch, then merge it — is now
- * one gate on the code and one on the backlog: you read the diff and commit, and
- * the row closes only when you say the work is done. Recoverability moved with
- * it, from an unmerged branch to the checkpoint ref.
+ * one gate on the code and one on the backlog: you press commit, and the row
+ * closes only when you say the work is done. Recoverability moved with it, from
+ * an unmerged branch to the checkpoint ref.
+ *
+ * The reading moved too, from before the commit to after it. See
+ * `commitConversation` for what the commit writes down so that reading is still
+ * possible, and for what that trade actually costs.
  */
 
 /** The review baseline, or a 409 explaining why there is not one. */
@@ -544,8 +548,23 @@ app.get("/api/projects/:id/conversations/:sessionId/receipt", async (req, reply)
   return await conversationReceipt(log, project, sessionId)
 })
 
-app.post("/api/projects/:id/conversations/:sessionId/review/draft", async (req, reply) => {
+/**
+ * Commit a conversation's work, as a run you can watch.
+ *
+ * Returns a run id rather than a sha, and that is the whole change: the drafting
+ * is two model calls on the diff and takes about as long as a short turn, so it
+ * goes onto the event stream like one. The browser subscribes to it and the
+ * message, the paths and the sha arrive in the transcript of the conversation
+ * that earned them.
+ *
+ * There is no message in the body any more. There was one when a panel drafted a
+ * message, showed it in a textarea and posted it back; that panel is gone,
+ * because a review sitting underneath the transcript is not where anybody was
+ * looking. See `commitConversation` for what replaced it and what that costs.
+ */
+app.post("/api/projects/:id/conversations/:sessionId/commit", async (req, reply) => {
   const { id, sessionId } = req.params as { id: string; sessionId: string }
+
   const project = await getProject(id)
   if (!project) return reply.code(404).send(notFound(`no project ${id}`))
   const found = await reviewable(project, sessionId, reply)
@@ -553,59 +572,26 @@ app.post("/api/projects/:id/conversations/:sessionId/review/draft", async (req, 
 
   const row = found.rowId ? await findTodo(project, found.rowId) : undefined
   try {
-    return await draftReview(project, found.checkpoint, row?.text ?? "")
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    // "nothing to commit" is the caller asking too early, not a model failure.
-    return reply.code(message.startsWith("nothing to commit") ? 409 : 502).send({ message })
-  }
-})
-
-/**
- * Commit a conversation's work.
- *
- * An absent `message` is not an error, it is the one-click path: the drafter
- * writes the message and the spec update, and the commit takes both. The two
- * gates are still two — a human pressed this, and the verdict below is still
- * separate — but the diff is read AFTER rather than before, which is a trade the
- * button that offers it has to say out loud.
- *
- * The drafted message comes back in the response for the same reason: a commit
- * you did not write the message for is one you have to be shown.
- */
-app.post("/api/projects/:id/conversations/:sessionId/commit", async (req, reply) => {
-  const { id, sessionId } = req.params as { id: string; sessionId: string }
-  const body = (req.body ?? {}) as { message?: string; spec?: string }
-
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-  const found = await reviewable(project, sessionId, reply)
-  if (!found) return
-
-  let message = body.message?.trim() ?? ""
-  let spec = body.spec ?? ""
-  if (!message) {
-    const row = found.rowId ? await findTodo(project, found.rowId) : undefined
-    try {
-      const drafted = await draftReview(project, found.checkpoint, row?.text ?? "")
-      message = drafted.message
-      spec = drafted.spec
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err)
-      return reply.code(detail.startsWith("nothing to commit") ? 409 : 502).send({ message: detail })
-    }
-  }
-
-  try {
-    const { sha } = await commitReview({
+    // Throws if another conversation holds the checkout, with that
+    // conversation's name in it. `reviewable` has already refused the narrower
+    // case — this one's own turn still running.
+    const runId = chat.hold({
       project,
       sessionId,
-      rowId: found.rowId,
-      checkpoint: found.checkpoint,
-      message,
-      ...(spec ? { spec } : {}),
+      text: "committing this conversation's work",
+      model: CONFIG.helperModel,
+      work: (run) =>
+        commitConversation({
+          project,
+          sessionId,
+          rowId: found.rowId,
+          checkpoint: found.checkpoint,
+          request: row?.text ?? "",
+          emit: run.emit,
+          stopped: run.stopped,
+        }),
     })
-    return { sha, message }
+    return { runId }
   } catch (err) {
     return reply.code(409).send({ message: err instanceof Error ? err.message : String(err) })
   }

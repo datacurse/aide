@@ -68,46 +68,6 @@ export interface BoardView {
   warnings: string[]
 }
 
-/** What the commit gate offers for review: a message, and the spec it earns. */
-export interface ReviewDraft {
-  message: string
-  /** Empty when the change earns no spec update, which is the common case. */
-  spec: string
-  specChanged: boolean
-  model: string
-  /**
-   * Files the run changed that were ALREADY modified before it started.
-   *
-   * Empty in the ordinary case. When it is not, committing takes both sets of
-   * edits, because git cannot separate them — so these are named rather than
-   * silently folded in.
-   */
-  mixed: string[]
-}
-
-/**
- * What a conversation cost and where it went wrong, derived from its run logs.
- *
- * The markdown IS the artifact — there is no structured half that the UI
- * reformats, because two representations of one set of numbers is two places for
- * them to disagree. `runs` is here only so the panel can say "no run log for
- * this conversation" without parsing the document to find out.
- */
-export interface Receipt {
-  sessionId: string
-  runs: number
-  markdown: string
-}
-
-/** A run's work, measured against the checkpoint taken before it started. */
-export interface DiffView {
-  root: string
-  diff: string
-  /** Exactly what a commit would stage. */
-  paths: string[]
-  mixed: string[]
-}
-
 async function call<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
     ...init,
@@ -177,29 +137,17 @@ export const api = {
 
   conversations: (projectId: string) =>
     call<ConversationRow[]>(`/api/projects/${projectId}/conversations`),
-  /** What this conversation changed, against its checkpoint. */
-  chatDiff: (projectId: string, sessionId: string) =>
-    call<DiffView>(`/api/projects/${projectId}/conversations/${sessionId}/diff`),
-  /** Where the time and the money went. Safe to ask for mid-turn. */
-  receipt: (projectId: string, sessionId: string) =>
-    call<Receipt>(`/api/projects/${projectId}/conversations/${sessionId}/receipt`),
-  /** Commit message and spec update, drafted together because they are one review. */
-  draftReview: (projectId: string, sessionId: string) =>
-    call<ReviewDraft>(`/api/projects/${projectId}/conversations/${sessionId}/review/draft`, {
-      method: "POST",
-    }),
   /**
    * Commit this conversation's work.
    *
-   * An omitted message is the one-click path: the daemon drafts one and hands it
-   * back, because a commit whose message you did not write is one you have to be
-   * shown afterwards.
+   * Answers with a run id, not a sha. The drafting is two model calls on the
+   * diff and takes about as long as a short turn, so it goes on the event stream
+   * like one — what it wrote and what it took arrive in the transcript.
    */
-  commitChat: (projectId: string, sessionId: string, message?: string, spec?: string) =>
-    call<{ sha: string; message: string }>(
-      `/api/projects/${projectId}/conversations/${sessionId}/commit`,
-      { method: "POST", body: JSON.stringify(message === undefined ? {} : { message, spec }) },
-    ),
+  commitChat: (projectId: string, sessionId: string) =>
+    call<{ runId: string }>(`/api/projects/${projectId}/conversations/${sessionId}/commit`, {
+      method: "POST",
+    }),
   /** The verdict. Nothing an agent runs can reach this. */
   closeChat: (projectId: string, sessionId: string, verdict: ChatVerdict) =>
     call<{ rowId: string | null; rowRemoved: boolean; warning: string | null }>(

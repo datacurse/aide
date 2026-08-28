@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises"
 import { dirname } from "node:path"
-import type { Project } from "@aide/protocol"
+import type { ModelSpend, Project, RunEventBody } from "@aide/protocol"
 import { specPath } from "@aide/protocol/node"
 import { rowForSession } from "./board.js"
 import { commitRun, recentSubjects, runChanges, withRowTrailers } from "./changes.js"
@@ -12,9 +12,9 @@ import { readSpec } from "./todos.js"
 /**
  * Reviewing a conversation's work and committing it.
  *
- * The gate itself is unchanged: the agent leaves everything uncommitted, a human
- * reads the diff, and committing is a person pressing a button. What changed
- * underneath is what "the diff" means.
+ * The gate itself is unchanged in the part that matters: the agent leaves
+ * everything uncommitted, and committing is a person pressing a button. What
+ * changed underneath is what "the diff" means.
  *
  * A worktree used to answer that for free — the checkout started clean, so
  * whatever was in it was the agent's work. In the project's own tree it is not
@@ -27,6 +27,13 @@ import { readSpec } from "./todos.js"
  *
  * What is NOT here, deliberately: a `land`. There is no branch to merge, because
  * there is no branch. The second gate moved to the verdict — see `closeChat`.
+ *
+ * Nor is there a draft-then-approve step any more. Reviewing a proposed commit
+ * message in a panel was a gate in name only — it sat under the transcript,
+ * where the thing being reviewed was already invisible — so what is left is one
+ * press, watched: `commitConversation` runs as a run of its own and puts every
+ * step, the message it wrote, and what it staged into the conversation. You read
+ * it in the same place you read everything else about this work.
  */
 
 /**
@@ -45,76 +52,136 @@ export async function conversationBaseline(
   return { rowId: await rowForSession(project.id, sessionId), checkpoint: found.sha }
 }
 
-export interface ReviewDraft {
-  message: string
-  /**
-   * The whole of `.aide/spec.md` as it should read after this change.
-   *
-   * Empty means the model judged that the diff earns no change to the capability
-   * list, which is a normal outcome — most commits do not add or remove one.
-   * Empty also means "leave the spec alone" on the way back in, so clearing the
-   * box is how a human declines the suggestion.
-   */
-  spec: string
-  /** Unchanged when the drafter saw nothing worth changing. Lets a UI say so. */
-  specChanged: boolean
-  model: string
-  /**
-   * Files the run touched that the human had ALREADY modified before it started.
-   *
-   * Surfaced rather than resolved, because git cannot separate two people's
-   * edits inside one file and neither can aide. Committing one of these commits
-   * both sets of changes, and the only honest thing to do is say so by name
-   * before the button is pressed. Empty in the ordinary case, which is a run
-   * that started against a clean tree.
-   */
-  mixed: string[]
+export interface CommitConversationOptions {
+  project: Project
+  sessionId: string
+  rowId: string | null
+  checkpoint: string
+  /** What the row asked for, so the drafter can tell intent from incident. */
+  request: string
+  /** Progress, straight onto the conversation's event stream. */
+  emit: (body: RunEventBody) => void
+  /** Whether the human has pressed stop. Read once, at the last moment it helps. */
+  stopped: () => boolean
 }
 
 /**
- * Draft the commit message and the spec update together.
+ * Commit everything this conversation changed, narrating as it goes.
  *
- * Together because they are one review: the sentence "the app can now do X" and
- * the diff that earns it should be approved in one place, or the claim outlives
- * the check. Both are drafted rather than written — the editing IS the review,
- * which is the same reason the commit message has always been a textarea.
+ * One press does all of it: read the diff, draft the message and the spec update
+ * from it, write both. The narration is not decoration — the two model calls in
+ * the middle take about as long as a short turn, and a button that goes quiet
+ * for fifteen seconds gets pressed again.
  *
- * The two calls run in parallel: they read the same diff and neither depends on
- * the other's output, so making them sequential would double the wait.
+ * The trade is worth naming, because the review gate is the product's whole
+ * point: nobody reads the diff before this runs. What replaced that reading is
+ * the log it leaves behind — the message a model wrote and the exact list of
+ * paths it staged, in the conversation that produced them. The second gate is
+ * untouched: the row closes when a human says the work is done, not when it is
+ * committed.
+ *
+ * Returns what the drafting spent, because the caller is a run, and a run log
+ * ends in an event saying what the run cost.
  */
-export async function draftReview(
-  project: Project,
-  checkpoint: string,
-  request: string,
-): Promise<ReviewDraft> {
+export async function commitConversation(
+  opts: CommitConversationOptions,
+): Promise<{ costUsd: number; modelUsage: Record<string, ModelSpend> }> {
+  const { project, emit } = opts
+
+  emit({ type: "commit.step", label: "reading what this conversation changed" })
   // One pass for the patch, the stat and the overlap — `runChanges` stages into
   // a scratch index to answer all three, and that staging is the expensive part.
-  const changes = await runChanges(project.root, checkpoint)
-  if (!changes.diff.trim()) throw new Error("nothing to commit — the run changed nothing")
+  const changes = await runChanges(project.root, opts.checkpoint)
+  if (!changes.diff.trim()) throw new Error("this conversation has not changed anything")
 
+  // Named rather than resolved, and named in the log rather than in a dialog
+  // beforehand: git cannot separate two people's edits inside one file, so
+  // committing one of these commits both. Nothing can be done about that. What
+  // can be done is writing down which files it happened to, somewhere it stays
+  // readable after the fact.
+  if (changes.overlap.length > 0) {
+    emit({
+      type: "commit.step",
+      label: `taking your own earlier edits to ${changes.overlap.join(", ")} with it`,
+    })
+  }
+
+  emit({
+    type: "commit.step",
+    label: `drafting the message and the spec update · ${CONFIG.helperModel}`,
+  })
   const spec = await readSpec(project)
+  // In parallel: they read the same diff and neither depends on the other's
+  // output, so making them sequential would double the wait.
   const [message, proposed] = await Promise.all([
     draftCommitMessage({
       model: CONFIG.helperModel,
-      title: request,
+      title: opts.request,
       prompt: "",
       diffStat: changes.stat,
       diff: changes.diff,
       recentSubjects: await recentSubjects(project.root),
     }),
-    draftSpecUpdate({ model: CONFIG.helperModel, spec, request, diffStat: changes.stat, diff: changes.diff }),
+    draftSpecUpdate({
+      model: CONFIG.helperModel,
+      spec,
+      request: opts.request,
+      diffStat: changes.stat,
+      diff: changes.diff,
+    }),
   ])
-
-  const changed = proposed.trim() !== "" && proposed.trim() !== spec.trim()
-  return {
-    message,
-    // Handed back empty when nothing changed, so the UI does not invite a human
-    // to review a document identical to the one already on disk.
-    spec: changed ? proposed : "",
-    specChanged: changed,
-    model: CONFIG.helperModel,
-    mixed: changes.overlap,
+  const spend = {
+    costUsd: message.costUsd + proposed.costUsd,
+    modelUsage: mergeSpend(message.modelUsage, proposed.modelUsage),
   }
+
+  // An unchanged spec is a normal outcome — most commits add no capability — and
+  // it means "leave the file alone" rather than "write this back".
+  const specChanged = proposed.text.trim() !== "" && proposed.text.trim() !== spec.trim()
+  emit({
+    type: "commit.drafted",
+    message: message.text,
+    model: CONFIG.helperModel,
+    specChanged,
+  })
+
+  // Stop lands here or nowhere. Up to this line an interrupt costs the drafting
+  // and nothing else; past it there is a commit, and stopping would mean undoing
+  // history rather than declining to make it.
+  if (opts.stopped()) return spend
+
+  emit({ type: "commit.step", label: "committing" })
+  const { sha, paths } = await commitReview({
+    project,
+    sessionId: opts.sessionId,
+    rowId: opts.rowId,
+    checkpoint: opts.checkpoint,
+    message: message.text,
+    ...(specChanged ? { spec: proposed.text } : {}),
+  })
+  emit({ type: "commit.landed", sha, paths })
+  return spend
+}
+
+/** Two calls against the same model come back as two records under one key. */
+function mergeSpend(
+  a: Record<string, ModelSpend>,
+  b: Record<string, ModelSpend>,
+): Record<string, ModelSpend> {
+  const out: Record<string, ModelSpend> = { ...a }
+  for (const [model, u] of Object.entries(b)) {
+    const prev = out[model]
+    out[model] = prev
+      ? {
+          inputTokens: prev.inputTokens + u.inputTokens,
+          outputTokens: prev.outputTokens + u.outputTokens,
+          cacheReadInputTokens: prev.cacheReadInputTokens + u.cacheReadInputTokens,
+          cacheCreationInputTokens: prev.cacheCreationInputTokens + u.cacheCreationInputTokens,
+          costUSD: prev.costUSD + u.costUSD,
+        }
+      : u
+  }
+  return out
 }
 
 export interface CommitReviewOptions {
@@ -123,40 +190,48 @@ export interface CommitReviewOptions {
   rowId: string | null
   checkpoint: string
   message: string
-  /** Blank or absent leaves `.aide/spec.md` exactly as it is. */
+  /** Absent leaves `.aide/spec.md` exactly as it is, which is the common case. */
   spec?: string
 }
 
 /**
- * Write the approved spec, then commit everything the run changed as one change.
+ * Write the spec, then commit everything the run changed as one change.
  *
  * The spec is written BEFORE the paths are computed, not after, and that
  * ordering is the whole reason the claim and the code land together: writing it
  * afterwards would leave `spec.md` dirty in the tree and absent from the commit
  * that earned it, which is the capability list describing work that is not in
  * the history.
+ *
+ * The paths come back out because they are the answer to "what did that button
+ * take", and this is the only place that knows.
+ *
+ * Exported for `pnpm smoke`, which drives it with a message and a spec written
+ * by hand: it is the half of the commit that touches git, and the only half that
+ * can be checked without spending money on a model.
  */
-export async function commitReview(opts: CommitReviewOptions): Promise<{ sha: string }> {
+export async function commitReview(
+  opts: CommitReviewOptions,
+): Promise<{ sha: string; paths: string[] }> {
   const { project, sessionId, rowId, checkpoint } = opts
 
   if (opts.spec?.trim()) {
     const path = specPath(project.root)
     await mkdir(dirname(path), { recursive: true })
-    // Trailing newline normalised here rather than trusted from a textarea: a
+    // Trailing newline normalised here rather than trusted from the model: a
     // file that gains and loses one on alternate commits makes every spec diff
     // start with a spurious hunk.
     await writeFile(path, `${opts.spec.trimEnd()}\n`, "utf8")
   }
 
-  // Recomputed rather than carried from the draft. The draft was made when the
-  // human pressed "read the diff", and the spec write above has changed the tree
-  // since — committing the older path list would leave `spec.md` out of its own
-  // commit.
+  // Recomputed rather than carried from the read that produced the message: the
+  // spec write above has changed the tree since, and committing the older path
+  // list would leave `spec.md` out of its own commit.
   const changes = await runChanges(project.root, checkpoint)
   const sha = await commitRun(
     project.root,
     changes.paths,
     withRowTrailers(opts.message, rowId, sessionId),
   )
-  return { sha }
+  return { sha, paths: changes.paths }
 }

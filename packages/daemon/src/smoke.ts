@@ -239,6 +239,55 @@ check("refuses an empty commit", threw.includes("nothing to commit"), threw)
   )
 }
 
+{
+  // The same path, one step further gone. A conversation's paths are measured
+  // against its checkpoint, so a long-lived chat can name a file whose deletion
+  // an EARLIER commit already took — leaving it in neither the worktree, the
+  // index nor HEAD. `git commit` refuses a pathspec matching nothing, and it
+  // refuses the whole command, so one already-landed deletion used to take the
+  // other nine files down with it.
+  await writeFile(join(root, "stale.ts"), "export const stale = true\n", "utf8")
+  await git(root, ["add", "stale.ts"])
+  await git(root, ["commit", "-m", "Add a file whose deletion lands early", "--", "stale.ts"])
+
+  const staleSession = "7f1c0e2a-0000-4000-8000-00000000000a"
+  const stalePoint = await takeCheckpoint(root, staleSession)
+  await git(root, ["rm", "-q", "stale.ts"])
+  await git(root, ["commit", "-m", "Delete it, before the conversation commits", "--", "stale.ts"])
+  await writeFile(join(root, "after.ts"), "export const after = true\n", "utf8")
+
+  const staleChanges = await runChanges(root, stalePoint.sha)
+  check(
+    "an already-committed deletion is still in the run's paths",
+    staleChanges.paths.includes("stale.ts"),
+    staleChanges.paths.join(","),
+  )
+  const staleSha = await commitRun(root, staleChanges.paths, "Add after.ts\n")
+  const staleNamed = await git(root, ["show", "--name-status", "--format=", staleSha])
+  check(
+    "the rest of the run commits anyway",
+    staleNamed.includes("after.ts"),
+    "one dead pathspec must not refuse the whole commit",
+  )
+  check(
+    "and the dead path is not in it",
+    !staleNamed.includes("stale.ts"),
+    "its deletion is already in history — there is nothing left to record",
+  )
+
+  let allGone = ""
+  try {
+    await commitRun(root, ["stale.ts"], "Nothing left of this\n")
+  } catch (err) {
+    allGone = err instanceof Error ? err.message : String(err)
+  }
+  check(
+    "a run with nothing BUT dead paths says so",
+    allGone.includes("already been committed"),
+    allGone || "(it committed something)",
+  )
+}
+
 console.log("\nundo — the checkpoint is the whole safety net")
 {
   const undoSession = "7f1c0e2a-0000-4000-8000-000000000002"

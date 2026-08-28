@@ -64,6 +64,27 @@ interface UserLine {
   text: string
   images: MessageImage[]
 }
+/**
+ * One step of a commit.
+ *
+ * A commit is not an agent and has no tool calls, but it does spend ten seconds
+ * of model time writing its own message — so it narrates, and these are what it
+ * narrates with. `done` is not on the wire: a step is over once anything else is
+ * in the log after it, which is a thing the reader can see for itself.
+ */
+interface CommitStepLine {
+  kind: "commit-step"
+  seq: number
+  label: string
+  done: boolean
+}
+/** What was committed, and what it took. */
+interface CommitLandedLine {
+  kind: "commit-landed"
+  seq: number
+  sha: string
+  paths: string[]
+}
 interface OutcomeLine {
   kind: "outcome"
   seq: number
@@ -84,6 +105,9 @@ type Line =
   | PermissionLine
   | { kind: "retry"; seq: number; text: string }
   | { kind: "error"; seq: number; text: string }
+  | CommitStepLine
+  | CommitLandedLine
+  | { kind: "commit-message"; seq: number; message: string; model: string; specChanged: boolean }
 
 /**
  * A run must always end with a visible line saying how it ended. Without one, a
@@ -196,6 +220,21 @@ function toLines(events: RunEvent[]): Line[] {
       case "context.usage":
         // Consumed by the composer's meter, not drawn in the transcript.
         break
+      case "commit.step":
+        lines.push({ kind: "commit-step", seq: e.seq, label: e.label, done: false })
+        break
+      case "commit.drafted":
+        lines.push({
+          kind: "commit-message",
+          seq: e.seq,
+          message: e.message,
+          model: e.model,
+          specChanged: e.specChanged,
+        })
+        break
+      case "commit.landed":
+        lines.push({ kind: "commit-landed", seq: e.seq, sha: e.sha, paths: e.paths })
+        break
       case "tool.denied":
         lines.push({ kind: "denied", seq: e.seq, name: e.name, reason: e.reason })
         break
@@ -221,6 +260,14 @@ function toLines(events: RunEvent[]): Line[] {
         })
         break
     }
+  }
+
+  // Every step but the last one in the log has been overtaken by whatever came
+  // after it. Marked here rather than sent as a second event per step, which
+  // would put nothing in the log that its ordering does not already say.
+  for (let i = 0; i < lines.length - 1; i += 1) {
+    const line = lines[i]
+    if (line?.kind === "commit-step") line.done = true
   }
 
   // Runs logged before duplicate-suppression landed carry a redundant run.error
@@ -462,11 +509,85 @@ function CheckpointRow({ line }: { line: CheckpointLine }) {
   )
 }
 
+/**
+ * What the commit wrote, before it wrote it anywhere permanent.
+ *
+ * Nobody typed this message. Showing it is the whole of the review that is left
+ * once the commit has already happened, so it is shown in full rather than
+ * summarised, and as monospace rather than markdown — this is a file's worth of
+ * text going into the history verbatim, and rendering it would show you
+ * something the history will not have.
+ */
+function CommitMessageRow({
+  message,
+  model,
+  specChanged,
+}: {
+  message: string
+  model: string
+  specChanged: boolean
+}) {
+  return (
+    <div className="my-2 rounded border border-line bg-chrome px-3 py-2">
+      <div className="mb-1 flex flex-wrap items-baseline gap-2 font-sans text-[10px] text-fg-dim">
+        <span className="tracking-wide text-syn-var uppercase">commit message</span>
+        <span>drafted by {model}</span>
+        {specChanged && <span className="text-warn">· .aide/spec.md rewritten with it</span>}
+      </div>
+      <pre className="overflow-auto font-mono text-[12px] leading-relaxed whitespace-pre-wrap text-fg">
+        {message}
+      </pre>
+    </div>
+  )
+}
+
+/** Mirrors CheckpointRow: one line, click for exactly what was staged. */
+function CommitLandedRow({ line }: { line: CommitLandedLine }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full min-w-0 items-baseline gap-2 rounded px-1 py-0.5 text-left hover:bg-hover"
+      >
+        <span className="text-diff-add-fg">●</span>
+        <span className="shrink-0 text-diff-add-fg">committed {line.sha.slice(0, 7)}</span>
+        <span className="shrink-0 text-fg-dim">
+          {line.paths.length} file{line.paths.length === 1 ? "" : "s"}
+        </span>
+      </button>
+      {open && (
+        <pre className="mt-1 mb-2 max-h-64 overflow-auto rounded-sm bg-chrome p-2 text-[11px] leading-relaxed whitespace-pre-wrap text-fg-muted">
+          {line.paths.join("\n")}
+        </pre>
+      )}
+    </div>
+  )
+}
+
 function renderLine(
   line: Line,
   onPermission?: (requestId: string, allowed: boolean) => void,
 ): ReactNode {
   if (line.kind === "tool") return <ToolRow key={line.seq} line={line} />
+  if (line.kind === "commit-step")
+    return (
+      <p key={line.seq} className="flex min-w-0 items-baseline gap-2 px-1">
+        <span className={line.done ? "text-ok" : "text-info"}>{line.done ? "✓" : "▸"}</span>
+        <span className="min-w-0 text-fg-muted">{line.label}</span>
+      </p>
+    )
+  if (line.kind === "commit-message")
+    return (
+      <CommitMessageRow
+        key={line.seq}
+        message={line.message}
+        model={line.model}
+        specChanged={line.specChanged}
+      />
+    )
+  if (line.kind === "commit-landed") return <CommitLandedRow key={line.seq} line={line} />
   if (line.kind === "checkpoint") return <CheckpointRow key={line.seq} line={line} />
   if (line.kind === "thinking")
     return (
@@ -506,7 +627,10 @@ function renderLine(
         ● {outcome.label}
         <span className="text-fg-dim">
           {" — "}
-          {line.turns} turns · {(line.ms / 1000).toFixed(1)}s · ~{money(line.cost)} est.
+          {/* A commit run has no SDK steps to count, and "0 turns" on the end of
+              one reads as a failure rather than as a category difference. */}
+          {line.turns > 0 && `${line.turns} turns · `}
+          {(line.ms / 1000).toFixed(1)}s · ~{money(line.cost)} est.
         </span>
       </p>
     )

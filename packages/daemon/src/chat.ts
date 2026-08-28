@@ -1,7 +1,15 @@
 import { fork, type ChildProcess } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { fileURLToPath } from "node:url"
-import type { Attachment, ChatMode, EffortLevel, Project, RunDelta } from "@aide/protocol"
+import type {
+  Attachment,
+  ChatMode,
+  EffortLevel,
+  ModelSpend,
+  Project,
+  RunDelta,
+  RunEventBody,
+} from "@aide/protocol"
 import type { FollowUpTurn, RunAgentOptions } from "./agent.js"
 import { linkSession } from "./board.js"
 import {
@@ -349,6 +357,118 @@ export class ChatLane {
       this.#turns.delete(runId)
       throw err
     }
+  }
+
+  /**
+   * Run something that needs the checkout but is not an agent, as a run of its
+   * own.
+   *
+   * The commit is the only caller and probably always will be, but it goes
+   * through the lane rather than straight at git for reasons that are all the
+   * lane's: committing underneath a working agent races its next write, a commit
+   * mid-turn would be a half-finished diff, and the browser has exactly one way
+   * to watch something happen — subscribe to a run id. Registering a record is
+   * also what makes the project show as held while it runs, so the "new chat"
+   * button does not offer to start a conversation on top of a commit in flight.
+   *
+   * Everything the agent path needs and this does not is simply absent: no
+   * worker, no checkpoint (the conversation's own is what it measures against),
+   * no permissions. `work` gets an `emit` for progress and a `stopped` it can
+   * check before it writes anything, and the terminal event is appended here so
+   * the invariant every reader depends on — a log ends in exactly one — cannot
+   * be broken by a caller that forgot.
+   */
+  hold(opts: {
+    project: Project
+    sessionId: string
+    /** What this run is, for the lock refusal the next chat would get. */
+    text: string
+    /** Named in `run.started` so a receipt bills it to something. */
+    model: string
+    work: (run: {
+      runId: string
+      emit: (body: RunEventBody) => void
+      stopped: () => boolean
+    }) => Promise<{ costUsd: number; modelUsage: Record<string, ModelSpend> }>
+  }): string {
+    const { project, sessionId } = opts
+    if (this.turnForSession(sessionId)) {
+      throw new Error("this conversation already has a turn in flight")
+    }
+    const holder = this.holderFor(project.id)
+    if (holder) throw new Error(lockRefusal(holder))
+
+    const runId = randomUUID()
+    // Registered synchronously, for the same reason `send` does it: until this
+    // line the project reads as free, and two presses arriving together would
+    // both be admitted.
+    const record: TurnRecord = {
+      runId,
+      projectId: project.id,
+      sessionId,
+      startedAt: Date.now(),
+      text: opts.text,
+      worker: null,
+      interrupted: false,
+      pending: new Set(),
+      settling: null,
+    }
+    this.#turns.set(runId, record)
+
+    // `run.started` carries the session id, and it is the ONLY event that does.
+    // A log without it is a log nothing can attribute to a conversation — which
+    // is how a receipt would end up billing this run to nobody.
+    this.log.append(runId, {
+      type: "run.started",
+      taskId: "",
+      projectId: project.id,
+      model: opts.model,
+      cwd: project.root,
+      sessionId,
+    })
+
+    // An async wrapper rather than `.then(ok, err).finally(...)`, so that a
+    // `work` which throws before it returns a promise is caught here too. It
+    // would otherwise throw out of `hold` with the record already registered,
+    // and a record nothing will ever clear holds the project for good.
+    const settle = async () => {
+      try {
+        const spend = await opts.work({
+          runId,
+          emit: (body) => {
+            this.log.append(runId, body)
+          },
+          stopped: () => record.interrupted,
+        })
+        const cancelled = record.interrupted
+        this.log.append(runId, {
+          type: "run.finished",
+          subtype: cancelled ? "cancelled" : "success",
+          status: cancelled ? "cancelled" : "success",
+          totalCostUsd: spend.costUsd,
+          modelUsage: spend.modelUsage,
+          // Not an agent: there are no SDK steps to count, and inventing one
+          // would put a turn in a receipt that never happened.
+          numTurns: 0,
+          durationMs: Date.now() - record.startedAt,
+          permissionDenials: [],
+        })
+      } catch (err) {
+        this.log.append(runId, {
+          type: "run.error",
+          message: err instanceof Error ? err.message : String(err),
+        })
+      } finally {
+        // Deleting the record is what releases the project. There is no snapshot
+        // to wait for here — the tree after a commit is the tree the commit
+        // made, and the conversation's checkpoint still points where it did.
+        this.#turns.delete(runId)
+        this.#watchers.delete(runId)
+      }
+    }
+    void settle()
+
+    return runId
   }
 
   /**
@@ -742,7 +862,8 @@ export class ChatLane {
 
     // `?.` rather than a guard: a turn interrupted between admission and the
     // fork has no worker to tell, and `#coldStart` checks `interrupted` before
-    // it starts one.
+    // it starts one. Neither has a held run, which never had a worker at all —
+    // the flag above is the whole of how it hears about this.
     record.worker?.child.send({ cmd: "interrupt" } satisfies ToWorker)
     return true
   }

@@ -41,6 +41,10 @@ export function describeActivity(events: readonly RunEvent[], runId: string | nu
 
   const last = mine[mine.length - 1]
   if (!last) return "Working"
+  // The commit narrates itself, and its own words are better than anything
+  // derivable from the shape of its log.
+  if (last.type === "commit.step") return last.label
+  if (last.type === "commit.drafted") return "Committing"
   if (last.type === "user.message") return "Starting"
   if (last.type === "assistant.thinking") return "Thinking"
   if (last.type === "assistant.text") return "Writing"

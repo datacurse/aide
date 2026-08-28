@@ -173,30 +173,39 @@ export async function commitRun(
     throw new Error("nothing to commit — the run left the working tree unchanged")
   }
 
-  const specs = paths.map((p) => `:(top,literal)${p}`)
+  // Where git can still see each path. A run's path list is measured against a
+  // checkpoint, so it can name a file that has since stopped existing anywhere
+  // git looks — and git answers a pathspec matching nothing by refusing the
+  // whole command, which is how one already-landed deletion took a commit of
+  // nine other files down with it.
+  const inIndex = await matching(root, paths, ["ls-files", "-z"])
+  const inHead = await gitOr(new Set<string>(), () =>
+    matching(root, paths, ["ls-tree", "-r", "-z", "--name-only", "HEAD"]),
+  )
 
-  // `add` is given only the paths git can still see, which is not all of them:
-  // a run that removed a file with `git rm` has already staged that deletion, so
-  // the path is in neither the worktree nor the index, and `add` answers a
-  // pathspec matching nothing with `fatal: pathspec ... did not match any files`
-  // — killing the whole commit over work that was already staged correctly.
-  // `commit` below is given the full list either way; it is happy to record a
-  // path in that state, so what is staged and what is committed stay one set.
-  const inIndex = new Set<string>()
-  for (const chunk of chunked(specs)) {
-    for (const known of splitZ(await git(root, ["ls-files", "-z", "--", ...chunk]))) {
-      inIndex.add(known)
-    }
-  }
   const stageable: string[] = []
+  const committable: string[] = []
   for (const path of paths) {
     // On disk covers what the run created; in the index covers what it edited or
     // deleted without staging — an unstaged deletion still has its index entry,
-    // and `add -A` is what turns that into a staged one.
-    if (inIndex.has(path) || (await exists(join(root, path)))) {
-      stageable.push(`:(top,literal)${path}`)
-    }
+    // and `add -A` is what turns that into a staged one. A path in neither is
+    // one the run removed with `git rm`: the deletion is already staged exactly
+    // right, and `add` would only fatal over it.
+    const staged = inIndex.has(path) || (await exists(join(root, path)))
+    if (staged) stageable.push(`:(top,literal)${path}`)
+    // `commit` reaches one step further back: it can record a path that is gone
+    // from the index and the worktree, as long as HEAD still has it to delete.
+    // A path missing from all three is a deletion some EARLIER commit already
+    // took — nothing about it is left to record, and naming it only makes git
+    // refuse.
+    if (staged || inHead.has(path)) committable.push(`:(top,literal)${path}`)
   }
+  if (committable.length === 0) {
+    throw new Error(
+      "nothing to commit — every path the run changed has already been committed",
+    )
+  }
+
   // Chunked because a pathspec per file is a long command line and Windows caps
   // one at about 32k characters. A run that touched three hundred files is
   // unusual and must not fail at the last step.
@@ -210,7 +219,7 @@ export async function commitRun(
     // One call, so the commit is atomic. If the pathspec list is too long for a
     // single command line this throws rather than committing a subset — a
     // partial commit of a reviewed change is worse than a failed one.
-    await git(root, ["commit", "-F", file, "--cleanup=whitespace", "--", ...specs])
+    await git(root, ["commit", "-F", file, "--cleanup=whitespace", "--", ...committable])
   } finally {
     await rm(file, { force: true })
   }
@@ -218,6 +227,24 @@ export async function commitRun(
 }
 
 const exists = (path: string) => access(path).then(() => true, () => false)
+
+/**
+ * Which of `paths` the given lister still knows about.
+ *
+ * Chunked for the same reason the `add` below is: one pathspec per file is a
+ * long command line, and Windows caps one at about 32k characters.
+ */
+async function matching(
+  root: string,
+  paths: readonly string[],
+  lister: readonly string[],
+): Promise<Set<string>> {
+  const found = new Set<string>()
+  for (const chunk of chunked(paths.map((p) => `:(top,literal)${p}`))) {
+    for (const path of splitZ(await git(root, [...lister, "--", ...chunk]))) found.add(path)
+  }
+  return found
+}
 
 /** Pathspecs grouped so no single command line gets near the platform limit. */
 function chunked(specs: readonly string[], maxChars = 6_000): string[][] {

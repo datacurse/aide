@@ -12,6 +12,7 @@
  * API key. Reaching for `@anthropic-ai/sdk` here would make commit messages the
  * one feature that silently requires ANTHROPIC_API_KEY.
  */
+import type { ModelSpend } from "@aide/protocol"
 import { query } from "@anthropic-ai/claude-agent-sdk"
 
 /**
@@ -60,6 +61,64 @@ function stripFence(text: string): string {
   return (fenced?.[1] ?? text).trim()
 }
 
+/**
+ * What one helper call produced, and what it cost.
+ *
+ * The spend used to be dropped on the floor, which was defensible while these
+ * calls happened inside an HTTP request nobody was accounting for. Committing is
+ * a run of its own now, and a run log ends in a `run.finished` carrying what the
+ * run spent — so a commit reporting $0 over two model calls would quietly
+ * under-report every receipt that adds those up.
+ */
+export interface Drafted {
+  text: string
+  costUsd: number
+  modelUsage: Record<string, ModelSpend>
+}
+
+/**
+ * Read a single-shot query to the end: the text it produced, and the accounting
+ * on its result message.
+ *
+ * The spend mapping is deliberately a copy of `toModelSpend` in agent.ts rather
+ * than an import of it. That file is the worker's half of the SDK and the daemon
+ * process has so far only ever needed its types; loading the whole run machinery
+ * to normalize five numbers would be a strange trade for a duplicate this size.
+ */
+async function drain(q: AsyncIterable<unknown>): Promise<Drafted> {
+  const chunks: string[] = []
+  let costUsd = 0
+  const modelUsage: Record<string, ModelSpend> = {}
+
+  for await (const raw of q) {
+    const message = raw as Record<string, unknown>
+    if (message["type"] === "result") {
+      costUsd = Number(message["total_cost_usd"] ?? 0)
+      const entries = Object.entries(
+        (message["modelUsage"] ?? {}) as Record<string, Record<string, unknown>>,
+      )
+      for (const [model, u] of entries) {
+        modelUsage[model] = {
+          inputTokens: Number(u["inputTokens"] ?? 0),
+          outputTokens: Number(u["outputTokens"] ?? 0),
+          cacheReadInputTokens: Number(u["cacheReadInputTokens"] ?? 0),
+          cacheCreationInputTokens: Number(u["cacheCreationInputTokens"] ?? 0),
+          costUSD: Number(u["costUSD"] ?? 0),
+        }
+      }
+      continue
+    }
+    if (message["type"] !== "assistant") continue
+    const content = message["message"] as { content?: unknown[] }
+    for (const b of content?.content ?? []) {
+      const block = b as Record<string, unknown>
+      if (block["type"] === "text") chunks.push(String(block["text"] ?? ""))
+    }
+  }
+
+  return { text: stripFence(chunks.join("").trim()), costUsd, modelUsage }
+}
+
 function buildPrompt(opts: DraftCommitMessageOptions): string {
   const truncated = opts.diff.length > MAX_DIFF_CHARS
   const diff = truncated ? opts.diff.slice(0, MAX_DIFF_CHARS) : opts.diff
@@ -94,45 +153,34 @@ function buildPrompt(opts: DraftCommitMessageOptions): string {
 }
 
 /**
- * Draft a commit message for a finished task. The caller shows it to the human
- * to edit before anything is committed, which is why this returns a string
- * rather than committing anything itself.
+ * Draft a commit message for a finished piece of work.
+ *
+ * Returns the text rather than committing anything: the caller is the commit
+ * run, which puts this on the transcript before it stages a single path.
  */
-export async function draftCommitMessage(opts: DraftCommitMessageOptions): Promise<string> {
-  const chunks: string[] = []
+export async function draftCommitMessage(opts: DraftCommitMessageOptions): Promise<Drafted> {
+  const drafted = await drain(
+    query({
+      prompt: buildPrompt(opts),
+      options: {
+        model: opts.model,
+        systemPrompt: SYSTEM,
+        // No tools at all. This is text generation, not a session: nothing to
+        // execute, nothing to permit, no working directory to reach.
+        tools: [],
+        allowedTools: [],
+        // SDK isolation mode. The project's CLAUDE.md would arrive as
+        // instructions to an agent, and this is not one — house style comes from
+        // the log above, which is evidence rather than instruction.
+        settingSources: [],
+        maxTurns: 1,
+        maxBudgetUsd: HELPER_BUDGET_USD,
+      },
+    }),
+  )
 
-  const q = query({
-    prompt: buildPrompt(opts),
-    options: {
-      model: opts.model,
-      systemPrompt: SYSTEM,
-      // No tools at all. This is text generation, not a session: nothing to
-      // execute, nothing to permit, no working directory to reach.
-      tools: [],
-      allowedTools: [],
-      // SDK isolation mode. The project's CLAUDE.md would arrive as instructions
-      // to an agent, and this is not one — house style comes from the log above,
-      // which is evidence rather than instruction.
-      settingSources: [],
-      maxTurns: 1,
-      maxBudgetUsd: HELPER_BUDGET_USD,
-    },
-  })
-
-  for await (const message of q) {
-    if (message.type !== "assistant") continue
-    const content = (message as unknown as Record<string, unknown>)["message"] as {
-      content?: unknown[]
-    }
-    for (const b of content?.content ?? []) {
-      const block = b as Record<string, unknown>
-      if (block["type"] === "text") chunks.push(String(block["text"] ?? ""))
-    }
-  }
-
-  const message = stripFence(chunks.join("").trim())
-  if (!message) throw new Error("the model returned an empty commit message")
-  return message
+  if (!drafted.text) throw new Error("the model returned an empty commit message")
+  return drafted
 }
 
 // ---------------------------------------------------------------------------
@@ -182,7 +230,7 @@ export interface DraftSpecOptions {
  * now do X". Anchoring it to the commit means the claim and the code that earns
  * it land in one reviewable change.
  */
-export async function draftSpecUpdate(opts: DraftSpecOptions): Promise<string> {
+export async function draftSpecUpdate(opts: DraftSpecOptions): Promise<Drafted> {
   const truncated = opts.diff.length > MAX_DIFF_CHARS
   const diff = truncated ? opts.diff.slice(0, MAX_DIFF_CHARS) : opts.diff
 
@@ -202,32 +250,21 @@ export async function draftSpecUpdate(opts: DraftSpecOptions): Promise<string> {
     diff,
   ].join("\n")
 
-  const chunks: string[] = []
-  const q = query({
-    prompt,
-    options: {
-      model: opts.model,
-      systemPrompt: SPEC_SYSTEM,
-      tools: [],
-      allowedTools: [],
-      settingSources: [],
-      maxTurns: 1,
-      // Larger than the commit-message budget because the whole file comes back,
-      // and a spec that grows past the cap would silently return truncated.
-      maxBudgetUsd: HELPER_BUDGET_USD * 4,
-    },
-  })
-
-  for await (const message of q) {
-    if (message.type !== "assistant") continue
-    const content = (message as unknown as Record<string, unknown>)["message"] as {
-      content?: unknown[]
-    }
-    for (const block of content?.content ?? []) {
-      const b = block as Record<string, unknown>
-      if (b["type"] === "text") chunks.push(String(b["text"] ?? ""))
-    }
-  }
-
-  return stripFence(chunks.join("").trim())
+  return await drain(
+    query({
+      prompt,
+      options: {
+        model: opts.model,
+        systemPrompt: SPEC_SYSTEM,
+        tools: [],
+        allowedTools: [],
+        settingSources: [],
+        maxTurns: 1,
+        // Larger than the commit-message budget because the whole file comes
+        // back, and a spec that grows past the cap would silently return
+        // truncated.
+        maxBudgetUsd: HELPER_BUDGET_USD * 4,
+      },
+    }),
+  )
 }

@@ -75,8 +75,10 @@ This file is what it currently does.
   off the board is invisible.
 - Records which conversation is on which row itself, at the moment the SDK names
   the session — the browser is not in that path.
-- Reviews a conversation's work in the chat itself: the diff, a commit message
-  drafted by Sonnet, and the spec update the change earns, all in one panel.
+- Commits a conversation's work as a run of its own, narrated live in its
+  transcript: reads the diff, drafts the message and the spec update with it,
+  then writes both. There is no panel to review either in first — the
+  transcript afterwards is the review.
 - Measures that diff against the conversation's checkpoint rather than against
   HEAD, so it is the agent's work and not the agent's work plus whatever was
   already uncommitted — and commits exactly the paths in it, leaving anything
@@ -84,15 +86,21 @@ This file is what it currently does.
 - Commits a file the run deleted, including one the run staged the deletion of
   itself with `git rm` — a path in neither the worktree nor the index is a fatal
   error to `git add`, and it used to take the whole commit down with it.
+- Skips a path whose deletion an earlier commit already took, rather than
+  refusing the commit. A long-lived conversation measures against a checkpoint
+  from before that commit, so it still names the file; git refuses a pathspec
+  matching nothing anywhere, and refuses the whole command with it. A run with
+  nothing but such paths is told that everything it changed is already in.
 - Names the files the run changed that were ALREADY modified before it started,
   because git cannot separate two people's edits inside one file and committing
   one takes both.
-- Writes the approved spec as part of the same commit, so the claim and the code
-  that earns it are one commit and one revert. An empty spec box leaves the file
-  alone rather than blanking it.
-- Commits that same work in one press from beside the send button, drafting the
-  message and the spec update itself and showing the subject it wrote. The diff
-  is read afterwards rather than before; the panel above is still the slow path.
+- Writes the drafted spec update as part of the same commit, so the claim and
+  the code that earns it are one commit and one revert. Leaves the file alone
+  when the diff earns no change to the capability list, rather than blanking it.
+- Starts that run from a button in the uncommitted rail, which holds the
+  project for its duration exactly like a turn — a second commit or a new
+  conversation is refused the same way a second turn would be — and can be
+  stopped before it writes, though not after.
 - Cannot merge anything. There is no branch to merge, and no `land`.
 - Stamps each commit with `Aide-Row` and `Aide-Session`, so the transcript is
   one command away long after the backlog line is gone.
@@ -112,9 +120,10 @@ This file is what it currently does.
 ## Git
 
 - Keeps a rail of uncommitted files on screen beside every pane, naming them and
-  the branch they are on. It has no message box and no buttons at all —
-  committing belongs to a conversation, which is the only thing that knows whose
-  work it is taking.
+  the branch they are on, with the one button that commits them. It still
+  commits a CONVERSATION's work rather than the rail's own — greyed out with a
+  reason when none is open, and it streams into that conversation's transcript
+  when pressed.
 - Leaves `.aide/todos.md` out of that list, because the daemon rewrites it and a
   commit is forbidden from taking it — counting it would light the indicator
   permanently.

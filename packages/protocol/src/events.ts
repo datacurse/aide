@@ -172,6 +172,32 @@ export type RunEventBody =
   | { type: "permission.resolved"; requestId: string; allowed: boolean; reason: string }
   /** Context occupancy after a turn, for the composer's meter. */
   | { type: "context.usage"; totalTokens: number; maxTokens: number; percentage: number }
+  /**
+   * A step of a commit, as it starts.
+   *
+   * Committing is not an agent and has no tool calls to watch, but it does spend
+   * ten seconds of model time drafting a message — and a commit you cannot watch
+   * is one you press twice. So it runs as a run of its own, and these are what
+   * it has instead of `tool.start`.
+   *
+   * Emitted when the step BEGINS and never closed: a step is over once anything
+   * else is in the log after it, which the reader can see for itself. A second
+   * event per step would say nothing the ordering does not.
+   */
+  | { type: "commit.step"; label: string }
+  /**
+   * The message the helper model wrote, and whether it also rewrote the spec.
+   *
+   * Shown rather than swallowed. Nobody typed this message, so the transcript is
+   * the only place it can be read — and reading it is the whole of the review
+   * that is left once the commit has already happened.
+   */
+  | { type: "commit.drafted"; message: string; model: string; specChanged: boolean }
+  /**
+   * What landed. `paths` is exactly what was staged, so the log answers "what
+   * did that button take" without a second call to git.
+   */
+  | { type: "commit.landed"; sha: string; paths: string[] }
   | {
       type: "run.retry"
       attempt: number

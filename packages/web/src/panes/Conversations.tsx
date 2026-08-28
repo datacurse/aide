@@ -18,7 +18,6 @@ import { WorkingBar } from "../Working.js"
 import { Confirm, Empty, PaneHeader } from "../ui.js"
 import { useRunStream } from "../useRunStream.js"
 import { useStickToBottom } from "../useStickToBottom.js"
-import { ReviewPanel } from "./Review.js"
 import { Transcript } from "./Transcript.js"
 
 /**
@@ -330,6 +329,7 @@ export function ConversationPane({
   openSessionId,
   pendingTodoId,
   uncommitted,
+  adoptRunId,
   onStarted,
   onChanged,
 }: {
@@ -348,6 +348,14 @@ export function ConversationPane({
    * the session, and there is no second chance to do it.
    */
   pendingTodoId?: string | null
+  /**
+   * A run started somewhere else that belongs on this transcript.
+   *
+   * The commit is the only one: it is pressed in the git rail, which is beside
+   * this pane rather than inside it, and it is this conversation's work being
+   * committed — so it streams here, where the work it is describing already is.
+   */
+  adoptRunId?: string | null
   /** A new chat learns its session id mid-turn; the URL needs to know. */
   onStarted?: (sessionId: string) => void
   /** A verdict rewrote the backlog, so the board and the list are both stale. */
@@ -373,9 +381,6 @@ export function ConversationPane({
    * tracked by definition.
    */
   const [tracked, setTracked] = useState(false)
-  /** The one-click commit: in flight, and what it produced. */
-  const [committing, setCommitting] = useState(false)
-  const [committed, setCommitted] = useState<{ sha: string; subject: string } | null>(null)
 
   const summary = view?.summary ?? null
   const sessionId = openSessionId ?? liveSessionId
@@ -401,7 +406,6 @@ export function ConversationPane({
     setRunId(null)
     setSent(new Map())
     setLiveSessionId(null)
-    setCommitted(null)
   }, [openSessionId])
 
   useEffect(() => {
@@ -420,6 +424,13 @@ export function ConversationPane({
       cancelled = true
     }
   }, [projectId, openSessionId])
+
+  // A run handed to us from outside. Unconditional, unlike the adoption below:
+  // it has to win over the id of a turn that has already finished, which is
+  // exactly the state the pane is in when you press commit.
+  useEffect(() => {
+    if (adoptRunId) setRunId(adoptRunId)
+  }, [adoptRunId])
 
   // Adopt a turn that was already running when this page loaded.
   //
@@ -529,10 +540,6 @@ export function ConversationPane({
   }) => {
     if (!projectId) return
     setError(null)
-    // The last commit's receipt belongs to the work that came before this
-    // message. Leaving it up would have it read as a report on the turn about to
-    // start.
-    setCommitted(null)
     // A first message is sent before the conversation has an id, so for the next
     // second or two the list has nothing to show for the thing now running —
     // unless the draft row is there to stand in for it. Usually it already is;
@@ -553,29 +560,6 @@ export function ConversationPane({
       setRunId(id)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
-    }
-  }
-
-  /**
-   * Commit what this conversation changed, message and all, in one press.
-   *
-   * The daemon drafts the message because nothing was typed — see the commit
-   * route. What comes back is shown rather than swallowed: a commit you did not
-   * write the message for is one you have to be able to read afterwards, and the
-   * git rail beside this is already redrawing itself empty.
-   */
-  const commitWork = async () => {
-    if (!projectId || !sessionId) return
-    setCommitting(true)
-    setError(null)
-    try {
-      const r = await api.commitChat(projectId, sessionId)
-      setCommitted({ sha: r.sha, subject: r.message.split("\n", 1)[0] ?? "" })
-      onChanged?.()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setCommitting(false)
     }
   }
 
@@ -667,18 +651,6 @@ export function ConversationPane({
         />
       )}
 
-      {/* Every conversation can produce a diff now — they all edit the project
-          directly — so this is gated on the conversation being open rather than
-          on it having a checkout of its own. A question simply shows an empty
-          diff, which is the honest answer to "what did this change". */}
-      {projectId && sessionId && summary && summary.status.state !== "closed" && (
-        <ReviewPanel
-          projectId={projectId}
-          sessionId={sessionId}
-          onCommitted={() => onChanged?.()}
-        />
-      )}
-
       {projectId && summary?.status && (
         <VerdictBar
           status={summary.status}
@@ -705,15 +677,6 @@ export function ConversationPane({
         />
       )}
 
-      {committed && (
-        <div className="flex shrink-0 items-baseline gap-2 border-t border-line bg-chrome px-3 py-1.5 font-sans text-[11px]">
-          <span className="shrink-0 text-diff-add-fg">committed {committed.sha.slice(0, 7)}</span>
-          <span className="min-w-0 truncate text-fg-muted" title={committed.subject}>
-            {committed.subject}
-          </span>
-        </div>
-      )}
-
       {projectId && (
         <Composer
           busy={busy}
@@ -731,18 +694,8 @@ export function ConversationPane({
           blocked={
             sessionId || busy || uncommitted === 0
               ? null
-              : `${uncommitted} uncommitted file${uncommitted === 1 ? "" : "s"} in this project. Commit that work — from the chat that made it — before starting another.`
+              : `${uncommitted} uncommitted file${uncommitted === 1 ? "" : "s"} in this project. Open the chat that made them and press commit in the rail on the right.`
           }
-          commit={
-            !sessionId
-              ? { kind: "hidden" }
-              : committing
-                ? { kind: "committing" }
-                : uncommitted === 0
-                  ? { kind: "nothing" }
-                  : { kind: "ready" }
-          }
-          onCommit={() => void commitWork()}
           onTracked={setTracked}
           onSend={(msg) => void send(msg)}
           onInterrupt={() => {
