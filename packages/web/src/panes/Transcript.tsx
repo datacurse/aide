@@ -1,12 +1,16 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react"
-import type { MessageImage, RunEvent, RunStatus, TaskStatus } from "@aide/protocol"
-import { api, type CommitResult, type DiffView, type TaskView } from "../api.js"
-import { useDoneChime } from "../chime.js"
-import { Diff } from "../Diff.js"
+import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import type { MessageImage, RunEvent, RunStatus } from "@aide/protocol"
 import { Markdown } from "../Markdown.js"
-import { Button, Empty, PaneHeader, STATUS_STYLE, money } from "../ui.js"
-import { useRunStream, type StreamState } from "../useRunStream.js"
-import { useStickToBottom } from "../useStickToBottom.js"
+import { Button, Empty, money } from "../ui.js"
+
+/**
+ * A run's event log, rendered as a conversation.
+ *
+ * Shared by every surface that shows one, because they are all the same thing:
+ * the daemon normalizes a replayed session file into exactly the events a live
+ * turn emits, so history and the message arriving right now render through one
+ * component rather than two that drift.
+ */
 
 /** tool.start and tool.end arrive separately; pair them into one line per call. */
 interface ToolLine {
@@ -19,15 +23,28 @@ interface ToolLine {
   ok: boolean | null
   summary: string
 }
-/** The project's setup command, run before the agent in a fresh worktree. */
-interface BootstrapLine {
-  kind: "bootstrap"
+/**
+ * The snapshot taken before the agent was let near the working tree.
+ *
+ * This row replaced the bootstrap row, and it is a much smaller thing on screen
+ * than what it replaced — a checkout and a dependency install used to be the
+ * longest wait in the product. It still gets a line because "what happened to my
+ * uncommitted work" has to be answerable from the transcript alone, and because
+ * the line carries the command that undoes the run.
+ */
+interface CheckpointLine {
+  kind: "checkpoint"
   seq: number
-  command: string
-  ok: boolean | null
-  exitCode: number | null
-  ms: number
-  output: string
+  ref: string
+  sha: string
+  restore: string
+  /**
+   * The conversation's baseline carries how much of the human's own work it is
+   * standing in front of; a turn boundary carries which turn it closed. Exactly
+   * one of the two is present, and which one decides how the row reads.
+   */
+  dirtyCount?: number
+  turn?: number
 }
 /** A tool call a chat turn is blocked on, paired with its answer if it has one. */
 interface PermissionLine {
@@ -61,9 +78,8 @@ type Line =
   | OutcomeLine
   | { kind: "text"; seq: number; text: string; nested: boolean }
   | { kind: "thinking"; seq: number; text: string }
-  | { kind: "queued"; seq: number; position: number }
   | UserLine
-  | BootstrapLine
+  | CheckpointLine
   | { kind: "denied"; seq: number; name: string; reason: string }
   | PermissionLine
   | { kind: "retry"; seq: number; text: string }
@@ -99,7 +115,6 @@ function humanizeError(message: string): string {
 function toLines(events: RunEvent[]): Line[] {
   const lines: Line[] = []
   const byToolId = new Map<string, ToolLine>()
-  let bootstrap: BootstrapLine | null = null
   const byRequestId = new Map<string, PermissionLine>()
 
   for (const e of events) {
@@ -136,32 +151,25 @@ function toLines(events: RunEvent[]): Line[] {
         }
         break
       }
-      case "run.queued":
-        lines.push({ kind: "queued", seq: e.seq, position: e.position })
-        break
-      case "bootstrap.started": {
-        const line: BootstrapLine = {
-          kind: "bootstrap",
+      case "checkpoint.taken":
+        lines.push({
+          kind: "checkpoint",
           seq: e.seq,
-          command: e.command,
-          ok: null,
-          exitCode: null,
-          ms: 0,
-          output: "",
-        }
-        bootstrap = line
-        lines.push(line)
+          ref: e.ref,
+          sha: e.sha,
+          dirtyCount: e.dirtyCount,
+          restore: e.restore,
+        })
         break
-      }
-      case "bootstrap.finished":
-        // Paired into the started line, the same way tool.end folds into
-        // tool.start, so a completed install is one row rather than two.
-        if (bootstrap) {
-          bootstrap.ok = e.ok
-          bootstrap.exitCode = e.exitCode
-          bootstrap.ms = e.durationMs
-          bootstrap.output = e.output
-        }
+      case "turn.checkpoint":
+        lines.push({
+          kind: "checkpoint",
+          seq: e.seq,
+          ref: e.ref,
+          sha: e.sha,
+          turn: e.n,
+          restore: e.restore,
+        })
         break
       case "permission.request": {
         const line: PermissionLine = {
@@ -404,17 +412,18 @@ function PermissionRow({
   )
 }
 
-/** Mirrors ToolRow: one collapsed row, click to see why it failed. */
-function BootstrapRow({ line }: { line: BootstrapLine }) {
+/**
+ * Mirrors ToolRow: one collapsed row, click for the command that goes back here.
+ *
+ * Two things render through it — the snapshot taken before the conversation
+ * started, and the boundary at the end of each turn that changed something — on
+ * purpose. They are the same object doing the same job at different
+ * granularities, and giving them two looks would suggest one of them is not a
+ * place you can return to.
+ */
+function CheckpointRow({ line }: { line: CheckpointLine }) {
   const [open, setOpen] = useState(false)
-  const mark =
-    line.ok === null ? (
-      <span className="text-info">▸</span>
-    ) : line.ok ? (
-      <span className="text-ok">✓</span>
-    ) : (
-      <span className="text-err">✗</span>
-    )
+  const isTurn = line.turn !== undefined
   return (
     <div>
       <button
@@ -422,210 +431,47 @@ function BootstrapRow({ line }: { line: BootstrapLine }) {
         onClick={() => setOpen((v) => !v)}
         className="flex w-full min-w-0 items-baseline gap-2 rounded px-1 py-0.5 text-left hover:bg-hover"
       >
-        {mark}
-        <span className="shrink-0 text-syn-keyword">bootstrap</span>
-        <span className="min-w-0 truncate text-syn-string">{line.command}</span>
-        {line.ok !== null && (
+        <span className="text-ok">✓</span>
+        <span className="shrink-0 text-syn-keyword">
+          {isTurn ? `after turn ${line.turn}` : "checkpoint"}
+        </span>
+        <span className="min-w-0 truncate text-syn-string">{line.sha.slice(0, 7)}</span>
+        {/* Only when there was something to protect. "0 files already changed"
+            on every clean run would train everyone to stop reading the row. */}
+        {!!line.dirtyCount && (
           <span className="shrink-0 text-fg-dim">
-            {(line.ms / 1000).toFixed(1)}s
-            {line.ok ? "" : ` · exit ${line.exitCode ?? "killed"}`}
+            {line.dirtyCount} file{line.dirtyCount === 1 ? "" : "s"} already changed
           </span>
         )}
       </button>
       {open && (
-        <pre className="mt-1 mb-2 max-h-64 overflow-auto rounded-sm bg-chrome p-2 text-[11px] leading-relaxed whitespace-pre-wrap text-fg-muted">
-          {line.output || "(no output captured)"}
-        </pre>
+        <div className="mt-1 mb-2 rounded-sm bg-chrome p-2">
+          <pre className="overflow-auto text-[11px] leading-relaxed whitespace-pre-wrap text-fg-muted">
+            {line.restore}
+          </pre>
+          {/* Said here rather than left to be discovered. A restore that quietly
+              leaves later files behind reads as a failed undo. */}
+          <p className="mt-1 font-sans text-[10px] text-fg-dim">
+            {isTurn
+              ? "Puts the tree back to how it stood when this turn ended. What later turns changed or deleted goes back; what they created stays."
+              : "Puts back what the run changed or deleted. Files it created stay — they are listed in the diff."}
+          </p>
+        </div>
       )}
     </div>
   )
 }
 
-const STREAM_LABEL: Record<StreamState, string> = {
-  idle: "",
-  connecting: "connecting…",
-  live: "live",
-  reconnecting: "reconnecting…",
-}
-
-/**
- * Statuses whose worktree is worth offering to commit.
- *
- * `cancelled` and `failed` are in here deliberately. A run you interrupted, or
- * one that died on turn nine, still leaves real work on disk — refusing to let
- * you keep it would mean the only way to salvage a partial run is to leave aide
- * and use git by hand.
- */
-const ACCEPTABLE = new Set<TaskStatus>(["needs-review", "committed", "cancelled", "failed"])
-
-/**
- * The last gate. A run stopping is not the same as its work being accepted, and
- * this is where the difference gets resolved.
- *
- * Drafting is a separate step from committing on purpose: the message costs a
- * model call and a few seconds, and it lands in a textarea rather than straight
- * into a commit, because the human editing it is the review. Landing is a
- * second button for the same reason — a commit on a task branch is recoverable,
- * and a merge is what the rest of the repo has to live with.
- */
-function AcceptBar({
-  projectId,
-  task,
-  onChanged,
-}: {
-  projectId: string
-  task: TaskView
-  onChanged: () => void
-}) {
-  const [draft, setDraft] = useState<string | null>(null)
-  const [drafter, setDrafter] = useState<string | null>(null)
-  const [branch, setBranch] = useState<string | null>(null)
-  const [result, setResult] = useState<CommitResult | null>(null)
-  const [busy, setBusy] = useState<"draft" | "commit" | "land" | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  // Switching tasks must not carry the previous task's draft across — it would
-  // read as a suggestion for work it was never written about.
-  useEffect(() => {
-    setDraft(null)
-    setResult(null)
-    setError(null)
-  }, [task.id])
-
-  useEffect(() => {
-    void api
-      .branch(projectId)
-      .then((r) => setBranch(r.branch))
-      .catch(() => setBranch(null))
-  }, [projectId])
-
-  const attempt = async (kind: "draft" | "commit" | "land", fn: () => Promise<void>) => {
-    setBusy(kind)
-    setError(null)
-    try {
-      await fn()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const sha = task.commits.at(-1)
-
-  return (
-    <div className="shrink-0 border-t border-line bg-chrome px-3 py-2 font-sans text-[11px]">
-      {task.status === "committed" ? (
-        <div className="flex items-center gap-3">
-          <span className="text-diff-add-fg">committed</span>
-          {sha && (
-            <code className="font-mono text-fg-muted" title={sha}>
-              {sha.slice(0, 8)}
-            </code>
-          )}
-          {result?.journal && <span className="min-w-0 truncate text-fg-dim">{result.journal}</span>}
-          <div className="ml-auto flex items-center gap-2">
-            <span className="text-fg-dim">
-              {branch ? `merges into ${branch}` : "merges into the checked-out branch"}
-            </span>
-            <Button
-              tone="primary"
-              disabled={busy !== null}
-              title="Merge the task branch with --no-ff and remove the worktree"
-              onClick={() =>
-                attempt("land", async () => {
-                  const landed = await api.land(projectId, task.id)
-                  if (landed.warning) setError(landed.warning)
-                  onChanged()
-                })
-              }
-            >
-              {busy === "land" ? "landing…" : `land${branch ? ` into ${branch}` : ""}`}
-            </Button>
-          </div>
-        </div>
-      ) : draft === null ? (
-        <div className="flex items-center gap-3">
-          <span className={STATUS_STYLE[task.status].text}>{STATUS_STYLE[task.status].label}</span>
-          <span className="text-fg-dim">
-            Read the diff, then write a commit message for it.
-          </span>
-          <div className="ml-auto">
-            <Button
-              disabled={busy !== null}
-              onClick={() =>
-                attempt("draft", async () => {
-                  const d = await api.draftCommit(projectId, task.id)
-                  setDrafter(d.model)
-                  setDraft(d.message)
-                })
-              }
-            >
-              {busy === "draft" ? "drafting…" : "write commit message"}
-            </Button>
-          </div>
-        </div>
-      ) : (
-        <div className="space-y-2">
-          <textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            rows={Math.min(12, Math.max(4, draft.split(/\n/).length + 1))}
-            spellCheck={false}
-            className="w-full resize-y rounded border border-line-soft bg-input px-2 py-1 font-mono text-xs leading-relaxed outline-none focus:border-accent"
-          />
-          <div className="flex items-center gap-3">
-            <span className="text-fg-dim">
-              {drafter ? `drafted by ${drafter} — edit freely; ` : ""}
-              Aide-Task and Aide-Run trailers are appended on commit
-            </span>
-            <div className="ml-auto flex gap-1.5">
-              <Button disabled={busy !== null} onClick={() => setDraft(null)}>
-                discard
-              </Button>
-              <Button
-                tone="primary"
-                disabled={busy !== null || !draft.trim()}
-                onClick={() =>
-                  attempt("commit", async () => {
-                    const committed = await api.commit(projectId, task.id, draft)
-                    setResult(committed)
-                    setDraft(null)
-                    if (committed.warning) setError(committed.warning)
-                    onChanged()
-                  })
-                }
-              >
-                {busy === "commit" ? "committing…" : "commit"}
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
-      {error && <p className="mt-2 whitespace-pre-wrap text-err">{error}</p>}
-    </div>
-  )
-}
-
-
-/** One line of the transcript, as its own function so the grouping below can
- * render lines without owning a copy of this switch. */
 function renderLine(
   line: Line,
   onPermission?: (requestId: string, allowed: boolean) => void,
 ): ReactNode {
   if (line.kind === "tool") return <ToolRow key={line.seq} line={line} />
-  if (line.kind === "bootstrap") return <BootstrapRow key={line.seq} line={line} />
+  if (line.kind === "checkpoint") return <CheckpointRow key={line.seq} line={line} />
   if (line.kind === "thinking")
     return (
       <p key={line.seq} className="px-1 break-words whitespace-pre-wrap text-syn-comment italic">
         {line.text}
-      </p>
-    )
-  if (line.kind === "queued")
-    return (
-      <p key={line.seq} className="px-1 text-fg-dim">
-        ◦ queued{line.position > 1 ? ` behind ${line.position - 1}` : ""}
       </p>
     )
   if (line.kind === "user") return <UserRow key={line.seq} line={line} />
@@ -686,8 +532,8 @@ function renderLine(
  * under the new one. A box per exchange means each question is pushed out by the
  * next, which is the behaviour you already know from an editor.
  *
- * Anything before the first question — a task run's bootstrap row, say — is its
- * own leading box, so it is never adopted by a question it came before.
+ * Anything before the first question — the checkpoint row, say — is its own
+ * leading box, so it is never adopted by a question it came before.
  */
 function groupByQuestion(lines: Line[]): Line[][] {
   const groups: Line[][] = []
@@ -744,182 +590,5 @@ export function Transcript({
         </section>
       ))}
     </div>
-  )
-}
-
-export function RunPane({
-  projectId,
-  task,
-  runId,
-  onChanged,
-}: {
-  projectId: string | null
-  task: TaskView | null
-  runId: string | null
-  onChanged: () => void
-}) {
-  const { events, state } = useRunStream(runId)
-  const [tab, setTab] = useState<"stream" | "diff">("stream")
-  const [diff, setDiff] = useState<DiffView | null>(null)
-  const [busy, setBusy] = useState(false)
-  const { scroller, content, toBottom, toTop, onScroll } = useStickToBottom()
-
-  // The two tabs want opposite ends. A transcript is read newest-last, so it
-  // follows the tail; a diff is read top-down, and landing at the bottom of one
-  // is disorienting. Both panes share a scroller, so the tab has to say which.
-  useEffect(() => {
-    if (tab === "diff") toTop()
-    else toBottom()
-  }, [tab, toBottom, toTop])
-
-
-  const lines = useMemo(() => toLines(events), [events])
-
-  // The two tabs want opposite ends. A transcript is read newest-last, so it
-  // follows the tail; a diff is read top-down, and landing at the bottom of one
-  // is disorienting. Both panes share a scroller, so the tab has to say which.
-  useEffect(() => {
-    if (tab === "diff") toTop()
-    else toBottom()
-  }, [tab, toBottom, toTop])
-  const finished = useMemo(
-    () => events.find((e) => e.type === "run.finished"),
-    [events],
-  ) as Extract<RunEvent, { type: "run.finished" }> | undefined
-  const isActive = !!task?.activeRunId
-
-  // A task run is the case the chime exists for: nobody watches a worktree
-  // build for six minutes. `isActive` comes from the daemon rather than from a
-  // terminal event, so a run that died without logging one still rings.
-  useDoneChime(isActive, runId)
-
-  const outcome = finished
-    ? describeOutcome({
-        kind: "outcome",
-        seq: finished.seq,
-        status: finished.status,
-        subtype: finished.subtype,
-        turns: finished.numTurns,
-        ms: finished.durationMs,
-        cost: finished.totalCostUsd,
-      })
-    : null
-
-  useEffect(() => {
-    if (tab !== "diff" || !projectId || !task) return
-    setDiff(null)
-    void api.diff(projectId, task.id).then(setDiff).catch(() => setDiff(null))
-  }, [tab, projectId, task?.id, finished?.seq])
-
-  if (!task) {
-    return (
-      <section className="flex min-h-0 min-w-0 flex-1 flex-col bg-editor">
-        <PaneHeader title="run" />
-        <Empty>Select a task to see its run.</Empty>
-      </section>
-    )
-  }
-
-  return (
-    <section className="flex min-h-0 min-w-0 flex-1 flex-col bg-editor">
-      <PaneHeader title={`run · ${task.title}`}>
-        <div className="mr-1 flex overflow-hidden rounded border border-line">
-          {(["stream", "diff"] as const).map((t) => (
-            <button
-              key={t}
-              type="button"
-              onClick={() => setTab(t)}
-              className={`px-2 py-0.5 text-xs ${
-                tab === t ? "bg-input text-fg" : "text-fg-muted hover:text-fg"
-              }`}
-            >
-              {t}
-            </button>
-          ))}
-        </div>
-        {isActive ? (
-          <Button
-            tone="danger"
-            disabled={busy}
-            onClick={async () => {
-              setBusy(true)
-              try {
-                await api.interrupt(task.activeRunId!)
-              } finally {
-                setBusy(false)
-                onChanged()
-              }
-            }}
-          >
-            interrupt
-          </Button>
-        ) : (
-          <Button
-            tone="primary"
-            disabled={busy || !projectId}
-            onClick={async () => {
-              setBusy(true)
-              try {
-                await api.runTask(projectId!, task.id)
-              } finally {
-                setBusy(false)
-                onChanged()
-              }
-            }}
-          >
-            {task.runs.length ? "run again" : "run"}
-          </Button>
-        )}
-      </PaneHeader>
-
-      <div
-        ref={scroller}
-        onScroll={onScroll}
-        className="flex-1 overflow-x-hidden overflow-y-auto px-3 py-2 font-mono text-xs leading-relaxed"
-      >
-        <div ref={content}>
-        {tab === "diff" ? (
-          diff === null ? (
-            <Empty>Loading diff…</Empty>
-          ) : diff.diff.trim() === "" ? (
-            <Empty>No changes in the worktree yet.</Empty>
-          ) : (
-            <Diff patch={diff.diff} />
-          )
-        ) : !runId ? (
-          <Empty>This task has not run yet.</Empty>
-        ) : lines.length === 0 ? (
-          <Empty>Waiting for the first event…</Empty>
-        ) : (
-          <Transcript events={events} />
-        )}
-        </div>
-      </div>
-
-      {projectId && !isActive && ACCEPTABLE.has(task.status) && (
-        <AcceptBar projectId={projectId} task={task} onChanged={onChanged} />
-      )}
-
-      <footer className="flex h-[22px] shrink-0 items-center gap-4 border-t border-line bg-chrome px-3 font-sans text-[11px] text-fg-muted">
-        {finished && outcome ? (
-          <>
-            <span className={outcome.className}>{outcome.label}</span>
-            <span>{finished.numTurns} turns</span>
-            <span>{(finished.durationMs / 1000).toFixed(1)}s</span>
-            <span title="Client-side estimate from a price table bundled into the SDK. Not billing data.">
-              ~{money(finished.totalCostUsd)} est.
-            </span>
-            {finished.permissionDenials.length > 0 && (
-              <span className="text-warn">{finished.permissionDenials.length} denied</span>
-            )}
-            <span className="ml-auto text-fg-dim" title="raw SDK result subtype">
-              {finished.subtype}
-            </span>
-          </>
-        ) : (
-          <span>{STREAM_LABEL[state]}</span>
-        )}
-      </footer>
-    </section>
   )
 }

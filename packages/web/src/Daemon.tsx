@@ -66,7 +66,7 @@ export function DaemonBar({ health, onChanged }: { health: Health | null; onChan
   if (!supported) {
     return (
       <span className="text-[11px] text-fg-dim">
-        {health ? `${health.taskModel} · ${health.maxConcurrentRuns} concurrent` : "daemon offline"}
+        {health ? `${health.taskModel} · one run at a time` : "daemon offline"}
       </span>
     )
   }
@@ -102,7 +102,7 @@ export function DaemonBar({ health, onChanged }: { health: Health | null; onChan
    * where a silent skew would waste an afternoon — a daemon busy enough that
    * restarting it would destroy work, and a daemon this dev server does not own.
    */
-  const inFlight = (health?.busy.runs ?? 0) + (health?.busy.chats ?? 0)
+  const inFlight = health?.busy.chats ?? 0
   const staleNote =
     health?.stale !== true
       ? null
@@ -127,7 +127,7 @@ export function DaemonBar({ health, onChanged }: { health: Health | null; onChan
     <div className="relative flex items-center gap-2">
       {health && state !== "stopped" && (
         <span className="text-[11px] text-fg-dim">
-          {health.taskModel} · {health.maxConcurrentRuns} concurrent · {health.maxBudgetUsd}$/run cap
+          {health.taskModel} · one run at a time
         </span>
       )}
 

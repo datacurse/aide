@@ -11,9 +11,14 @@
 
 /** What a restart would interrupt. All zero means restarting costs nothing. */
 export interface DaemonBusy {
-  /** Task runs in flight, queued ones included — shutdown cancels those too. */
-  runs: number
-  /** Chat turns mid-answer. */
+  /**
+   * Chat turns mid-answer, across every project.
+   *
+   * There is no separate `runs` count any more. It was a leftover from the task
+   * queue and had been hardcoded to zero since conversations became the unit of
+   * work — a field that always reads "nothing running" is worse than no field,
+   * because this is the number a restart decision is made from.
+   */
   chats: number
   /** Mutating HTTP requests that have not answered yet. See below. */
   writes: number
@@ -22,8 +27,6 @@ export interface DaemonBusy {
 export interface Health {
   ok: boolean
   taskModel: string
-  maxConcurrentRuns: number
-  maxBudgetUsd: number
 
   /**
    * Fingerprint of the source this process booted from, and of the source on
@@ -66,9 +69,12 @@ export interface Health {
  *
  * A pure function, deliberately, and not because purity is nice: this is the
  * rule whose previous version — chokidar firing on a file write — killed a
- * daemon three lines into a land, stranding the task at `committed` with an
- * orphaned worktree. That is not a rule to leave untested inside a closure that
- * also does HTTP.
+ * daemon three lines into a commit, leaving the work half-staged. That is not a
+ * rule to leave untested inside a closure that also does HTTP.
+ *
+ * It carries more weight than it used to. Runs work the project's own checkout,
+ * so a daemon developing its own repository has its source rewritten by the
+ * agents it is supervising as a matter of routine.
  *
  * `previousSourceId` is the fingerprint seen on the last check. Requiring it to
  * match is what stops a restart per tick while a `git merge` is part way through
@@ -94,10 +100,9 @@ export function restartDecision(
     return { restart: false, reason: "source is still changing" }
   }
 
-  const { runs, chats, writes } = health.busy
-  if (runs + chats + writes > 0) {
+  const { chats, writes } = health.busy
+  if (chats + writes > 0) {
     const parts = [
-      runs > 0 ? `${runs} run${runs > 1 ? "s" : ""}` : null,
       chats > 0 ? `${chats} chat turn${chats > 1 ? "s" : ""}` : null,
       writes > 0 ? `${writes} request${writes > 1 ? "s" : ""}` : null,
     ].filter(Boolean)

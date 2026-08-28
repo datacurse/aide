@@ -50,6 +50,16 @@ const PERMISSION_MODE = /"permissionMode"\s*:\s*"([a-zA-Z]+)"/g
 /** `.aide/worktrees/task-0004` anywhere in the path means this ran for a task. */
 const TASK_CWD = new RegExp(`${STATE_DIR}[\\\\/]worktrees[\\\\/]task-(\\d+)`, "i")
 
+/**
+ * History only, and kept for exactly that reason.
+ *
+ * Nothing aide runs can produce a `task` any more — every conversation runs in
+ * the project root now, so every NEW session classifies as a chat. But the
+ * session store is on disk and shared with the CLI, and it still holds the runs
+ * that happened back when a task meant a worktree. Deleting this would not
+ * simplify anything; it would relabel those old transcripts as something they
+ * were not.
+ */
 function classify(cwd: string): { kind: ConversationSummary["kind"]; taskId: string | null } {
   const hit = TASK_CWD.exec(cwd)
   return hit?.[1] ? { kind: "task", taskId: hit[1] } : { kind: "chat", taskId: null }
@@ -133,7 +143,6 @@ export async function getConversation(
       taskId: summary.taskId ?? "",
       projectId: project.id,
       cwd: summary.cwd,
-      worktree: summary.cwd,
       fallbackModel: "",
     })) {
       seq += 1

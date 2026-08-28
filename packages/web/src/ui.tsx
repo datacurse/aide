@@ -1,29 +1,3 @@
-import type { TaskStatus } from "@aide/protocol"
-
-/**
- * Status colours follow VS Code's own conventions rather than a fresh scheme:
- * blue for in-progress (progressBar), the git-decoration yellow for "modified,
- * needs your attention", green for settled, red for failed.
- *
- * `committed` borrows gitDecoration.addedResourceForeground — the muted green
- * VS Code uses for staged-but-not-yet-in-history. It reads as adjacent to `done`
- * without claiming to be it, which is exactly the distinction: the work is safe
- * on its branch, and it has not landed.
- */
-export const STATUS_STYLE: Record<TaskStatus, { dot: string; text: string; label: string }> = {
-  queued: { dot: "bg-fg-dim", text: "text-fg-dim", label: "queued" },
-  running: { dot: "bg-info animate-pulse", text: "text-info", label: "running" },
-  "needs-review": { dot: "bg-warn", text: "text-warn", label: "needs review" },
-  committed: { dot: "bg-diff-add-fg", text: "text-diff-add-fg", label: "committed" },
-  done: { dot: "bg-ok", text: "text-ok", label: "done" },
-  failed: { dot: "bg-err", text: "text-err", label: "failed" },
-  cancelled: { dot: "bg-fg-dim/50", text: "text-fg-dim", label: "cancelled" },
-}
-
-export function StatusDot({ status }: { status: TaskStatus }) {
-  return <span className={`inline-block size-2 shrink-0 rounded-full ${STATUS_STYLE[status].dot}`} />
-}
-
 export function Button({
   children,
   onClick,
@@ -78,6 +52,67 @@ export function Empty({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex h-full items-center justify-center p-6 text-center font-sans text-xs leading-relaxed text-fg-dim">
       {children}
+    </div>
+  )
+}
+
+/**
+ * Are you sure?
+ *
+ * For the few actions that throw work away rather than move it along. Not
+ * `window.confirm`: that blocks the whole tab, which on a page whose whole
+ * premise is that runs keep going in the background is the wrong thing to do —
+ * and it renders in the OS chrome, so the one dialog aide shows would be the one
+ * thing on screen that looks nothing like aide.
+ *
+ * The mounting component owns `open`, so the question is asked by whatever knows
+ * what is about to happen and can name it.
+ */
+export function Confirm({
+  title,
+  detail,
+  confirmLabel = "confirm",
+  tone = "danger",
+  onConfirm,
+  onCancel,
+}: {
+  title: string
+  detail?: string
+  confirmLabel?: string
+  tone?: "default" | "primary" | "danger"
+  onConfirm: () => void
+  onCancel: () => void
+}) {
+  return (
+    // Escape cancels, and the backdrop is a click target for the same reason:
+    // the safe answer has to be the easy one to reach.
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6"
+      onClick={onCancel}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") onCancel()
+      }}
+      role="presentation"
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        // autoFocus so Escape reaches the handler above without a click first.
+        autoFocus
+        tabIndex={-1}
+        onClick={(e) => e.stopPropagation()}
+        className="w-[24rem] max-w-full rounded border border-line bg-chrome p-4 font-sans shadow-lg outline-none"
+      >
+        <p className="text-[13px] text-fg">{title}</p>
+        {detail && <p className="mt-1.5 text-[11px] leading-relaxed text-fg-dim">{detail}</p>}
+        <div className="mt-4 flex justify-end gap-1.5">
+          <Button onClick={onCancel}>cancel</Button>
+          <Button tone={tone} onClick={onConfirm}>
+            {confirmLabel}
+          </Button>
+        </div>
+      </div>
     </div>
   )
 }

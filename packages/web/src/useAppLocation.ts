@@ -20,7 +20,7 @@ import { useCallback, useEffect, useState } from "react"
 
 const REMEMBERED = "aide.location"
 
-export const PANES = ["tasks", "chats", "git"] as const
+export const PANES = ["board", "chats", "git"] as const
 export type Pane = (typeof PANES)[number]
 
 /** What the `git` pane shows when nothing is selected: the uncommitted work. */
@@ -29,7 +29,6 @@ export const WORKING = "working"
 export interface AppLocation {
   projectId: string | null
   pane: Pane
-  taskId: string | null
   /** null in the `chats` pane means a new conversation. */
   sessionId: string | null
   /** A commit sha, or null for the working tree. */
@@ -38,25 +37,24 @@ export interface AppLocation {
 
 const EMPTY: AppLocation = {
   projectId: null,
-  pane: "tasks",
-  taskId: null,
+  pane: "board",
   sessionId: null,
   sha: null,
 }
 
 export function parseLocation(hash: string): AppLocation {
-  // "#/p/<projectId>/tasks/<taskId>", "#/p/<projectId>/chats/<sessionId>" or
+  // "#/p/<projectId>/board", "#/p/<projectId>/chats/<sessionId>" or
   // "#/p/<projectId>/git/<sha>".
   const parts = hash.replace(/^#\/?/, "").split("/").filter(Boolean)
   if (parts[0] !== "p" || !parts[1]) return EMPTY
 
   const named = parts[2] as Pane | undefined
-  const pane: Pane = named && PANES.includes(named) ? named : "tasks"
+  // The board is the front door: it is the one view that answers "what now".
+  const pane: Pane = named && PANES.includes(named) ? named : "board"
   const id = parts[3] ?? null
   return {
     projectId: parts[1],
     pane,
-    taskId: pane === "tasks" ? id : null,
     sessionId: pane === "chats" ? id : null,
     // `working` is spelled out in the URL rather than left implicit, so a link
     // to the uncommitted diff is a link to something rather than to a default
@@ -67,8 +65,7 @@ export function parseLocation(hash: string): AppLocation {
 
 export function formatLocation(loc: AppLocation): string {
   if (!loc.projectId) return "#/"
-  const id =
-    loc.pane === "chats" ? loc.sessionId : loc.pane === "git" ? (loc.sha ?? WORKING) : loc.taskId
+  const id = loc.pane === "chats" ? loc.sessionId : loc.pane === "git" ? (loc.sha ?? WORKING) : null
   return `#/p/${loc.projectId}/${loc.pane}${id ? `/${id}` : ""}`
 }
 
@@ -113,10 +110,9 @@ export function useAppLocation(): [AppLocation, (patch: Partial<AppLocation>) =>
   const navigate = useCallback((patch: Partial<AppLocation>) => {
     setLoc((prev) => {
       const next = { ...prev, ...patch }
-      // Selecting a different project cannot keep the old selections: a task id,
-      // a session id or a commit sha from another project resolves to nothing.
+      // Selecting a different project cannot keep the old selections: a session
+      // id or a commit sha from another project resolves to nothing.
       if (patch.projectId !== undefined && patch.projectId !== prev.projectId) {
-        next.taskId = null
         next.sessionId = null
         next.sha = null
       }

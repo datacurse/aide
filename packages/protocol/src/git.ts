@@ -88,11 +88,11 @@ export interface GitCommit {
   parents: string[]
   subject: string
   /**
-   * Task ids from `Aide-Task` trailers. This is what makes history navigable
+   * Board row ids from `Aide-Row` trailers. This is what makes history navigable
    * back to the task that asked for a commit, which is the whole reason
    * `withTrailers` writes them.
    */
-  tasks: string[]
+  rows: string[]
 }
 
 /**

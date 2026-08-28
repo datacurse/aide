@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useState } from "react"
-import { api, type Health, type ProjectView, type TaskView } from "./api.js"
+import type { BoardRow } from "@aide/protocol"
+import { api, type BoardView, type Health, type ProjectView } from "./api.js"
 import { CHIME_KEY } from "./chime.js"
 import { DaemonBar } from "./Daemon.js"
-import { carryDraft, draftKey, openNewChat } from "./drafts.js"
+import { carryDraft, draftKey, openNewChat, readDraft, saveDraft } from "./drafts.js"
 import { PANES, useAppLocation } from "./useAppLocation.js"
 import { useRemembered } from "./useRemembered.js"
+import { BoardList, BoardSummary, SpecPane } from "./panes/Board.js"
 import { ConversationList, ConversationPane } from "./panes/Conversations.js"
 import { GitList, GitPane } from "./panes/Git.js"
-import { RunPane } from "./panes/Run.js"
-import { Button, Empty, PaneHeader, StatusDot, STATUS_STYLE } from "./ui.js"
+import { Button, Empty, PaneHeader } from "./ui.js"
 
 /** While anything is in flight the lists need to move on their own. */
 const POLL_MS = 1500
@@ -16,18 +17,24 @@ const POLL_MS = 1500
 export function App() {
   const [health, setHealth] = useState<Health | null>(null)
   const [projects, setProjects] = useState<ProjectView[]>([])
-  const [tasks, setTasks] = useState<TaskView[]>([])
+  const [board, setBoard] = useState<BoardView>({ rows: [], spec: "", warnings: [] })
   const [error, setError] = useState<string | null>(null)
-  const [composing, setComposing] = useState(false)
   /**
-   * Which project, which list, which task or conversation — all of it in the
+   * Which project, which list, which conversation — all of it in the
    * URL, so a reload lands you back where you were and Back steps through what
    * you had open. See useAppLocation.
    */
-  const [{ projectId, pane: mode, taskId, sessionId, sha }, navigate] = useAppLocation()
+  const [{ projectId, pane: mode, sessionId, sha }, navigate] = useAppLocation()
   /** Bumped to refetch the conversation list — a new chat has no id until it starts. */
   const [conversationsSeq, setConversationsSeq] = useState(0)
-  const [draft, setDraft] = useState({ title: "", body: "" })
+  /**
+   * The board row a new chat was being started from.
+   *
+   * State rather than a ref because the composer renders from it — a chat opened
+   * from a row is tracked by definition — and it is sent with the first message,
+   * because the row is paired with the session the moment the SDK names it.
+   */
+  const [pendingRow, setPendingRow] = useState<string | null>(null)
   /**
    * Whether a finished run makes a sound. Remembered rather than a session
    * toggle: a chime you have to silence again after every reload is worse than
@@ -52,12 +59,14 @@ export function App() {
     try {
       const next = await api.projects()
       setProjects(next)
-      if (projectId) setTasks(await api.tasks(projectId))
+      // Only while the board is on screen. It reads two files off disk per poll
+      // and no other pane has any use for the result.
+      if (projectId && mode === "board") setBoard(await api.board(projectId))
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
-  }, [projectId])
+  }, [projectId, mode])
 
   useEffect(() => {
     void refresh()
@@ -66,10 +75,6 @@ export function App() {
   }, [refresh])
 
   const project = projects.find((p) => p.id === projectId) ?? null
-  const task = tasks.find((t) => t.id === taskId) ?? null
-  // Prefer the live run; fall back to the most recent one so a finished task
-  // still shows its transcript.
-  const runId = task?.activeRunId ?? task?.runs.at(-1) ?? null
 
   const addProject = async () => {
     const path = window.prompt("Absolute path to a git repository")
@@ -83,18 +88,61 @@ export function App() {
     }
   }
 
-  const createTask = async () => {
-    if (!projectId || !draft.title.trim()) return
+  const reloadBoard = async () => {
+    if (projectId) setBoard(await api.board(projectId))
+  }
+
+  /**
+   * Clicking a row.
+   *
+   * A row already being worked opens its conversation. A row that is still just
+   * an idea FILLS the message box and stops — you press send yourself, after
+   * pasting a screenshot or adding the sentence that makes it a real request.
+   * Sending on click would turn a mis-click into a running agent.
+   */
+  const openRow = (row: BoardRow) => {
+    if (!projectId) return
+    if (row.sessionId) {
+      navigate({ pane: "chats", sessionId: row.sessionId })
+      return
+    }
+    const key = draftKey(projectId, null)
+    openNewChat(projectId)
+    // Never overwrite something already typed. The new-chat box is shared, and
+    // eating a half-written message to insert a todo is a bad trade.
+    const held = readDraft(key)
+    if (!held.text && held.attachments.length === 0) {
+      saveDraft(key, { text: row.text, attachments: [] })
+    }
+    setPendingRow(row.id)
+    navigate({ pane: "chats", sessionId: null })
+    setConversationsSeq((n) => n + 1)
+  }
+
+  const addRow = async (text: string) => {
+    if (!projectId) return
     try {
-      const created = await api.createTask(projectId, draft.title.trim(), draft.body.trim())
-      setDraft({ title: "", body: "" })
-      setComposing(false)
-      navigate({ taskId: created.id })
-      await refresh()
+      await api.addTodo(projectId, text)
+      await reloadBoard()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
   }
+
+  const deleteRow = async (row: BoardRow) => {
+    if (!projectId) return
+    // Only when a conversation is attached: removing an idea nobody has started
+    // is not worth a dialog, but removing the row a running agent is working is
+    // a different thing and reads as a mis-click.
+    if (row.sessionId && !window.confirm(`Remove "${row.text}"? A chat is working it.`)) return
+    try {
+      await api.deleteTodo(projectId, row.id)
+      await reloadBoard()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
 
   return (
     <div className="flex h-full flex-col bg-editor font-mono text-fg antialiased">
@@ -145,12 +193,21 @@ export function App() {
                 >
                   <span
                     className={`inline-block size-1.5 shrink-0 rounded-full ${
-                      p.activeRuns > 0 ? "bg-info animate-pulse" : "bg-fg-dim"
+                      p.holder ? "bg-info animate-pulse" : "bg-fg-dim"
                     }`}
                   />
                   <span className="flex-1 truncate">{p.name}</span>
-                  {p.activeRuns > 0 && (
-                    <span className="text-[10px] text-info">{p.activeRuns}</span>
+                  {/* Which conversation has the repo, not how many do — one
+                      project runs one agent, so a count would be a boolean
+                      wearing a number's clothes. The name is what you need
+                      when you are wondering what is in your way. */}
+                  {p.holder && (
+                    <span
+                      className="max-w-[8rem] truncate text-[10px] text-info"
+                      title={`"${p.holder.title}" has this checkout`}
+                    >
+                      {p.holder.title}
+                    </span>
                   )}
                 </button>
               ))
@@ -168,6 +225,7 @@ export function App() {
           }`}
         >
           <PaneHeader title={mode}>
+            {mode === "board" && <BoardSummary rows={board.rows} />}
             <div className="mr-1 flex overflow-hidden rounded border border-line">
               {PANES.map((m) => (
                 <button
@@ -182,111 +240,75 @@ export function App() {
                 </button>
               ))}
             </div>
-            {/* The git pane has nothing to create. It reads the repo, and the
-                two things that write to it — commit and land — belong to a task
-                and live in the run pane behind its diff. */}
-            {mode !== "git" && (
+            {/* Only the chat list has something to create. The git pane reads
+                the repo, and the board has its own one-line input. */}
+            {mode === "chats" && (
               <Button
                 disabled={!project}
                 onClick={() => {
-                  if (mode === "tasks") {
-                    setComposing((v) => !v)
-                    return
-                  }
                   // Idempotent on purpose: a second press is you looking for the
                   // chat you already started, not asking for another one.
                   if (project) openNewChat(project.id)
+                  setPendingRow(null)
                   navigate({ sessionId: null })
                 }}
-                title={
-                  mode === "tasks"
-                    ? "New task"
-                    : "Start a new conversation. Pressing this again opens the one you already started."
-                }
+                title="Start a new conversation. Pressing this again opens the one you already started."
               >
                 new
               </Button>
             )}
           </PaneHeader>
 
-          {composing && project && (
-            <div className="space-y-2 border-b border-line bg-editor p-3">
-              <input
-                autoFocus
-                value={draft.title}
-                onChange={(e) => setDraft((d) => ({ ...d, title: e.target.value }))}
-                placeholder="Title"
-                className="w-full rounded border border-line-soft bg-input px-2 py-1 font-sans text-xs outline-none placeholder:text-fg-dim focus:border-accent"
-              />
-              <textarea
-                value={draft.body}
-                onChange={(e) => setDraft((d) => ({ ...d, body: e.target.value }))}
-                placeholder="What should the agent do? This body is the prompt."
-                rows={5}
-                className="w-full resize-none rounded border border-line-soft bg-input px-2 py-1 font-sans text-xs leading-relaxed outline-none placeholder:text-fg-dim focus:border-accent"
-              />
-              <div className="flex justify-end gap-1.5">
-                <Button onClick={() => setComposing(false)}>cancel</Button>
-                <Button tone="primary" disabled={!draft.title.trim()} onClick={createTask}>
-                  create
-                </Button>
-              </div>
-            </div>
-          )}
 
-          {mode === "git" ? (
+          {mode === "board" ? (
+            <BoardList
+              projectId={projectId}
+              rows={board.rows}
+              warnings={board.warnings}
+              onOpen={openRow}
+              onAdd={(text) => void addRow(text)}
+              onDelete={(row) => void deleteRow(row)}
+            />
+          ) : mode === "git" ? (
             <GitList
               projectId={projectId}
               selected={sha}
               onSelect={(next) => navigate({ sha: next })}
             />
-          ) : mode === "chats" ? (
+          ) : (
             <ConversationList
               key={conversationsSeq}
               projectId={projectId}
               selected={sessionId}
-              onSelect={(id) => navigate({ sessionId: id })}
+              // Picking an existing conversation abandons the row that was
+              // queued up for a new one; without this it would attach itself to
+              // whatever new chat is started next.
+              onSelect={(id) => {
+                setPendingRow(null)
+                navigate({ sessionId: id })
+              }}
             />
-          ) : (
-          <div className="flex-1 overflow-auto py-1">
-            {!project ? (
-              <Empty>Select a project.</Empty>
-            ) : tasks.length === 0 ? (
-              <Empty>No tasks yet. Create one and it lands in .aide/tasks/.</Empty>
-            ) : (
-              tasks.map((t) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  onClick={() => navigate({ taskId: t.id })}
-                  className={`flex w-full items-center gap-2 px-3 py-[3px] text-left font-sans text-[13px] ${
-                    t.id === taskId
-                      ? "bg-active text-white"
-                      : "text-fg-muted hover:bg-hover"
-                  }`}
-                >
-                  <StatusDot status={t.status} />
-                  <span className="w-8 shrink-0 text-fg-dim">{t.id}</span>
-                  <span className="flex-1 truncate">{t.title}</span>
-                  <span className={`shrink-0 text-[10px] ${STATUS_STYLE[t.status].text}`}>
-                    {STATUS_STYLE[t.status].label}
-                  </span>
-                </button>
-              ))
-            )}
-          </div>
           )}
         </aside>
 
-        {mode === "git" ? (
+        {mode === "board" ? (
+          <SpecPane spec={board.spec} />
+        ) : mode === "git" ? (
           <section className="flex min-h-0 min-w-0 flex-1 flex-col bg-editor">
             <PaneHeader title={sha ? `commit ${sha.slice(0, 7)}` : "working tree"} />
             <GitPane projectId={projectId} sha={sha} />
           </section>
-        ) : mode === "chats" ? (
+        ) : (
           <ConversationPane
             projectId={projectId}
             openSessionId={sessionId}
+            pendingTodoId={pendingRow}
+            // A verdict rewrites todos.md and unlinks the row, so both lists are
+            // stale the moment it lands.
+            onChanged={() => {
+              setConversationsSeq((n) => n + 1)
+              void reloadBoard()
+            }}
             // A new chat has no id until its first turn starts. Put it in the
             // URL the moment it exists, so a reload mid-first-turn still lands
             // on the conversation rather than on a blank new one — and refetch
@@ -296,12 +318,15 @@ export function App() {
               // to the real one the list is about to grow — anything still
               // unsent in its box moves across with it.
               if (projectId) carryDraft(draftKey(projectId, null), draftKey(projectId, id))
+              // The daemon records the row-to-session link itself, as part of
+              // the send that already had to know the row to pick a working
+              // directory. Nothing to do here but stop offering it to the next
+              // new chat.
+              setPendingRow(null)
               navigate({ sessionId: id })
               setConversationsSeq((n) => n + 1)
             }}
           />
-        ) : (
-          <RunPane projectId={projectId} task={task} runId={runId} onChanged={() => void refresh()} />
         )}
       </main>
     </div>

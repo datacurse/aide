@@ -1,35 +1,20 @@
 import matter from "gray-matter"
-import {
-  DEFAULT_BOOTSTRAP_TIMEOUT_MS,
-  type ProjectDoc,
-} from "./project.js"
+import { RETIRED_DOC_KEYS, type ProjectDoc } from "./project.js"
 
-/** Parsing `.aide/project.md`. Node-only, because gray-matter is. */
+/**
+ * Parsing `.aide/project.md`. Node-only, because gray-matter is.
+ *
+ * There is nothing left in the frontmatter that aide acts on — the whole file is
+ * prose for the agent now. What remains here is the opposite job: noticing keys
+ * that USED to do something, so a `bootstrap:` line someone wrote a month ago
+ * does not just quietly stop running with nothing on screen to say so.
+ *
+ * Reported rather than thrown on. A retired key is not a mistake in the file, it
+ * is a file that outlived a feature, and refusing to open the project over it
+ * would be a worse answer than a line on the board.
+ */
 export function parseProjectDoc(raw: string): ProjectDoc {
   const { data, content } = matter(raw)
-
-  const bootstrapRaw = data["bootstrap"]
-  let bootstrap: string | null = null
-  if (bootstrapRaw !== undefined && bootstrapRaw !== null) {
-    if (typeof bootstrapRaw !== "string") {
-      throw new Error(
-        `project.md: \`bootstrap\` must be a string, got ${JSON.stringify(bootstrapRaw)}`,
-      )
-    }
-    bootstrap = bootstrapRaw.trim() || null
-  }
-
-  const timeoutRaw = data["bootstrapTimeoutMs"]
-  let bootstrapTimeoutMs = DEFAULT_BOOTSTRAP_TIMEOUT_MS
-  if (timeoutRaw !== undefined && timeoutRaw !== null) {
-    const n = Number(timeoutRaw)
-    if (!Number.isFinite(n) || n <= 0) {
-      throw new Error(
-        `project.md: \`bootstrapTimeoutMs\` must be a positive number, got ${JSON.stringify(timeoutRaw)}`,
-      )
-    }
-    bootstrapTimeoutMs = n
-  }
-
-  return { bootstrap, bootstrapTimeoutMs, body: content.trim() }
+  const retired = RETIRED_DOC_KEYS.filter((key) => data[key] !== undefined && data[key] !== null)
+  return { body: content.trim(), retired: [...retired] }
 }

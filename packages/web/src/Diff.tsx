@@ -2,7 +2,7 @@
  * A unified diff, coloured.
  *
  * Shared rather than copied, because two of these would drift: the run pane
- * shows what an agent did in a worktree and the git pane shows what is in the
+ * shows what an agent changed since its checkpoint and the git pane shows the
  * repo, and the moment those render `+` differently the human reviewing one has
  * to re-learn the other.
  *

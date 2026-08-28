@@ -1,12 +1,20 @@
 /**
- * End-to-end check of the git plumbing behind commit and land: `pnpm smoke`.
+ * End-to-end check of the git plumbing behind the checkpoint and the commit:
+ * `pnpm smoke`.
  *
- * It builds a throwaway repo in the temp directory and drives the real
- * functions against it — no mocks, no model calls, nothing to clean up in your
- * own projects. Worth running on any change to worktree.ts, because the failure
- * modes here are the expensive kind: a half-merged repo, a commit that silently
- * dropped its message body, a land that refuses forever, a shell policy that
- * lets through what it should not.
+ * It builds a throwaway repo in the temp directory and drives the real functions
+ * against it — no mocks, no model calls, nothing to clean up in your own
+ * projects. Worth running on any change to `checkpoint.ts`, `changes.ts` or
+ * `git.ts`, because the failure modes here are the expensive kind and most of
+ * them are SILENT: a diff that quietly includes the human's work, a commit that
+ * sweeps up a file nobody reviewed, a scratch index that writes through to the
+ * real one, a shell policy that lets through what it should not.
+ *
+ * The through-line of the checkpoint assertions is that aide must be able to
+ * work in someone's own checkout without ever disturbing it. Several checks
+ * below exist only to prove a NON-effect — that `git status` and the index are
+ * byte-identical either side of an operation — which is exactly the kind of
+ * thing that breaks without anybody noticing for a week.
  *
  * It is deliberately not a test framework. One file, one command, plain output.
  */
@@ -17,8 +25,16 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
-import { writeJournalEntry } from "./journal.js"
 import { chatModeFromSdk } from "@aide/protocol"
+import {
+  appendTodo,
+  parseTodos,
+  removeTodo,
+  serializeTodos,
+  sortBoard,
+  todosOf,
+  type BoardRow,
+} from "@aide/protocol"
 import { checkBashCommand } from "./policy.js"
 import { restartDecision, type Health } from "@aide/protocol"
 import {
@@ -30,20 +46,16 @@ import {
   parseStatus,
   workingTree,
 } from "./repo.js"
+import { commitRun, currentBranch, recentSubjects, runChanges, withRowTrailers } from "./changes.js"
 import {
-  commitWorktree,
-  currentBranch,
-  ensureWorktree,
-  mergeTaskBranch,
-  recentSubjects,
-  removeWorktree,
-  withTrailers,
-  workingTreeDirt,
-  worktreeDiff,
-  worktreeDiffStat,
-} from "./worktree.js"
+  listTurnCheckpoints,
+  readCheckpoint,
+  restoreCommand,
+  takeCheckpoint,
+  takeTurnCheckpoint,
+} from "./checkpoint.js"
 import { STATE_DIR } from "@aide/protocol"
-import type { Project, RunEvent, Task } from "@aide/protocol"
+import type { Project, RunEvent } from "@aide/protocol"
 
 const run = promisify(execFile)
 const git = async (cwd: string, args: string[]) =>
@@ -61,6 +73,10 @@ console.log(`repo: ${root}\n`)
 await git(root, ["init", "-b", "main"])
 await git(root, ["config", "user.email", "smoke@aide.test"])
 await git(root, ["config", "user.name", "aide smoke"])
+// Git for Windows sets core.autocrlf=true system-wide, so a checkout rewrites
+// LF as CRLF. That is git doing its job, but it makes "the file came back
+// byte-for-byte" a statement about line-ending policy rather than about restore.
+await git(root, ["config", "core.autocrlf", "false"])
 await writeFile(join(root, "README.md"), "# smoke\n", "utf8")
 await git(root, ["add", "-A"])
 await git(root, ["commit", "-m", "Add a readme"])
@@ -68,69 +84,222 @@ await writeFile(join(root, "app.ts"), "export const n = 1\n", "utf8")
 await git(root, ["add", "-A"])
 await git(root, ["commit", "-m", "Add app entrypoint"])
 
-console.log("worktree")
-const { path: wt, created } = await ensureWorktree(root, "0001")
-check("created", existsSync(wt), wt)
-check("reports it created one", created, "this is what gates the bootstrap command")
-check("second call reports NOT created", !(await ensureWorktree(root, "0001")).created)
+console.log("checkpoint")
+const ROW = "0001"
+const SESSION = "7f1c0e2a-0000-4000-8000-000000000001"
+
+// The human's own uncommitted work, present BEFORE any agent runs. Everything
+// below is about keeping this distinguishable from what the agent does.
+await writeFile(join(root, "app.ts"), "export const n = 1\nconst mine = true\n", "utf8")
+await writeFile(join(root, "scratch.txt"), "notes to self\n", "utf8")
+
+const statusBefore = await git(root, ["status", "--porcelain"])
+const cp = await takeCheckpoint(root, SESSION)
+check("returns a sha", /^[0-9a-f]{40}$/.test(cp.sha), cp.sha)
+check("under refs/aide/", cp.ref === `refs/aide/checkpoints/${SESSION}`, cp.ref)
+check("the ref resolves", (await readCheckpoint(root, SESSION))?.sha === cp.sha)
+
+// The whole point. A snapshot that alters the tree it is snapshotting would be
+// worse than useless, because the human is watching that tree in a dev server.
 check(
-  "ignored via .git/info/exclude",
-  (await readFile(join(root, ".git", "info", "exclude"), "utf8")).includes(".aide/worktrees/"),
+  "working tree untouched",
+  (await git(root, ["status", "--porcelain"])) === statusBefore,
+  "a checkpoint must be invisible",
 )
 check(
-  "project .gitignore untouched",
-  !existsSync(join(root, ".gitignore")),
-  "aide must not dirty a tracked file",
+  "untracked files are IN the snapshot",
+  (await git(root, ["ls-tree", "-r", "--name-only", cp.sha])).includes("scratch.txt"),
+  "exactly what `git stash create` drops on the floor",
 )
-check("repo still clean after a worktree", (await git(root, ["status", "--porcelain"])).trim() === "")
+check(
+  "invisible to git branch",
+  !(await git(root, ["branch", "--format=%(refname:short)"])).includes("aide"),
+)
+check(
+  "invisible to the history view",
+  !(await readLog(root, 50)).commits.some((c) => c.subject.startsWith("aide checkpoint")),
+  "refs/aide/ must not draw itself into the graph",
+)
 
-console.log("\nchanges")
-await writeFile(join(wt, "app.ts"), "export const n = 2\n", "utf8")
-await mkdir(join(wt, "lib"), { recursive: true })
-await writeFile(join(wt, "lib/new.ts"), "export const added = true\n", "utf8")
+console.log("\nchanges — the agent's work, separated from the human's")
+await writeFile(join(root, "app.ts"), "export const n = 2\nconst mine = true\n", "utf8")
+await mkdir(join(root, "lib"), { recursive: true })
+await writeFile(join(root, "lib/new.ts"), "export const added = true\n", "utf8")
 
-const stat = await worktreeDiffStat(wt)
-const diff = await worktreeDiff(wt)
-check("stat sees the modified file", stat.includes("app.ts"), stat.trim().split("\n").at(-1) ?? "")
-check("stat sees the CREATED file", stat.includes("new.ts"), "intent-to-add is load-bearing")
-check("diff has hunks", diff.includes("+export const added = true"))
+const changes = await runChanges(root, cp.sha)
+check("stat sees the modified file", changes.stat.includes("app.ts"))
+check("stat sees the CREATED file", changes.stat.includes("new.ts"))
+check("diff has hunks", changes.diff.includes("+export const added = true"))
+check(
+  "the human's untouched file is NOT in the diff",
+  !changes.diff.includes("notes to self") && !changes.paths.includes("scratch.txt"),
+  "diffing HEAD instead of the checkpoint is how that leaks in",
+)
+check(
+  "paths are exactly what changed",
+  [...changes.paths].sort().join(",") === "app.ts,lib/new.ts",
+  changes.paths.join(","),
+)
+check(
+  "a file both of them touched is flagged",
+  changes.overlap.includes("app.ts"),
+  "git cannot split two people's edits, so the human is told by name",
+)
+check("a file only the agent touched is not flagged", !changes.overlap.includes("lib/new.ts"))
+check(
+  "reading a diff stages nothing in the real index",
+  !(await git(root, ["diff", "--cached", "--name-only"])).trim(),
+  "no `add -A -N` across the human's tree",
+)
 
 console.log("\nhouse style")
 const subjects = await recentSubjects(root)
 check("reads recent subjects", subjects.length === 2, JSON.stringify(subjects))
 
 console.log("\ncommit")
-const message = withTrailers("Bump n and add lib\n\nBecause the smoke test says so.", "0001", "run-abc")
-check("trailer appended", message.includes("Aide-Task: 0001") && message.includes("Aide-Run: run-abc"))
-check("trailer is idempotent", withTrailers(message, "0001", "run-abc") === message)
+const message = withRowTrailers(
+  "Bump n and add lib\n\nBecause the smoke test says so.",
+  ROW,
+  SESSION,
+)
+check(
+  "trailers appended",
+  message.includes(`Aide-Row: ${ROW}`) && message.includes(`Aide-Session: ${SESSION}`),
+)
+check("trailers are idempotent", withRowTrailers(message, ROW, SESSION) === message)
 
-const sha = await commitWorktree(wt, message)
+// Staged by hand, by the human, while all this was going on. It must survive.
+await writeFile(join(root, "staged-by-hand.txt"), "mine\n", "utf8")
+await git(root, ["add", "staged-by-hand.txt"])
+
+const sha = await commitRun(root, changes.paths, message)
 check("returns a sha", /^[0-9a-f]{40}$/.test(sha), sha)
-const body = await git(wt, ["log", "-1", "--format=%B"])
+const body = await git(root, ["log", "-1", "--format=%B"])
 check("multi-line message survived", body.includes("Because the smoke test says so."))
-check("trailer is in the commit", body.includes("Aide-Task: 0001"))
-check("worktree is now clean", (await git(wt, ["status", "--porcelain"])).trim() === "")
+check("trailer is in the commit", body.includes(`Aide-Row: ${ROW}`))
+
+const committed = await git(root, ["show", "--name-only", "--format=", sha])
+check("commits what the diff showed", committed.includes("app.ts") && committed.includes("new.ts"))
+check(
+  "does NOT commit the human's untracked file",
+  !committed.includes("scratch.txt"),
+  "a blanket `git add -A` sweeps this up",
+)
+check(
+  "does NOT commit what the human staged by hand",
+  !committed.includes("staged-by-hand.txt"),
+  "naming paths on the commit is what stops the index leaking in",
+)
+check(
+  "and it is still staged afterwards",
+  (await git(root, ["status", "--porcelain"])).includes("A  staged-by-hand.txt"),
+)
 
 let threw = ""
 try {
-  await commitWorktree(wt, "nothing here")
+  await commitRun(root, [], "nothing here")
 } catch (err) {
   threw = err instanceof Error ? err.message : String(err)
 }
 check("refuses an empty commit", threw.includes("nothing to commit"), threw)
 
-console.log("\nagent scope — the agent may write specs, but not aide's own bookkeeping")
-await mkdir(join(wt, STATE_DIR, "tasks"), { recursive: true })
-await mkdir(join(wt, STATE_DIR, "specs"), { recursive: true })
-await writeFile(join(wt, STATE_DIR, "tasks", "0009-stale.md"), "stale snapshot\n", "utf8")
-await writeFile(join(wt, STATE_DIR, "specs", "queue.md"), "# Queue\n", "utf8")
-const scopedDiff = await worktreeDiff(wt)
-check("hides .aide/tasks", !scopedDiff.includes("0009-stale.md"), "daemon-owned")
-check("shows .aide/specs", scopedDiff.includes("queue.md"), "agent output must be landable")
-const scopedSha = await commitWorktree(wt, "Add a queue spec\n")
-const shown = await git(wt, ["show", "--stat", "--format=", scopedSha])
-check("commit matches the reviewed diff", !shown.includes("0009-stale.md") && shown.includes("queue.md"))
-check("worktree still holds the untracked task file", existsSync(join(wt, STATE_DIR, "tasks", "0009-stale.md")))
+console.log("\nundo — the checkpoint is the whole safety net")
+{
+  const undoSession = "7f1c0e2a-0000-4000-8000-000000000002"
+  await writeFile(join(root, "precious.txt"), "do not lose me\n", "utf8")
+  const before = await readFile(join(root, "app.ts"), "utf8")
+  const undo = await takeCheckpoint(root, undoSession)
+
+  // A run goes wrong: clobbers a tracked file and deletes an untracked one.
+  await writeFile(join(root, "app.ts"), "export const n = 999\n", "utf8")
+  await rm(join(root, "precious.txt"))
+
+  check("restore command names the ref", restoreCommand(undo.ref).includes(undo.ref))
+  await git(root, ["restore", `--source=${undo.ref}`, "--worktree", "--", "."])
+  check("the clobbered file is back", (await readFile(join(root, "app.ts"), "utf8")) === before)
+  check(
+    "the DELETED untracked file is back",
+    existsSync(join(root, "precious.txt")),
+    "the reason this is not `git stash create`",
+  )
+  await rm(join(root, "precious.txt"))
+}
+
+console.log("\nturn boundaries — a restore point per turn, not just per conversation")
+{
+  const turnSession = "7f1c0e2a-0000-4000-8000-000000000003"
+  const base = await takeCheckpoint(root, turnSession)
+  check("a conversation starts with no turn boundaries", (await listTurnCheckpoints(root, turnSession)).length === 0)
+
+  await writeFile(join(root, "turnwork.txt"), "first turn\n", "utf8")
+  const t1 = await takeTurnCheckpoint(root, turnSession)
+  check("numbered from 1", t1?.n === 1, String(t1?.n))
+  check("under refs/aide/turns/", t1?.ref === `refs/aide/turns/${turnSession}/1`, t1?.ref)
+  check("turn 1 parents the conversation checkpoint", (await git(root, ["rev-parse", `${t1?.sha}^`])).trim() === base.sha)
+
+  // Most messages are questions. A boundary identical to the one before it is
+  // not a place you can return to, and one per message would bury the ones that
+  // are.
+  check("a turn that changed nothing gets no ref", (await takeTurnCheckpoint(root, turnSession)) === null)
+
+  await writeFile(join(root, "turnwork.txt"), "first turn\nsecond turn\n", "utf8")
+  const t2 = await takeTurnCheckpoint(root, turnSession)
+  check("the next change is turn 2", t2?.n === 2, String(t2?.n))
+
+  // Chained, so one turn's work is the diff between two adjacent refs rather
+  // than something you subtract two conversation-wide diffs to get.
+  const between = await git(root, ["diff", String(t1?.sha), String(t2?.sha)])
+  check(
+    "adjacent turns diff to exactly that turn's work",
+    between.includes("+second turn") && !between.includes("+first turn"),
+  )
+
+  // `for-each-ref` sorts refnames LEXICOGRAPHICALLY, where 10 lands between 1
+  // and 2 — so trusting its order would have a conversation renumber from 2 on
+  // its tenth turn, straight over refs it already had.
+  await git(root, ["update-ref", `refs/aide/turns/${turnSession}/10`, String(t2?.sha)])
+  check(
+    "turn 10 sorts after turn 2, not before it",
+    (await listTurnCheckpoints(root, turnSession)).at(-1)?.n === 10,
+  )
+  await writeFile(join(root, "turnwork.txt"), "first turn\nsecond turn\neleventh\n", "utf8")
+  check("so the next turn is 11", (await takeTurnCheckpoint(root, turnSession))?.n === 11)
+
+  // The whole point: rewind one turn rather than the whole conversation.
+  await git(root, ["restore", `--source=${t1?.ref}`, "--worktree", "--", "."])
+  check(
+    "restoring a boundary undoes the turns after it and no more",
+    (await readFile(join(root, "turnwork.txt"), "utf8")) === "first turn\n",
+  )
+  check(
+    "invisible to git branch",
+    !(await git(root, ["branch", "--format=%(refname:short)"])).includes("turns"),
+  )
+  check(
+    "invisible to the history view",
+    !(await readLog(root, 50)).commits.some((c) => c.subject.startsWith("aide turn")),
+  )
+  await rm(join(root, "turnwork.txt"))
+}
+
+console.log("\nagent scope — the agent may write the spec, but not the backlog")
+await mkdir(join(root, STATE_DIR), { recursive: true })
+await writeFile(join(root, STATE_DIR, "todos.md"), "- [0009] written mid-run\n", "utf8")
+await writeFile(join(root, STATE_DIR, "spec.md"), "# What it does\n", "utf8")
+const scoped = await runChanges(root, cp.sha)
+check(
+  "hides .aide/todos.md",
+  !scoped.diff.includes("written mid-run") && !scoped.paths.includes(".aide/todos.md"),
+  "the daemon rewrites it in the same tree the run is editing",
+)
+check("shows .aide/spec.md", scoped.paths.includes(".aide/spec.md"), "the spec lands with the code")
+const scopedSha = await commitRun(root, scoped.paths, "Describe what it does\n")
+const shown = await git(root, ["show", "--stat", "--format=", scopedSha])
+check("commit matches the reviewed diff", !shown.includes("todos.md") && shown.includes("spec.md"))
+check(
+  "the backlog file is still on disk, uncommitted",
+  existsSync(join(root, STATE_DIR, "todos.md")),
+)
 
 console.log("\nbash policy")
 {
@@ -222,20 +391,21 @@ console.log("\nrestarting a stale daemon")
   // The daemon loads its modules once, so every edit to packages/daemon/src
   // leaves a process running code that no longer exists. The dev server fixes
   // that by restarting it — and the previous version of this rule, chokidar
-  // firing on a file write, killed a daemon three lines into a land and left the
-  // task stranded at `committed` with an orphaned worktree. Hence a pure
-  // function, and hence these.
+  // firing on a file write, killed a daemon three lines into a commit and left
+  // the repository half-changed. Hence a pure function, and hence these.
+  //
+  // Runs edit the project's own checkout now, so a daemon developing its own
+  // repository has its source rewritten by the agents it supervises as a matter
+  // of routine rather than by accident.
   const QUIET = 1500
   const base: Health = {
     ok: true,
     taskModel: "claude-opus-5",
-    maxConcurrentRuns: 2,
-    maxBudgetUsd: 5,
     bootSourceId: "aaaaaaaaaaaa",
     sourceId: "bbbbbbbbbbbb",
     stale: true,
     supervised: true,
-    busy: { runs: 0, chats: 0, writes: 0 },
+    busy: { chats: 0, writes: 0 },
     idleMs: 10_000,
   }
   const decide = (patch: Partial<Health>, previous = "bbbbbbbbbbbb" as string | null) =>
@@ -245,18 +415,16 @@ console.log("\nrestarting a stale daemon")
   check("leaves a current daemon alone", !decide({ stale: false }).restart)
 
   // Each of these is a way to destroy work.
-  check("not while a task run is in flight", !decide({ busy: { runs: 1, chats: 0, writes: 0 } }).restart)
-  check("not while a run is merely QUEUED", !decide({ busy: { runs: 1, chats: 0, writes: 0 } }).restart, "shutdown cancels the queue")
-  check("not mid chat turn", !decide({ busy: { runs: 0, chats: 1, writes: 0 } }).restart)
+  check("not mid chat turn", !decide({ busy: { chats: 1, writes: 0 } }).restart)
   check(
-    "not mid land",
-    !decide({ busy: { runs: 0, chats: 0, writes: 1 } }).restart,
-    "a land is one request, and killing it strands the task at committed",
+    "not mid commit",
+    !decide({ busy: { chats: 0, writes: 1 } }).restart,
+    "a commit is one request, and killing it leaves the work half-staged",
   )
   check(
     "and it says what it is waiting for",
-    decide({ busy: { runs: 2, chats: 1, writes: 0 } }).reason === "2 runs, 1 chat turn in flight",
-    decide({ busy: { runs: 2, chats: 1, writes: 0 } }).reason,
+    decide({ busy: { chats: 1, writes: 2 } }).reason === "1 chat turn, 2 requests in flight",
+    decide({ busy: { chats: 1, writes: 2 } }).reason,
   )
 
   // The gap between two of the browser's requests is not a safe moment.
@@ -273,97 +441,41 @@ console.log("\nrestarting a stale daemon")
   check("never restarts on an unreadable source", !decide({ sourceId: null }, null).restart)
 }
 
-console.log("\njournal")
 const project: Project = { id: "p1", name: "smoke", root, addedAt: new Date().toISOString() }
-const task: Task = {
-  id: "0001",
-  title: "Bump n",
-  status: "needs-review",
-  branch: "aide/task-0001",
-  worktree: ".aide/worktrees/task-0001",
-  runs: ["run-abc"],
-  commits: [],
-  created: new Date().toISOString(),
-  prompt: "Change n from 1 to 2 and add a lib file.",
-  file: "0001-bump-n.md",
-}
-const events: RunEvent[] = [
-  { runId: "run-abc", seq: 1, ts: Date.now(), type: "run.started", taskId: "0001", projectId: "p1", model: "claude-opus-5", cwd: wt, worktree: task.worktree, sessionId: "s1" },
-  { runId: "run-abc", seq: 2, ts: Date.now(), type: "tool.start", toolUseId: "t1", name: "Read", input: {}, parentToolUseId: null },
-  { runId: "run-abc", seq: 3, ts: Date.now(), type: "tool.start", toolUseId: "t2", name: "Read", input: {}, parentToolUseId: null },
-  { runId: "run-abc", seq: 4, ts: Date.now(), type: "tool.start", toolUseId: "t3", name: "Edit", input: {}, parentToolUseId: null },
-  { runId: "run-abc", seq: 5, ts: Date.now(), type: "assistant.text", text: "Bumped n and added the lib file.", parentToolUseId: null },
-  { runId: "run-abc", seq: 6, ts: Date.now(), type: "run.finished", subtype: "success", status: "success", totalCostUsd: 0.1234, modelUsage: {}, numTurns: 7, durationMs: 95_000, permissionDenials: [{ tool: "Bash", reason: "not in this run's allowlist" }] },
-]
-const rel = await writeJournalEntry({ project, task, events, runId: "run-abc", sha, message, diffStat: stat })
-const entry = await readFile(join(root, rel), "utf8")
-check("entry written", existsSync(join(root, rel)), rel)
-check("records the sha", entry.includes(sha))
-check("tallies tools", entry.includes("Read ×2, Edit"), entry.split("\n").find((l) => l.startsWith("- Tools:")) ?? "")
-check("quotes the agent", entry.includes("Bumped n and added the lib file."))
-check("records the denial", entry.includes("`Bash`"))
-check("marks cost an estimate", entry.includes("$0.12 (estimate)"))
-check("duration is readable", entry.includes("1m 35s"))
 
-console.log("\naide's own bookkeeping is not dirt")
-// This is the state every managed project is permanently in: adding a project
-// scaffolds .aide/, creating a task writes into it, and setStatus("done")
-// rewrites the task file the moment a land finishes. If this counted as dirt,
-// nothing could ever land — which is exactly what happened before.
-await mkdir(join(root, STATE_DIR, "tasks"), { recursive: true })
-await writeFile(join(root, STATE_DIR, "tasks", "0002-next.md"), "---\nid: '0002'\n---\n", "utf8")
-await writeFile(join(root, STATE_DIR, "project.md"), "# Project\n", "utf8")
-check("scaffolding is not dirt", (await workingTreeDirt(root)) === "", "the land blocker")
-check("but git still sees it", (await git(root, ["status", "--porcelain"])).includes(".aide"))
-await writeFile(join(root, "real.txt"), "a real uncommitted change\n", "utf8")
-check("a real change IS dirt", (await workingTreeDirt(root)).includes("real.txt"))
-await rm(join(root, "real.txt"))
+console.log("\na branch and a merge, for the history view to draw")
+// Built with plain git, on purpose. aide does not make branches any more and has
+// no `land` — but the repositories it manages are still full of branches and
+// merges, and `repo.ts` has to draw them. So this is a FIXTURE for the history
+// view rather than a feature under test, and building it by hand is what keeps
+// that distinction visible.
+//
+// Everything above deliberately left the tree dirty; the merge below needs it
+// clean, and this is a throwaway repo.
+await git(root, ["reset", "-q"])
+await git(root, ["checkout", "-q", "--", "."])
+await git(root, ["clean", "-qfd"])
 
-console.log("\nland refusals")
-await writeFile(join(root, "dirty.txt"), "uncommitted\n", "utf8")
-threw = ""
-try {
-  await mergeTaskBranch(root, "0001", "Merge task 0001")
-} catch (err) {
-  threw = err instanceof Error ? err.message : String(err)
-}
-check("refuses a dirty target", threw.includes("uncommitted changes"), threw.split("\n")[0] ?? "")
-// Remove only the real dirt. `git clean -fd` would also sweep away the .aide/
-// scaffolding, and landing over that scaffolding is what the final land check
-// is here to prove.
-await rm(join(root, "dirty.txt"))
-
-console.log("\nconflict is aborted, not left half-merged")
-await git(root, ["checkout", "-q", "-b", "rival"])
-await writeFile(join(root, "app.ts"), "export const n = 999\n", "utf8")
-// `add -A` here would also stage the .aide/ scaffolding onto `rival`, and
-// checking main back out would then delete it — quietly removing the dirt the
-// final land is supposed to prove it can land over.
-await git(root, ["add", "app.ts"])
-await git(root, ["commit", "-m", "Set n to 999"])
-threw = ""
-try {
-  await mergeTaskBranch(root, "0001", "Merge task 0001")
-} catch (err) {
-  threw = err instanceof Error ? err.message : String(err)
-}
-check("reports the conflict", threw.includes("aborted"), threw.split("\n")[0] ?? "")
-// Asserted through workingTreeDirt, not raw porcelain: .aide/ is legitimately
-// present and untracked here, and the thing being proved is that no half-merged
-// content survived the abort.
-check("target left clean", (await workingTreeDirt(root)) === "", "no half-merge")
-check("still on rival", (await currentBranch(root)) === "rival")
-
-console.log("\nland")
+const BRANCH = "feature/wobble"
+const forked = (await git(root, ["rev-parse", "HEAD"])).trim()
+await git(root, ["checkout", "-q", "-b", BRANCH])
+await writeFile(join(root, "wobble.ts"), "export const wobble = true\n", "utf8")
+await git(root, ["add", "wobble.ts"])
+await git(root, ["commit", "-m", "Teach it to wobble"])
 await git(root, ["checkout", "-q", "main"])
-// The assertion that matters: git considers this tree dirty, and landing works
-// anyway, because the only thing dirtying it is aide's own bookkeeping.
-check("git sees .aide/ dirt going in", (await git(root, ["status", "--porcelain"])).includes(".aide"))
-const landed = await mergeTaskBranch(root, "0001", "Merge task 0001: Bump n")
-check("merged into main", landed.into === "main", landed.into)
-check("is a merge commit", (await git(root, ["log", "-1", "--format=%P"])).trim().split(" ").length === 2, "--no-ff held")
-check("agent's file is in main", existsSync(join(root, "lib/new.ts")))
-check("edit landed", (await readFile(join(root, "app.ts"), "utf8")).trim() === "export const n = 2")
+// A branch that is NOT checked out, so ref classification has something to be
+// wrong about.
+await git(root, ["branch", "rival", forked])
+await git(root, ["merge", "--no-ff", BRANCH, "-m", `Merge ${BRANCH}: teach it to wobble`])
+
+const landed = { sha: (await git(root, ["rev-parse", "HEAD"])).trim(), into: "main" }
+check(
+  "is a merge commit",
+  (await git(root, ["log", "-1", "--format=%P"])).trim().split(" ").length === 2,
+  "--no-ff held",
+)
+check("the branch's file is in main", existsSync(join(root, "wobble.ts")))
+check("the agent's earlier commit is still there", existsSync(join(root, "lib/new.ts")))
 
 console.log("\nreading the repository")
 {
@@ -382,11 +494,11 @@ console.log("\nreading the repository")
   // on it.
   const full = await readLog(root, 50)
   check(
-    "reads the Aide-Task trailer",
-    full.commits.some((c) => c.tasks.includes("0001")),
-    "this is what links a commit back to the task that asked for it",
+    "reads the Aide-Row trailer",
+    full.commits.some((c) => c.rows.includes("0001")),
+    "this is what links a commit back to the backlog row that asked for it",
   )
-  check("and leaves it off the commits without one", full.commits.some((c) => c.tasks.length === 0))
+  check("and leaves it off the commits without one", full.commits.some((c) => c.rows.length === 0))
   check("no more history than there is", !full.more, `${full.commits.length} commits`)
 
   // The assertion this section exists for. `git show` on a cleanly resolved
@@ -395,9 +507,9 @@ console.log("\nreading the repository")
   // what landed, is a commit that appears to have changed nothing.
   const detail = await commitDetail(root, landed.sha)
   check("finds the merge commit", detail !== null)
-  check("merge has a diff", detail?.diff.includes("+export const added = true") === true, "-m --first-parent")
-  check("merge has a stat", detail?.stat.includes("lib/new.ts") === true)
-  check("keeps the whole message", detail?.message.includes("Merge task 0001") === true)
+  check("merge has a diff", detail?.diff.includes("+export const wobble = true") === true, "-m --first-parent")
+  check("merge has a stat", detail?.stat.includes("wobble.ts") === true)
+  check("keeps the whole message", detail?.message.includes(`Merge ${BRANCH}`) === true)
 
   check("an option is not a sha", !isSha("--upload-pack=whatever"), "this value comes from the URL")
   check("a real sha is", isSha(landed.sha))
@@ -501,11 +613,11 @@ console.log("\nthe drawn graph")
   )
 
   // Ref classification, which is the reason the log asks for --decorate=full.
-  // aide names its own branches `aide/task-NNNN`, so "a slash means a remote"
-  // would have labelled every branch aide made itself as somebody else's.
+  // Slashed LOCAL branch names are ordinary in any real repo, and "a slash means
+  // a remote" would label every one of them as somebody else's.
   const refs = page.commits.flatMap((c) => c.refs)
-  const taskBranch = refs.find((r) => r.name === "aide/task-0001")
-  check("a slashed local branch is a branch", taskBranch?.kind === "branch", taskBranch?.kind ?? "missing")
+  const rowBranch = refs.find((r) => r.name === BRANCH)
+  check("a slashed local branch is a branch", rowBranch?.kind === "branch", rowBranch?.kind ?? "missing")
   check("the checked-out branch says so", refs.some((r) => r.name === "main" && r.head))
   check("and the others do not", refs.find((r) => r.name === "rival")?.head === false)
   check("no ref path leaks through", !refs.some((r) => r.name.startsWith("refs/")), "the UI prints these")
@@ -525,7 +637,7 @@ console.log("\nthe drawn graph")
     authorEmail: "",
     date: "",
     refs: [],
-    tasks: [],
+    rows: [],
     subject: "",
   })
   const synth = buildGraph([
@@ -555,8 +667,161 @@ console.log("\nthe drawn graph")
   check("so the whole page is two lanes wide", synth.lanes === 2, `${synth.lanes}`)
 }
 
-await removeWorktree(root, "0001")
-check("worktree removed", !existsSync(wt))
+// ---------------------------------------------------------------------------
+console.log("\nthe backlog file")
+// The parser has to be forgiving in one direction and exact in the other: a bare
+// line typed by a human is a valid todo, and a numbered one must keep the id a
+// branch is already named after.
+{
+  const raw = [
+    "# Todos",
+    "",
+    "Some prose the human wrote and does not want reformatted.",
+    "",
+    "- [0003] already numbered",
+    "- just typed this",
+    "",
+  ].join("\n")
+
+  const file = parseTodos(raw)
+  const todos = todosOf(file)
+  check("both lines are todos", todos.length === 2, `${todos.length}`)
+  check("an existing id is kept", todos[0]?.id === "0003", todos[0]?.id)
+  check(
+    "a bare line is numbered above the highest existing id",
+    todos[1]?.id === "0004",
+    `${todos[1]?.id} — numbering by position would collide with 0003`,
+  )
+
+  const written = serializeTodos(file)
+  check("prose survives a round trip", written.includes("does not want reformatted"))
+  check("the heading survives", written.startsWith("# Todos"))
+  check(
+    "reparsing is idempotent",
+    serializeTodos(parseTodos(written)) === written,
+    "the file must converge, not renumber itself on every save",
+  )
+
+  const { file: grown, todo } = appendTodo(file, "  a third  ")
+  check("append numbers from the max", todo.id === "0005", todo.id)
+  check("append trims", todo.text === "a third", JSON.stringify(todo.text))
+  check("append does not widen the gap at the bottom", !serializeTodos(grown).includes("\n\n\n"))
+
+  const pruned = removeTodo(grown, "0003")
+  check("remove drops exactly one row", todosOf(pruned).length === 2)
+  check("and leaves the prose", serializeTodos(pruned).includes("Some prose"))
+
+  // A numbered line whose text was deleted must not free its id: a branch called
+  // aide/0007-... may still exist, and reusing the number would point two
+  // different pieces of work at one row.
+  const emptied = parseTodos("- [0007] \n- fresh")
+  check(
+    "an emptied numbered line does not release its id",
+    todosOf(emptied)[0]?.id === "0008",
+    todosOf(emptied)[0]?.id,
+  )
+}
+
+// ---------------------------------------------------------------------------
+console.log("\nboard order")
+{
+  const row = (id: string, state: BoardRow["state"], blocked = false): BoardRow => ({
+    id,
+    text: id,
+    sessionId: state === "idle" ? null : "s",
+    state,
+    blocked,
+  })
+  const sorted = sortBoard([
+    row("0001", "working"),
+    row("0002", "idle"),
+    row("0003", "needs-you"),
+    row("0004", "working", true),
+  ])
+  check(
+    "blocked comes first",
+    sorted[0]?.id === "0004",
+    "an agent stopped on an unanswered prompt is the only thing stuck on you",
+  )
+  check("then needs-you", sorted[1]?.id === "0003", sorted[1]?.id)
+  check("then idle", sorted[2]?.id === "0002", sorted[2]?.id)
+  check(
+    "working sorts last",
+    sorted[3]?.id === "0001",
+    "it is the one state that wants nothing from you",
+  )
+}
+
+// ---------------------------------------------------------------------------
+console.log("\ncommitting a conversation")
+// The review gate end to end, with a conversation's identifiers. The
+// model-written halves — the message and the spec update — are supplied here
+// rather than drafted, so this exercises the git plumbing without spending
+// anything.
+{
+  const { commitReview } = await import("./review.js")
+  const { specPath } = await import("@aide/protocol/node")
+
+  const rowId = "0042"
+  const session = "11111111-2222-3333-4444-555555555555"
+  const project = { id: "p", name: "p", root, addedAt: "" }
+
+  // A conversation begins: snapshot first, then the agent writes.
+  const baseline = await takeCheckpoint(root, session)
+  await writeFile(join(root, "wobble.txt"), "it wobbles\n", "utf8")
+
+  const { sha } = await commitReview({
+    project,
+    sessionId: session,
+    rowId,
+    checkpoint: baseline.sha,
+    message: "Teach the widget to wobble",
+    spec: "# What it can do\n\n- Wobbles the widget.",
+  })
+  check("it commits", /^[0-9a-f]{40}$/.test(sha), sha.slice(0, 8))
+
+  const body = await git(root, ["log", "-1", "--format=%B"])
+  check("the commit carries its row", body.includes(`Aide-Row: ${rowId}`), "provenance")
+  check("and its session, which outlives every run in it", body.includes(`Aide-Session: ${session}`))
+
+  const tracked = await git(root, ["show", "--name-only", "--format=", "HEAD"])
+  check(
+    "the spec lands in the SAME commit as the code",
+    tracked.includes("wobble.txt") && tracked.includes("spec.md"),
+    "the claim and the change that earns it are one revert",
+  )
+  check(
+    "and the spec is what was approved",
+    (await readFile(specPath(root), "utf8")).trim().endsWith("- Wobbles the widget."),
+  )
+
+  // An empty spec means "leave it alone", not "empty the file" — clearing the
+  // box is how a human declines the suggestion.
+  await writeFile(join(root, "wobble.txt"), "it wobbles twice\n", "utf8")
+  await commitReview({
+    project,
+    sessionId: session,
+    rowId,
+    checkpoint: baseline.sha,
+    message: "Wobble harder",
+  })
+  check(
+    "an empty spec leaves the file untouched",
+    (await readFile(specPath(root), "utf8")).includes("Wobbles the widget"),
+    "clearing the box declines the suggestion, it does not blank the spec",
+  )
+
+  check(
+    "the work is visible in the project itself",
+    existsSync(join(root, "wobble.txt")),
+    "no worktree to go and look in — this IS the tree the dev server serves",
+  )
+  check(
+    "and the checkpoint is still there to undo it",
+    (await readCheckpoint(root, session))?.sha === baseline.sha,
+    "committing must not throw away the only way back",
+  )
+}
 
 console.log(`\n${failures === 0 ? "all checks passed" : `${failures} FAILED`}`)
 process.exit(failures === 0 ? 0 : 1)

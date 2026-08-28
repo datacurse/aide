@@ -20,13 +20,72 @@ import { git, gitDiffing, gitOr } from "./git.js"
  * uncommitted in the working tree.
  *
  * Strictly read-only, and that is a rule rather than a description. The obvious
- * way to make untracked files appear in a diff is `git add -A -N`, which is what
- * `worktreeDiff` does — but a task worktree belongs to aide and the project's
- * checkout belongs to the human. Staging intent-to-add across someone's own
- * working tree because they opened a read-only view is aide editing state it was
- * only asked to show. New files are diffed with `--no-index` against /dev/null
- * instead, which touches nothing.
+ * way to make untracked files appear in a diff is `git add -A -N`, but the
+ * project's checkout belongs to the human. Staging intent-to-add across someone
+ * else's working tree because they opened a read-only view is aide editing state
+ * it was only asked to show. New files are diffed with `--no-index` against
+ * /dev/null instead, which touches nothing.
+ *
+ * That rule used to have an escape hatch — a run's own worktree belonged to
+ * aide, so `worktreeDiff` could stage freely in it. There is no such tree any
+ * more: a run works the human's checkout, and `changes.ts` reaches the same
+ * answer through a scratch index rather than by staging.
  */
+
+// ---------------------------------------------------------------------------
+// Is there a repo here at all
+// ---------------------------------------------------------------------------
+
+export async function isGitRepo(root: string): Promise<boolean> {
+  try {
+    const out = await git(root, ["rev-parse", "--is-inside-work-tree"])
+    return out.trim() === "true"
+  } catch {
+    return false
+  }
+}
+
+export async function repoRoot(dir: string): Promise<string | null> {
+  try {
+    return (await git(dir, ["rev-parse", "--show-toplevel"])).trim()
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The highest board row id that any commit in this repository already claims.
+ *
+ * Row ids have to be monotonic across deletions, and `todos.md` cannot tell you
+ * that on its own: closing a row deletes its line, while everything that refers
+ * to the id by number lives on. So the floor is asked of git, which is where the
+ * collision would actually be visible.
+ *
+ * It used to read branch names — `aide/NNNN-slug` — because a closed row's
+ * branch and worktree could still be adopted by a row that reused its number.
+ * There are no such branches now, and the durable record that replaced them is
+ * the `Aide-Row` trailer that `land` used to write and `commit` still does. Note
+ * this is NOT merely the same check by another name: dropping it and numbering
+ * from the file alone would let a reused `0003` relabel someone else's commit in
+ * the history view, which is a wrong answer rather than an untidy one.
+ */
+export async function maxRowIdInHistory(root: string): Promise<number> {
+  const out = await gitOr("", () =>
+    git(root, [
+      "log",
+      "--all",
+      "--format=%(trailers:key=Aide-Row,valueonly,separator=%x2c)",
+    ]),
+  )
+  let max = 0
+  for (const line of out.split(/\r?\n/)) {
+    for (const value of line.split(",")) {
+      const id = value.trim()
+      if (/^\d{1,9}$/.test(id)) max = Math.max(max, Number.parseInt(id, 10) || 0)
+    }
+  }
+  return max
+}
 
 // ---------------------------------------------------------------------------
 // Overview
@@ -210,9 +269,9 @@ const FIELDS = [
   "%D",
   "%P",
   // Comma-separated explicitly: the trailers atom separates with a NEWLINE by
-  // default, so a commit carrying two Aide-Task trailers would split across two
+  // default, so a commit carrying two Aide-Row trailers would split across two
   // records and desynchronise every field after it.
-  "%(trailers:key=Aide-Task,valueonly,separator=%x2c)",
+  "%(trailers:key=Aide-Row,valueonly,separator=%x2c)",
   "%s",
 ] as const
 
@@ -253,7 +312,7 @@ function parseRefs(raw: string): GitRef[] {
 
 function parseCommit(line: string): GitCommit | null {
   const f = line.split("\x1f")
-  const [sha, short, author, authorEmail, date, refs, parents, tasks, ...rest] = f
+  const [sha, short, author, authorEmail, date, refs, parents, rows, ...rest] = f
   if (!sha || !short) return null
   return {
     sha,
@@ -263,7 +322,7 @@ function parseCommit(line: string): GitCommit | null {
     date: date ?? "",
     refs: parseRefs(refs ?? ""),
     parents: (parents ?? "").split(" ").filter(Boolean),
-    tasks: (tasks ?? "").split(",").map((t) => t.trim()).filter(Boolean),
+    rows: (rows ?? "").split(",").map((t) => t.trim()).filter(Boolean),
     // Rejoined rather than taken as one field, so a subject that somehow does
     // contain a separator truncates instead of losing the commit entirely.
     subject: rest.join("\x1f"),
@@ -374,9 +433,9 @@ export async function log(root: string, limit: number): Promise<GitLog> {
   // `--topo-order` because the default is date order, and date order interleaves
   // two branches by when someone happened to commit — drawing a line that
   // crosses itself for no reason a reader can see. `--branches` because a graph
-  // of one branch is a straight line: aide's own task branches, and the merges
-  // `land` makes, are the shape this view exists to show. HEAD is named as well,
-  // so a detached checkout still appears in its own history.
+  // of one branch is a straight line, and the branches and merges a human makes
+  // in their own repository are the shape this view exists to show. HEAD is
+  // named as well, so a detached checkout still appears in its own history.
   //
   // One extra, so "is there more history" is an answer rather than a guess made
   // from whether the page came back full.
@@ -414,9 +473,9 @@ export async function commitDetail(root: string, sha: string): Promise<GitCommit
 
   // `-m --first-parent` is what makes a merge show anything at all. Plain
   // `git show` on a merge prints a combined diff, which is empty whenever the
-  // merge resolved cleanly — and aide's own `land` merges `--no-ff`, so without
-  // these two flags every landed task would appear here as a commit that changed
-  // no files. On an ordinary commit they do nothing.
+  // merge resolved cleanly — so without these two flags every cleanly merged
+  // branch appears here as a commit that changed no files. On an ordinary commit
+  // they do nothing.
   const shown = ["show", "--format=", "-m", "--first-parent", sha]
   const stat = await gitOr("", () => git(root, [...shown, "--stat"]))
   const diff = await gitOr("", () => git(root, [...shown, "--patch"]))

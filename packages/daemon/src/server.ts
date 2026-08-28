@@ -3,40 +3,37 @@ import Fastify, { type FastifyReply } from "fastify"
 import type {
   Attachment,
   ChatMode,
+  ChatStatus,
   ClientMessage,
   EffortLevel,
   Health,
+  Project,
   RunEvent,
   ServerMessage,
 } from "@aide/protocol"
-import { CHAT_MODES, EFFORT_LEVELS } from "@aide/protocol"
-import { worktreePath } from "@aide/protocol/node"
+import { CHAT_MODES, CHAT_VERDICTS, EFFORT_LEVELS, isChatVerdict } from "@aide/protocol"
+import { MAX_PROJECT_DOC_CHARS } from "./agent.js"
+import {
+  boardRows,
+  chatStatuses,
+  closeChat,
+  linkSession,
+  reopenChat,
+  rowForSession,
+  unlinkRow,
+} from "./board.js"
+import { currentBranch, runChanges } from "./changes.js"
 import { ChatLane } from "./chat.js"
 import { CONFIG } from "./config.js"
 import { EventLog } from "./eventlog.js"
-import { draftCommitMessage } from "./helper.js"
-import { writeJournalEntry } from "./journal.js"
-import { reconcileStrandedTasks } from "./reconcile.js"
-import { addProject, getProject, listProjects, removeProject } from "./registry.js"
+import { addProject, getProject, listProjects, readProjectDoc, removeProject } from "./registry.js"
+import { commitReview, conversationBaseline, draftReview } from "./review.js"
 import * as repo from "./repo.js"
 import { BOOT_SOURCE_ID, currentSourceId, isStale } from "./source.js"
 import { getConversation, listConversations } from "./sessions.js"
-import { Supervisor } from "./supervisor.js"
-import { createTask, deleteTask, getTask, listTasks, patchTask, setStatus } from "./tasks.js"
-import {
-  commitWorktree,
-  currentBranch,
-  mergeTaskBranch,
-  recentSubjects,
-  removeWorktree,
-  withTrailers,
-  worktreeDiff,
-  worktreeDiffStat,
-  worktreeStatus,
-} from "./worktree.js"
+import { addTodo, deleteTodo, editTodo, findTodo, readSpec } from "./todos.js"
 
 const log = new EventLog()
-const supervisor = new Supervisor(log)
 const chat = new ChatLane(log)
 
 const app = Fastify({ logger: { level: process.env["AIDE_LOG_LEVEL"] ?? "warn" } })
@@ -103,15 +100,18 @@ app.addHook("onRequest", async (req, reply) => {
 //
 // The dev server restarts this process when its source changes, and the one
 // thing it must never do is restart it mid-write. That already happened once,
-// under `tsx watch`: landing a task rewrote `packages/daemon/src`, chokidar
-// fired, and the daemon was killed between `git merge` and the `setStatus`
-// after it — leaving the task stranded at `committed` with an orphaned worktree
-// and a reset socket that read as "the land failed".
+// under `tsx watch`: a run rewrote `packages/daemon/src`, chokidar fired, and
+// the daemon was killed part way through the git work that followed — leaving
+// the repository half-changed and a reset socket that read as a failure.
 //
-// Runs and chat turns are visible to the supervisor and the chat lane. A land is
-// neither: it is one HTTP request that merges, removes a worktree and rewrites a
-// task file before it answers. So mutating requests are counted here, which is
-// the only place that sees them.
+// Chat turns are visible to the chat lane. A commit is not: it is one HTTP
+// request that writes the spec, stages a path list and rewrites the backlog
+// before it answers. So mutating requests are counted here, which is the only
+// place that sees them.
+//
+// This matters more now than when it was written, not less. The daemon serves
+// the checkout its own agents edit, so aide developing aide means a run rewrites
+// the running daemon's source as a matter of course rather than as an accident.
 //
 // Keyed by request id rather than a counter, because a counter has to be
 // decremented exactly once and this hook does not run for requests the origin
@@ -145,6 +145,21 @@ const liveChatTurn = (sessionId: string) => chat.turnForSession(sessionId) ?? nu
 
 const notFound = (msg: string) => ({ statusCode: 404, error: "Not Found", message: msg })
 
+/**
+ * A conversation the board has never heard of.
+ *
+ * Used when `chatStatuses` has no entry — which should not happen, since it is
+ * asked about exactly the sessions being returned, but the alternative is
+ * shipping `undefined` over the wire into a field the browser destructures.
+ */
+const UNTRACKED: ChatStatus = {
+  rowId: null,
+  state: null,
+  blocked: false,
+  stale: false,
+  verdict: null,
+}
+
 // ---------------------------------------------------------------------------
 // Projects
 // ---------------------------------------------------------------------------
@@ -152,31 +167,42 @@ const notFound = (msg: string) => ({ statusCode: 404, error: "Not Found", messag
 app.get("/api/health", async (): Promise<Health> => ({
   ok: true,
   taskModel: CONFIG.taskModel,
-  maxConcurrentRuns: CONFIG.maxConcurrentRuns,
-  maxBudgetUsd: CONFIG.maxBudgetUsd,
   bootSourceId: BOOT_SOURCE_ID,
   sourceId: await currentSourceId(),
   stale: await isStale(),
   supervised: process.env["AIDE_MANAGED"] === "1",
   busy: {
-    // Queued counts as busy: shutdown cancels the queue, so restarting over a
-    // waiting task loses it just as surely as restarting over a running one.
-    runs: supervisor.runs().filter((r) => r.phase === "running" || r.phase === "queued").length,
     chats: chat.turns().length,
     writes: inFlightWrites.size,
   },
   idleMs: Date.now() - lastWriteFinishedAt,
 }))
 
+/**
+ * Every project, and who has its checkout.
+ *
+ * The holder rather than a count, because one run at a time makes a count a
+ * boolean wearing a number's clothes — and the useful question when you cannot
+ * start a run is which conversation to go and look at.
+ */
 app.get("/api/projects", async () => {
   const projects = await listProjects()
-  const runs = supervisor.runs()
-  return projects.map((p) => ({
-    ...p,
-    activeRuns: runs.filter((r) => r.projectId === p.id && r.phase === "running").length,
-    queuedRuns: runs.filter((r) => r.projectId === p.id && r.phase === "queued").length,
-  }))
+  return projects.map((p) => {
+    const holder = chat.holderFor(p.id)
+    return {
+      ...p,
+      holder: holder
+        ? { runId: holder.runId, sessionId: holder.sessionId, title: firstLine(holder.text), startedAt: holder.startedAt }
+        : null,
+    }
+  })
 })
+
+/** First non-empty line, capped. The same rule the conversation list titles by. */
+const firstLine = (text: string): string => {
+  const line = text.split("\n").find((l) => l.trim())?.trim() ?? "(untitled)"
+  return line.length > 80 ? `${line.slice(0, 80)}…` : line
+}
 
 app.post("/api/projects", async (req, reply) => {
   const { path } = (req.body ?? {}) as { path?: string }
@@ -195,238 +221,126 @@ app.delete("/api/projects/:id", async (req, reply) => {
 })
 
 // ---------------------------------------------------------------------------
-// Tasks
+// The board
 // ---------------------------------------------------------------------------
 
-app.get("/api/projects/:id/tasks", async (req, reply) => {
-  const { id } = req.params as { id: string }
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-
-  const runs = supervisor.runs()
-  const tasks = await listTasks(project)
-  return tasks.map((t) => {
-    // Queued runs count as in-flight now. A task waiting behind the cap is not
-    // idle, and pretending otherwise is what let a second run start against the
-    // same worktree.
-    const run = runs.find((r) => r.taskId === t.id)
-    return {
-      ...t,
-      activeRunId: run?.runId ?? null,
-      activeRun: run ? { runId: run.runId, phase: run.phase, position: run.position } : null,
-    }
-  })
-})
-
-app.post("/api/projects/:id/tasks", async (req, reply) => {
-  const { id } = req.params as { id: string }
-  const { title, body } = (req.body ?? {}) as { title?: string; body?: string }
-  if (!title?.trim()) return reply.code(400).send({ message: "body must include { title }" })
-
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-  // `(body ?? title)` looked like a fallback and never was one: the compose form
-  // sends `draft.body.trim()`, so a blank textarea arrives as "", and `"" ?? x`
-  // is "" — nullish coalescing does not catch an empty string. The task was
-  // created with an empty prompt and the agent handed an empty user message.
-  // Store the empty body honestly; the title is composed into the user turn.
-  return createTask(project, title.trim(), (body ?? "").trim())
-})
-
-app.delete("/api/projects/:id/tasks/:taskId", async (req, reply) => {
-  const { id, taskId } = req.params as { id: string; taskId: string }
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-  // Cancel before unlinking. A queued run holds its own snapshot of the task, so
-  // deleting the file underneath it meant the run woke up later, called
-  // setStatus on a file that no longer existed, and threw out of a floating
-  // promise as an unhandled rejection nobody would ever see.
-  await supervisor.cancelForTask(taskId)
-  await deleteTask(project, taskId)
-  return reply.code(204).send()
-})
-
-// ---------------------------------------------------------------------------
-// Runs
-// ---------------------------------------------------------------------------
-
-app.post("/api/projects/:id/tasks/:taskId/run", async (req, reply) => {
-  const { id, taskId } = req.params as { id: string; taskId: string }
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-
-  const task = await getTask(project, taskId)
-  if (!task) return reply.code(404).send(notFound(`no task ${taskId}`))
-  if (supervisor.runIdForTask(taskId)) {
-    return reply.code(409).send({ message: "task already has a run in flight" })
-  }
-
-  const runId = supervisor.enqueue(project, task)
-  return { runId }
-})
-
-app.post("/api/runs/:runId/interrupt", async (req, reply) => {
-  const { runId } = req.params as { runId: string }
-  const ok = await supervisor.interrupt(runId)
-  if (!ok) return reply.code(404).send(notFound(`run ${runId} is not active`))
-  return { interrupted: true }
-})
-
-app.get("/api/runs/:runId/events", async (req) => {
-  const { runId } = req.params as { runId: string }
-  const { fromSeq } = req.query as { fromSeq?: string }
-  return log.read(runId, Number(fromSeq ?? 0) || 0)
-})
-
-app.get("/api/projects/:id/tasks/:taskId/diff", async (req, reply) => {
-  const { id, taskId } = req.params as { id: string; taskId: string }
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-
-  const path = worktreePath(project.root, taskId)
-  // Sequential, not Promise.all: worktreeDiff runs `add -A -N` first, and a
-  // concurrent status read races it and reports new files as untracked.
-  const diff = await worktreeDiff(path)
-  const status = await worktreeStatus(path)
-  return { worktree: path, diff, status }
-})
-
-// ---------------------------------------------------------------------------
-// Accepting the work
-//
-// Two gates, deliberately. `commit` puts the diff on the task branch, which
-// changes nothing anyone else can see; `land` merges it, which does. Anything
-// that mutates the repo refuses while a run for that task is still in flight —
-// committing underneath a working agent races its next write.
-// ---------------------------------------------------------------------------
-
-const idle = async (taskId: string, reply: FastifyReply): Promise<boolean> => {
-  if (!supervisor.runIdForTask(taskId)) return true
-  await reply.code(409).send({ message: "a run is still in flight for this task" })
-  return false
+/**
+ * What the chat lane knows about a conversation, in the shape the board wants.
+ *
+ * `turnForSession` returns the turn IN FLIGHT, so null here does not mean the
+ * conversation is gone — it means nothing is running, which is exactly the
+ * `needs-you` resting state. `boardRows` makes that distinction; this only has
+ * to answer honestly.
+ */
+const liveChat = (sessionId: string) => {
+  const turn = chat.turnForSession(sessionId)
+  return turn ? { working: true, blocked: turn.blocked } : null
 }
 
 /**
- * Draft a commit message. Separate from committing because it costs money and
- * takes a few seconds, and because the whole point is that a human reads it
- * before it becomes a commit.
+ * Rows and spec in one response, because they are one view. Fetching them
+ * separately would let the backlog and the capability list render a frame apart,
+ * which is the one thing the side-by-side is for.
  */
-app.post("/api/projects/:id/tasks/:taskId/commit/draft", async (req, reply) => {
-  const { id, taskId } = req.params as { id: string; taskId: string }
+app.get("/api/projects/:id/board", async (req, reply) => {
+  const { id } = req.params as { id: string }
   const project = await getProject(id)
   if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-  const task = await getTask(project, taskId)
-  if (!task) return reply.code(404).send(notFound(`no task ${taskId}`))
-  if (!(await idle(taskId, reply))) return
+  const [rows, spec, doc] = await Promise.all([
+    boardRows(project, liveChat),
+    readSpec(project),
+    readProjectDoc(project.root).catch(() => null),
+  ])
 
-  const path = worktreePath(project.root, taskId)
-  // Sequential for the same reason as the diff route: worktreeDiffStat runs
-  // `add -A -N`, and a concurrent read races it.
-  const diffStat = await worktreeDiffStat(path)
-  const diff = await worktreeDiff(path)
-  if (!diff.trim()) {
-    return reply.code(409).send({ message: "nothing to commit — the worktree is unchanged" })
+  // The things about project state that go wrong SILENTLY. Everything else here
+  // surfaces as an error; these two just quietly stop being true — a brief past
+  // the cap loses its second half on the way into every prompt, and a retired
+  // frontmatter key sits there looking like configuration that still does
+  // something.
+  const size = doc?.body.trim().length ?? 0
+  const warnings: string[] = []
+  if (size > MAX_PROJECT_DOC_CHARS) {
+    warnings.push(
+      `.aide/project.md is ${size} characters and is cut off at ${MAX_PROJECT_DOC_CHARS} in every prompt. Move what belongs in the spec out of it.`,
+    )
   }
+  if (doc?.retired.length) {
+    warnings.push(
+      `.aide/project.md still sets ${doc.retired.join(" and ")}, which aide no longer reads — runs work the project's own checkout, so there is no fresh worktree to set up. Delete those lines.`,
+    )
+  }
+  return { rows, spec, warnings }
+})
 
+app.post("/api/projects/:id/todos", async (req, reply) => {
+  const { id } = req.params as { id: string }
+  const { text } = (req.body ?? {}) as { text?: string }
+  if (!text?.trim()) return reply.code(400).send({ message: "body must include { text }" })
+  const project = await getProject(id)
+  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
+  return addTodo(project, text)
+})
+
+app.patch("/api/projects/:id/todos/:todoId", async (req, reply) => {
+  const { id, todoId } = req.params as { id: string; todoId: string }
+  const { text } = (req.body ?? {}) as { text?: string }
+  if (!text?.trim()) return reply.code(400).send({ message: "body must include { text }" })
+  const project = await getProject(id)
+  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
   try {
-    const message = await draftCommitMessage({
-      model: CONFIG.helperModel,
-      title: task.title,
-      prompt: task.prompt,
-      diffStat,
-      diff,
-      recentSubjects: await recentSubjects(project.root),
-    })
-    return { message, model: CONFIG.helperModel }
+    return await editTodo(project, todoId, text)
   } catch (err) {
-    return reply.code(502).send({
-      message: `could not draft a commit message: ${err instanceof Error ? err.message : String(err)}`,
-    })
+    return reply.code(404).send(notFound(err instanceof Error ? err.message : String(err)))
   }
 })
 
-/** Commit the worktree with the message the human approved, and journal it. */
-app.post("/api/projects/:id/tasks/:taskId/commit", async (req, reply) => {
-  const { id, taskId } = req.params as { id: string; taskId: string }
-  const { message } = (req.body ?? {}) as { message?: string }
-  if (!message?.trim()) return reply.code(400).send({ message: "body must include { message }" })
-
+app.delete("/api/projects/:id/todos/:todoId", async (req, reply) => {
+  const { id, todoId } = req.params as { id: string; todoId: string }
   const project = await getProject(id)
   if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-  const task = await getTask(project, taskId)
-  if (!task) return reply.code(404).send(notFound(`no task ${taskId}`))
-  if (!(await idle(taskId, reply))) return
-
-  const path = worktreePath(project.root, taskId)
-  // Captured before committing: `git diff` against a clean worktree is empty,
-  // so after the commit there is no file list left to journal.
-  const diffStat = await worktreeDiffStat(path)
-  const runId = task.runs.at(-1) ?? null
-  const final = withTrailers(message, task.id, runId)
-
-  let sha: string
   try {
-    sha = await commitWorktree(path, final)
+    await deleteTodo(project, todoId)
   } catch (err) {
-    return reply.code(409).send({ message: err instanceof Error ? err.message : String(err) })
+    return reply.code(404).send(notFound(err instanceof Error ? err.message : String(err)))
   }
-
-  // The commit is the durable part and it already succeeded. A journal write
-  // that fails must not read as a failed commit, so it is reported alongside
-  // rather than thrown.
-  let journal: string | null = null
-  let warning: string | null = null
-  try {
-    journal = await writeJournalEntry({
-      project,
-      task,
-      events: runId ? log.read(runId) : [],
-      runId: runId ?? "",
-      sha,
-      message: final,
-      diffStat,
-    })
-  } catch (err) {
-    warning = `committed, but the journal entry failed: ${err instanceof Error ? err.message : String(err)}`
-  }
-
-  await patchTask(project, taskId, { status: "committed", addCommit: sha })
-  return { sha, journal, warning }
+  // The link outlives the row deliberately: `boardRows` filters links whose row
+  // is gone rather than deleting them, so a row removed by hand in an editor and
+  // typed back does not lose the conversation that was working it.
+  return reply.code(204).send()
 })
 
-/** Merge the task branch into whatever the project has checked out. */
-app.post("/api/projects/:id/tasks/:taskId/land", async (req, reply) => {
-  const { id, taskId } = req.params as { id: string; taskId: string }
+/**
+ * Attach a conversation to a row.
+ *
+ * Sent by the browser once the SDK has named the session, because that is the
+ * first moment both halves of the pair exist: the row id came from the click,
+ * and the session id does not exist until the first turn starts.
+ */
+app.post("/api/projects/:id/board/:todoId/session", async (req, reply) => {
+  const { id, todoId } = req.params as { id: string; todoId: string }
+  const { sessionId } = (req.body ?? {}) as { sessionId?: string }
+  if (!sessionId?.trim()) return reply.code(400).send({ message: "body must include { sessionId }" })
   const project = await getProject(id)
   if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-  const task = await getTask(project, taskId)
-  if (!task) return reply.code(404).send(notFound(`no task ${taskId}`))
-  if (!(await idle(taskId, reply))) return
-  if (task.commits.length === 0) {
-    return reply.code(409).send({ message: "nothing to land — this task has no commits yet" })
-  }
-
-  let merged: { sha: string; into: string }
-  try {
-    merged = await mergeTaskBranch(project.root, taskId, `Merge task ${task.id}: ${task.title}`)
-  } catch (err) {
-    return reply.code(409).send({ message: err instanceof Error ? err.message : String(err) })
-  }
-
-  // The merge is done and recorded. A worktree that will not go away is untidy,
-  // not a failed land, so it is reported and the task still closes.
-  let warning: string | null = null
-  try {
-    await removeWorktree(project.root, taskId)
-  } catch (err) {
-    warning = `merged, but the worktree is still there: ${err instanceof Error ? err.message : String(err)}`
-  }
-
-  await setStatus(project, taskId, "done")
-  return { ...merged, warning }
+  await linkSession(project.id, todoId, sessionId)
+  return reply.code(204).send()
 })
 
-/** Where a land would put the work. Shown on the button so it is never a guess. */
+app.delete("/api/projects/:id/board/:todoId/session", async (req, reply) => {
+  const { id, todoId } = req.params as { id: string; todoId: string }
+  const project = await getProject(id)
+  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
+  await unlinkRow(project.id, todoId)
+  return reply.code(204).send()
+})
+
+/**
+ * The branch a commit would land on. Shown on the button so it is never a guess.
+ *
+ * It matters more than it used to. A commit used to go to a branch aide made for
+ * the conversation; it now goes to whatever the human has checked out, so the
+ * name of that branch is part of what they are approving.
+ */
 app.get("/api/projects/:id/branch", async (req, reply) => {
   const { id } = req.params as { id: string }
   const project = await getProject(id)
@@ -513,7 +427,12 @@ app.get("/api/projects/:id/conversations", async (req, reply) => {
   const project = await getProject(id)
   if (!project) return reply.code(404).send(notFound(`no project ${id}`))
   try {
-    return await listConversations(project, activeChatRun)
+    // Status is attached here rather than inside `listConversations`, which is
+    // deliberately a reader of the SDK's session store and nothing else. The
+    // board is aide's own bookkeeping and does not belong in it.
+    const list = await listConversations(project, activeChatRun)
+    const statuses = await chatStatuses(project, list, liveChat)
+    return list.map((c) => ({ ...c, status: statuses[c.sessionId] ?? UNTRACKED }))
   } catch (err) {
     return reply.code(502).send({
       message: `could not read the session store: ${err instanceof Error ? err.message : String(err)}`,
@@ -528,12 +447,129 @@ app.get("/api/projects/:id/conversations/:sessionId", async (req, reply) => {
   try {
     const found = await getConversation(project, sessionId, activeChatRun, liveChatTurn)
     if (!found) return reply.code(404).send(notFound(`no conversation ${sessionId} in this project`))
-    return found
+    const statuses = await chatStatuses(project, [found.summary], liveChat)
+    return { ...found, summary: { ...found.summary, status: statuses[sessionId] ?? UNTRACKED } }
   } catch (err) {
     return reply.code(502).send({
       message: `could not read that conversation: ${err instanceof Error ? err.message : String(err)}`,
     })
   }
+})
+
+/**
+ * Reviewing a conversation's work.
+ *
+ * There is no `land` here any more, because there is no branch to merge. What
+ * used to be two gates on the code — commit to a branch, then merge it — is now
+ * one gate on the code and one on the backlog: you read the diff and commit, and
+ * the row closes only when you say the work is done. Recoverability moved with
+ * it, from an unmerged branch to the checkpoint ref.
+ */
+
+/** The review baseline, or a 409 explaining why there is not one. */
+const reviewable = async (
+  project: Project,
+  sessionId: string,
+  reply: FastifyReply,
+): Promise<{ rowId: string | null; checkpoint: string } | null> => {
+  // Committing underneath a working agent races its next write. It is also
+  // impossible to review honestly: the diff would be a half-finished turn.
+  if (chat.turnForSession(sessionId)) {
+    await reply.code(409).send({ message: "a turn is still in flight for this conversation" })
+    return null
+  }
+  const found = await conversationBaseline(project, sessionId)
+  if (!found) {
+    await reply.code(409).send({
+      message: "this conversation has no checkpoint, so there is nothing to measure a change against",
+    })
+    return null
+  }
+  return found
+}
+
+app.get("/api/projects/:id/conversations/:sessionId/diff", async (req, reply) => {
+  const { id, sessionId } = req.params as { id: string; sessionId: string }
+  const project = await getProject(id)
+  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
+  const found = await conversationBaseline(project, sessionId)
+  if (!found) return reply.code(409).send({ message: "this conversation has no checkpoint" })
+
+  const changes = await runChanges(project.root, found.checkpoint)
+  return {
+    root: project.root,
+    diff: changes.diff,
+    paths: changes.paths,
+    mixed: changes.overlap,
+  }
+})
+
+app.post("/api/projects/:id/conversations/:sessionId/review/draft", async (req, reply) => {
+  const { id, sessionId } = req.params as { id: string; sessionId: string }
+  const project = await getProject(id)
+  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
+  const found = await reviewable(project, sessionId, reply)
+  if (!found) return
+
+  const row = found.rowId ? await findTodo(project, found.rowId) : undefined
+  try {
+    return await draftReview(project, found.checkpoint, row?.text ?? "")
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    // "nothing to commit" is the caller asking too early, not a model failure.
+    return reply.code(message.startsWith("nothing to commit") ? 409 : 502).send({ message })
+  }
+})
+
+app.post("/api/projects/:id/conversations/:sessionId/commit", async (req, reply) => {
+  const { id, sessionId } = req.params as { id: string; sessionId: string }
+  const { message, spec } = (req.body ?? {}) as { message?: string; spec?: string }
+  if (!message?.trim()) return reply.code(400).send({ message: "body must include { message }" })
+
+  const project = await getProject(id)
+  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
+  const found = await reviewable(project, sessionId, reply)
+  if (!found) return
+
+  try {
+    return await commitReview({
+      project,
+      sessionId,
+      rowId: found.rowId,
+      checkpoint: found.checkpoint,
+      message,
+      ...(spec ? { spec } : {}),
+    })
+  } catch (err) {
+    return reply.code(409).send({ message: err instanceof Error ? err.message : String(err) })
+  }
+})
+
+/**
+ * The verdict. The one thing in this product an agent cannot reach.
+ *
+ * Both verdicts remove the backlog row: the work is finished, or it is not
+ * wanted. See `closeChat` for why the verdict is expressed as the shape of the
+ * todo file rather than as a status field, and why there is no verdict for work
+ * that simply is not done yet.
+ */
+app.post("/api/projects/:id/conversations/:sessionId/close", async (req, reply) => {
+  const { id, sessionId } = req.params as { id: string; sessionId: string }
+  const { verdict } = (req.body ?? {}) as { verdict?: unknown }
+  if (!isChatVerdict(verdict)) {
+    return reply.code(400).send({ message: `verdict must be one of ${CHAT_VERDICTS.join(", ")}` })
+  }
+  const project = await getProject(id)
+  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
+  return closeChat(project, sessionId, verdict)
+})
+
+app.post("/api/projects/:id/conversations/:sessionId/reopen", async (req, reply) => {
+  const { id, sessionId } = req.params as { id: string; sessionId: string }
+  const project = await getProject(id)
+  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
+  await reopenChat(project, sessionId)
+  return reply.code(204).send()
 })
 
 /**
@@ -550,6 +586,10 @@ app.post("/api/projects/:id/chat", async (req, reply) => {
     attachments?: Attachment[]
     mode?: string
     effort?: string
+    /** Start this conversation on an existing board row. */
+    todoId?: string
+    /** Put it on the board with no row yet — one gets created from the message. */
+    track?: boolean
   }
   if (!body.text?.trim() && !body.attachments?.length) {
     return reply.code(400).send({ message: "nothing to send" })
@@ -567,6 +607,34 @@ app.post("/api/projects/:id/chat", async (req, reply) => {
     ? (body.effort as EffortLevel)
     : "high"
 
+  /**
+   * Which backlog row this conversation is working, decided HERE.
+   *
+   * It no longer picks a working directory — every conversation runs in the
+   * project root — so getting it wrong is no longer destructive. It is still
+   * resolved server-side rather than trusted from the client, because a
+   * follow-up must stay on the row its conversation is already on and the board
+   * is the thing that knows which that is.
+   */
+  let rowId: string | null = null
+  try {
+    if (body.sessionId) {
+      rowId = await rowForSession(project.id, body.sessionId)
+    } else if (body.todoId) {
+      const row = await findTodo(project, body.todoId)
+      if (!row) return reply.code(404).send(notFound(`no todo ${body.todoId}`))
+      rowId = row.id
+    } else if (body.track) {
+      // A cold conversation that asked to be tracked gets a row. Work happening
+      // off the board is the blindness the board exists to remove — you would
+      // write a todo for something an agent is already doing.
+      const first = (body.text ?? "").trim().split(/\r?\n/)[0]?.slice(0, 120) ?? ""
+      rowId = (await addTodo(project, first || "untitled")).id
+    }
+  } catch (err) {
+    return reply.code(500).send({ message: err instanceof Error ? err.message : String(err) })
+  }
+
   try {
     const runId = await chat.send({
       project,
@@ -575,6 +643,7 @@ app.post("/api/projects/:id/chat", async (req, reply) => {
       attachments: body.attachments ?? [],
       mode,
       effort,
+      rowId,
     })
     return { runId }
   } catch (err) {
@@ -717,29 +786,23 @@ async function stopEverything(why: string): Promise<void> {
   stopping = true
   console.log(`aide daemon stopping (${why})`)
   chat.shutdown()
-  await supervisor.shutdown()
   await app.close().catch(() => {})
   process.exit(0)
 }
 
 // Ctrl-C on `pnpm daemon`, and any orderly kill. Note what these CANNOT catch:
-// Windows `taskkill /F` is TerminateProcess and delivers no signal at all, which
-// is why boot reconciliation below is not optional.
+// Windows `taskkill /F` is TerminateProcess and delivers no signal at all.
+//
+// Boot reconciliation used to live here, and no longer needs to: a task filed
+// `running` in a file was wreckage a crash could leave behind, but a
+// conversation's state is derived on every read from whether a turn is actually
+// in flight. There is nothing left to correct at boot because nothing was
+// written that could be wrong.
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => void stopEverything(signal))
 }
 
-// Before listen, deliberately. The health endpoint answering has to mean the
-// task list is honest — otherwise a browser that connects in the gap sees a task
-// filed `running` with nothing behind it, and is offered the commit button on a
-// worktree whose agent died mid-write.
-const recovered = await reconcileStrandedTasks(log)
-
 const address = await app.listen({ port: CONFIG.port, host: "127.0.0.1" })
 console.log(`aide daemon on ${address}`)
-console.log(`  task model   ${CONFIG.taskModel}`)
-console.log(`  concurrency  ${CONFIG.maxConcurrentRuns}`)
-console.log(`  budget/run   $${CONFIG.maxBudgetUsd}`)
-for (const r of recovered) {
-  console.log(`  recovered    ${r.projectName} ${r.taskId} ${r.from} → ${r.to} (${r.title})`)
-}
+console.log(`  model        ${CONFIG.taskModel}`)
+console.log(`  runs         one per project, in the project's own checkout`)

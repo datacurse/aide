@@ -45,37 +45,67 @@ export interface MessageImage {
  */
 export type RunEventBody =
   /**
-   * Admitted, but waiting behind the concurrency cap.
+   * The working tree was snapshotted before the agent was let near it.
    *
-   * Without this a queued run's log is empty, and the run pane — which switches
-   * to the newest run the moment you press run — shows "Waiting for the first
-   * event…" for as long as the wait lasts. That is indistinguishable from a run
-   * that started and wedged.
+   * Emitted BEFORE `run.started`, which stays where the SDK's system/init
+   * message produces it — that event is the only carrier of `sessionId`, and
+   * moving it would cost the resume handle.
    *
-   * `position` is a historical fact (it was N-deep when admitted), not a live
-   * one. The live position comes from the task list, which is polled.
+   * This is the event that replaced `bootstrap.started` / `bootstrap.finished`.
+   * A run used to begin by checking out a worktree and installing into it,
+   * because isolation was how an agent editing your repository was made
+   * survivable. Runs work the project's own checkout now, and the snapshot is
+   * what makes THAT survivable — so the slowest, most opaque step at the start
+   * of a run became the cheapest, and it still gets an event because "what
+   * happened to my uncommitted work" must be answerable from the log alone.
+   *
+   * `restore` is the literal command rather than something the UI assembles, so
+   * there is one place that knows how to undo a run.
    */
-  | { type: "run.queued"; taskId: string; projectId: string; position: number }
-  /**
-   * The project's `bootstrap` command, run in a freshly created worktree before
-   * the agent starts. Emitted BEFORE `run.started`, which stays where the SDK's
-   * system/init message produces it — that event is the only carrier of
-   * `sessionId`, and moving it would cost the resume handle.
-   */
-  | { type: "bootstrap.started"; command: string; cwd: string }
   | {
-      type: "bootstrap.finished"
-      ok: boolean
-      /** null when the process was killed by a signal or timed out. */
-      exitCode: number | null
-      durationMs: number
+      type: "checkpoint.taken"
+      /** `refs/aide/checkpoints/<id>`. */
+      ref: string
+      /** The snapshot commit. */
+      sha: string
+      /** How many files were already uncommitted when the run started. */
+      dirtyCount: number
       /**
-       * Tail of the combined output, capped. A tail rather than a stream because
-       * `pnpm install` emits thousands of progress lines and the whole NDJSON log
-       * is replayed on every browser subscribe — and because the reason a build
-       * failed is at the end.
+       * What to type to put the tree back.
+       *
+       * Restores what the run changed and deleted; does NOT remove what it
+       * created. See `restoreCommand` for why the wider sweep is not offered.
        */
-      output: string
+      restore: string
+    }
+  /**
+   * Where the tree stood when a turn ended.
+   *
+   * The checkpoint above is the conversation's baseline and never moves, because
+   * the review measures against it. That leaves undo with one place to rewind
+   * to, however long the conversation ran, so each turn that changed something
+   * also records its own boundary and the transcript carries them inline — the
+   * restore point for turn 3 sits directly under turn 3.
+   *
+   * Absent for a turn that changed nothing on disk, which is most questions. A
+   * boundary identical to the one before it is not a place you can return to,
+   * and printing one per message would bury the ones that are.
+   */
+  | {
+      type: "turn.checkpoint"
+      /** `refs/aide/turns/<session>/<n>`. */
+      ref: string
+      /** The snapshot commit. */
+      sha: string
+      /** 1-based, in the order the conversation's turns landed. */
+      n: number
+      /**
+       * What to type to go back to how the tree stood here.
+       *
+       * The same command shape as a checkpoint's, and the same caveat: it puts
+       * back what later turns changed or deleted, and leaves what they created.
+       */
+      restore: string
     }
   | {
       type: "run.started"
@@ -83,7 +113,6 @@ export type RunEventBody =
       projectId: string
       model: string
       cwd: string
-      worktree: string
       sessionId: string | null
     }
   /**

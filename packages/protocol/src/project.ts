@@ -8,30 +8,43 @@
  *
  * Frontmatter rather than a new `.aide/config.json` because `.aide/` being
  * markdown-only is what makes "if aide disappears, this directory is still a
- * readable description of the project" true — and because `parseTask` already
- * establishes the pattern of hand-edited frontmatter validated at parse time.
+ * readable description of the project" true.
  */
 
-/** Ten minutes. A cold `pnpm install` on a large monorepo is minutes, not seconds. */
-export const DEFAULT_BOOTSTRAP_TIMEOUT_MS = 600_000
+/** A git repository aide has been pointed at. */
+export interface Project {
+  id: string
+  name: string
+  /** Absolute path to the git repo root. */
+  root: string
+  /** ISO 8601. */
+  addedAt: string
+}
+
+/**
+ * Frontmatter keys aide used to act on and no longer does.
+ *
+ * `bootstrap` ran a project's setup command in each fresh worktree, because
+ * `git worktree add` checks out tracked files only and left the agent with no
+ * `node_modules`. Runs work the project's own checkout now, which already has
+ * its dependencies, so there is nothing left for the command to do.
+ *
+ * Named rather than deleted, because silently ignoring a line someone wrote is
+ * the failure mode this file's validation exists to prevent. A project.md that
+ * still sets one gets a warning on the board until it is cleaned up.
+ */
+export const RETIRED_DOC_KEYS = ["bootstrap", "bootstrapTimeoutMs"] as const
 
 export interface ProjectDoc {
-  /**
-   * Shell command run in each FRESH worktree before the agent starts, or null.
-   *
-   * Null by default and scaffolded commented-out, because aide manages arbitrary
-   * repos and guessing a package manager is worse than doing nothing.
-   */
-  bootstrap: string | null
-  bootstrapTimeoutMs: number
   /** The prose below the frontmatter. This is what reaches the agent. */
   body: string
+  /** Retired keys this file still sets. Empty for every up-to-date project. */
+  retired: string[]
 }
 
 export const EMPTY_PROJECT_DOC: ProjectDoc = {
-  bootstrap: null,
-  bootstrapTimeoutMs: DEFAULT_BOOTSTRAP_TIMEOUT_MS,
   body: "",
+  retired: [],
 }
 
 /**

@@ -9,7 +9,7 @@ import { spawn } from "node:child_process"
  * and on Windows a signal to the top of that chain reaches exactly one of them —
  * `TerminateProcess` has no notion of a process group. The survivors keep
  * running with their parent gone, which for an agent run means it keeps editing
- * a worktree and keeps spending money while nothing is listening.
+ * the project's checkout and keeps spending money while nothing is listening.
  *
  * `taskkill /T` walks the tree, which is the only reliable way to end it.
  *

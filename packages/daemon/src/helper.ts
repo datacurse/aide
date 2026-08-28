@@ -134,3 +134,100 @@ export async function draftCommitMessage(opts: DraftCommitMessageOptions): Promi
   if (!message) throw new Error("the model returned an empty commit message")
   return message
 }
+
+// ---------------------------------------------------------------------------
+// The spec
+// ---------------------------------------------------------------------------
+
+const SPEC_SYSTEM = [
+  "You maintain a project's capability list: a markdown file saying what the app",
+  "can and cannot do. Output the complete updated file and nothing else: no",
+  "preamble, no explanation, no markdown code fences around the whole thing.",
+  "",
+  "You are shown the current file and a diff that is about to be committed.",
+  "Change only what the diff earns. Add a line for a capability the diff adds,",
+  "update a line the diff changes, and move a line out of a 'cannot' list only",
+  "when the diff actually implements it. Everything the diff does not touch must",
+  "come back BYTE FOR BYTE — headings, ordering, wording, blank lines.",
+  "",
+  "One line per capability, present tense, terse. This file goes into the context",
+  "of every conversation in the project, so length is a real cost.",
+  "",
+  "Never claim something the diff does not show. A change that adds no capability",
+  "and removes no limitation should come back completely unchanged — that is a",
+  "normal and correct outcome, not a failure.",
+].join("\n")
+
+export interface DraftSpecOptions {
+  model: string
+  /** The current `.aide/spec.md`, or empty when the project has none yet. */
+  spec: string
+  /** What the human asked for, so the model can tell intent from incident. */
+  request: string
+  diffStat: string
+  diff: string
+}
+
+/**
+ * Propose the spec as it should read after this change.
+ *
+ * Returns the WHOLE file rather than a patch, for the same reason the commit
+ * message is a whole message: the human edits it in a textarea before anything
+ * is written, and reviewing a proposed document is easier than reviewing a
+ * proposed edit script.
+ *
+ * Drafted here, at the commit gate, rather than by the agent while it worked —
+ * an agent never knows when it is finished, because that is the human's call, so
+ * there is no turn during a conversation on which it should write "the app can
+ * now do X". Anchoring it to the commit means the claim and the code that earns
+ * it land in one reviewable change.
+ */
+export async function draftSpecUpdate(opts: DraftSpecOptions): Promise<string> {
+  const truncated = opts.diff.length > MAX_DIFF_CHARS
+  const diff = truncated ? opts.diff.slice(0, MAX_DIFF_CHARS) : opts.diff
+
+  const prompt = [
+    "Current .aide/spec.md:",
+    opts.spec.trim() || "(the project has no spec yet — write one from this change)",
+    "",
+    "What was asked for:",
+    opts.request || "(not recorded)",
+    "",
+    "Files changed:",
+    opts.diffStat.trim() || "(none reported)",
+    "",
+    truncated
+      ? `Diff (truncated at ${MAX_DIFF_CHARS} characters — the file list above is complete, the hunks below are not; do not describe what you cannot see):`
+      : "Diff:",
+    diff,
+  ].join("\n")
+
+  const chunks: string[] = []
+  const q = query({
+    prompt,
+    options: {
+      model: opts.model,
+      systemPrompt: SPEC_SYSTEM,
+      tools: [],
+      allowedTools: [],
+      settingSources: [],
+      maxTurns: 1,
+      // Larger than the commit-message budget because the whole file comes back,
+      // and a spec that grows past the cap would silently return truncated.
+      maxBudgetUsd: HELPER_BUDGET_USD * 4,
+    },
+  })
+
+  for await (const message of q) {
+    if (message.type !== "assistant") continue
+    const content = (message as unknown as Record<string, unknown>)["message"] as {
+      content?: unknown[]
+    }
+    for (const block of content?.content ?? []) {
+      const b = block as Record<string, unknown>
+      if (b["type"] === "text") chunks.push(String(b["text"] ?? ""))
+    }
+  }
+
+  return stripFence(chunks.join("").trim())
+}

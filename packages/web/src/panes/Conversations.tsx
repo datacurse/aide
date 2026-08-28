@@ -1,15 +1,25 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import type { Attachment, ChatMode, ContextUsage, EffortLevel, RunEvent } from "@aide/protocol"
-import { api, type ConversationSummary, type ConversationView } from "../api.js"
+import type {
+  Attachment,
+  ChatMode,
+  ChatStatus,
+  ChatVerdict,
+  ContextUsage,
+  EffortLevel,
+  RunEvent,
+} from "@aide/protocol"
+import { sortChats } from "@aide/protocol"
+import { api, type ConversationRow, type ConversationView } from "../api.js"
 import { useDoneChime } from "../chime.js"
 import { Composer } from "../Composer.js"
 import { discardDraft, draftKey, openNewChat, useDraft, type Draft } from "../drafts.js"
 import { Markdown } from "../Markdown.js"
 import { WorkingBar } from "../Working.js"
-import { Empty, PaneHeader } from "../ui.js"
+import { Confirm, Empty, PaneHeader } from "../ui.js"
 import { useRunStream } from "../useRunStream.js"
 import { useStickToBottom } from "../useStickToBottom.js"
-import { Transcript } from "./Run.js"
+import { ReviewPanel } from "./Review.js"
+import { Transcript } from "./Transcript.js"
 
 /**
  * How many events to render without being asked.
@@ -32,9 +42,9 @@ function ago(ms: number): string {
 
 const mb = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)} MB`
 
-const kindLabel = (c: ConversationSummary) => (c.kind === "task" ? `task ${c.taskId}` : "chat")
-const kindColor = (c: ConversationSummary) =>
-  c.kind === "task" ? "text-diff-add-fg" : "text-syn-var"
+type Kinded = { kind: string; taskId: string | null }
+const kindLabel = (c: Kinded) => (c.kind === "task" ? `task ${c.taskId}` : "chat")
+const kindColor = (c: Kinded) => (c.kind === "task" ? "text-diff-add-fg" : "text-syn-var")
 
 /**
  * A chat that exists but has not spoken yet.
@@ -95,10 +105,116 @@ function UnstartedRow({
  * Both kinds are shown. A `chat` is a session whose cwd is the project root —
  * including ones started in the Claude Code CLI or the VS Code extension, since
  * aide reads the same store rather than keeping one of its own. A `task` is a
- * session that ran in one of aide's worktrees, which means this list doubles as
+ * session that ran in one of aide's old worktrees, which means this list doubles as
  * run history: a task's earlier transcripts stay reachable here after a re-run,
  * where the run pane only ever shows the newest.
  */
+/**
+ * What a conversation wants from you, in one word.
+ *
+ * Nothing at all for an ordinary chat. Only work the board is tracking has a
+ * lifecycle, and giving every conversation a badge would bury the two that
+ * genuinely need something under thirty that do not.
+ */
+function StatusBadge({ status }: { status: ChatStatus }) {
+  if (status.blocked && status.state !== "closed") {
+    return <span className="shrink-0 text-[10px] text-err">blocked</span>
+  }
+  if (status.state === "working") {
+    return <span className="shrink-0 text-[10px] text-info">working</span>
+  }
+  if (status.state === "needs-you") {
+    return (
+      <span className="shrink-0 text-[10px] text-warn">
+        needs you{status.stale ? " · stale" : ""}
+      </span>
+    )
+  }
+  if (status.state === "closed") {
+    const tone = status.verdict === "done" ? "text-ok" : "text-fg-dim"
+    return <span className={`shrink-0 text-[10px] ${tone}`}>{status.verdict}</span>
+  }
+  return null
+}
+
+/**
+ * The verdict bar.
+ *
+ * The only place in aide where work is declared finished, and deliberately the
+ * only thing here an agent cannot reach: it may write the code, the spec and the
+ * backlog, but a "done" it awarded itself would make every other one worthless.
+ *
+ * Shown only for work the board is tracking. An ordinary question has nothing to
+ * resolve, and offering to close it would turn every chat into paperwork.
+ *
+ * Two buttons, not three. "Failed" used to sit between them and asked to be told
+ * something the next message already says: work that did not land is work you
+ * reply to, and the row stays open on its own until somebody settles it.
+ */
+function VerdictBar({
+  status,
+  onClose,
+  onReopen,
+}: {
+  status: ChatStatus
+  onClose: (verdict: ChatVerdict) => void
+  onReopen: () => void
+}) {
+  // Dropping deletes the row and gives the checkout back, and the button sits a
+  // few pixels from "done" — the two endings a mis-click confuses are the two
+  // that are hardest to tell apart afterwards.
+  const [dropping, setDropping] = useState(false)
+  if (status.state === "closed") {
+    return (
+      <div className="flex shrink-0 items-center gap-2 border-t border-line bg-chrome px-3 py-1.5 font-sans text-[11px]">
+        <span className={status.verdict === "done" ? "text-ok" : "text-fg-muted"}>
+          closed as {status.verdict}
+        </span>
+        <button type="button" onClick={onReopen} className="ml-auto text-fg-dim hover:text-fg">
+          reopen
+        </button>
+      </div>
+    )
+  }
+  if (!status.rowId) return null
+
+  return (
+    <div className="flex shrink-0 items-center gap-2 border-t border-line bg-chrome px-3 py-1.5 font-sans text-[11px]">
+      <span className="text-fg-dim">working #{status.rowId}</span>
+      <div className="ml-auto flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={() => onClose("done")}
+          title="Finished. Removes the row from the backlog."
+          className="rounded-sm bg-ok/80 px-2 py-0.5 text-white hover:bg-ok"
+        >
+          done
+        </button>
+        <button
+          type="button"
+          onClick={() => setDropping(true)}
+          title="Not wanted after all. Removes the row and gives the checkout back."
+          className="text-fg-muted hover:text-err"
+        >
+          drop
+        </button>
+      </div>
+      {dropping && (
+        <Confirm
+          title={`Drop row #${status.rowId}?`}
+          detail="The backlog line goes and the conversation closes. Any commits stay, and so does the checkpoint taken before it started. Nothing here says the work was finished, so use done if it was."
+          confirmLabel="drop"
+          onConfirm={() => {
+            setDropping(false)
+            onClose("dropped")
+          }}
+          onCancel={() => setDropping(false)}
+        />
+      )}
+    </div>
+  )
+}
+
 export function ConversationList({
   projectId,
   selected,
@@ -109,7 +225,7 @@ export function ConversationList({
   /** null selects the chat that has not started yet — the draft row. */
   onSelect: (sessionId: string | null) => void
 }) {
-  const [items, setItems] = useState<ConversationSummary[] | null>(null)
+  const [items, setItems] = useState<ConversationRow[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   /**
    * The chat you pressed "new" for. It has no session id and no file on disk, so
@@ -158,7 +274,7 @@ export function ConversationList({
           onDiscard={() => discardDraft(unstarted.key)}
         />
       )}
-      {items.map((c) => (
+      {sortChats(items).map((c) => (
         <button
           key={c.sessionId}
           type="button"
@@ -171,10 +287,18 @@ export function ConversationList({
             <span className={`shrink-0 text-[10px] ${kindColor(c)}`} title={c.cwd}>
               {kindLabel(c)}
             </span>
-            <span className="flex-1 truncate text-[13px]">{c.title}</span>
+            <span
+              className={`flex-1 truncate text-[13px] ${
+                c.status.state === "closed" ? "line-through decoration-1 opacity-60" : ""
+              }`}
+            >
+              {c.title}
+            </span>
+            <StatusBadge status={c.status} />
           </div>
           <div className="flex items-baseline gap-2 text-[10px] text-fg-dim">
             <span>{ago(c.lastModified)}</span>
+            {c.status.rowId && <span className="text-fg-dim">#{c.status.rowId}</span>}
             {c.bytes > 0 && <span>{mb(c.bytes)}</span>}
             {c.gitBranch && <span className="min-w-0 truncate">{c.gitBranch}</span>}
           </div>
@@ -204,12 +328,22 @@ export function ConversationList({
 export function ConversationPane({
   projectId,
   openSessionId,
+  pendingTodoId,
   onStarted,
+  onChanged,
 }: {
   projectId: string | null
   openSessionId: string | null
+  /**
+   * The board row this new chat was started from, if any. Sent with the first
+   * message because the row and the session are paired the moment the SDK names
+   * the session, and there is no second chance to do it.
+   */
+  pendingTodoId?: string | null
   /** A new chat learns its session id mid-turn; the URL needs to know. */
   onStarted?: (sessionId: string) => void
+  /** A verdict rewrote the backlog, so the board and the list are both stale. */
+  onChanged?: () => void
 }) {
   const [view, setView] = useState<ConversationView | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -223,6 +357,14 @@ export function ConversationPane({
   const [sent, setSent] = useState<Map<string, RunEvent>>(new Map())
   /** Known once a new conversation's first turn starts. */
   const [liveSessionId, setLiveSessionId] = useState<string | null>(null)
+  /**
+   * Whether a NEW conversation gets a backlog row.
+   *
+   * Defaults off: most chats are questions, and a row for "where does this
+   * function live" is noise on the board. A chat started from a row is already
+   * tracked by definition.
+   */
+  const [tracked, setTracked] = useState(false)
 
   const summary = view?.summary ?? null
   const sessionId = openSessionId ?? liveSessionId
@@ -381,7 +523,17 @@ export function ConversationPane({
     // this covers arriving at a new chat without having pressed "new".
     if (!sessionId) openNewChat(projectId)
     try {
-      const { runId: id } = await api.chat(projectId, { sessionId, ...msg })
+      // Both only mean anything on a first message — after that the daemon reads
+      // the conversation's row off the board, so a reload cannot land a
+      // follow-up in the wrong working directory.
+      const opening = sessionId
+        ? {}
+        : pendingTodoId
+          ? { todoId: pendingTodoId }
+          : tracked
+            ? { track: true }
+            : {}
+      const { runId: id } = await api.chat(projectId, { sessionId, ...msg, ...opening })
       setRunId(id)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -476,6 +628,44 @@ export function ConversationPane({
         />
       )}
 
+      {/* Every conversation can produce a diff now — they all edit the project
+          directly — so this is gated on the conversation being open rather than
+          on it having a checkout of its own. A question simply shows an empty
+          diff, which is the honest answer to "what did this change". */}
+      {projectId && sessionId && summary && summary.status.state !== "closed" && (
+        <ReviewPanel
+          projectId={projectId}
+          sessionId={sessionId}
+          onCommitted={() => onChanged?.()}
+        />
+      )}
+
+      {projectId && summary?.status && (
+        <VerdictBar
+          status={summary.status}
+          onClose={(verdict) => {
+            if (!sessionId) return
+            void api
+              .closeChat(projectId, sessionId, verdict)
+              .then((r) => {
+                // The verdict landed either way; a checkout that could not be
+                // reclaimed is untidy, not a failure, so it is reported rather
+                // than thrown.
+                if (r.warning) setError(r.warning)
+                onChanged?.()
+              })
+              .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+          }}
+          onReopen={() => {
+            if (!sessionId) return
+            void api
+              .reopenChat(projectId, sessionId)
+              .then(() => onChanged?.())
+              .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+          }}
+        />
+      )}
+
       {projectId && (
         <Composer
           busy={busy}
@@ -483,6 +673,9 @@ export function ConversationPane({
           sessionId={sessionId}
           draftKey={draftKey(projectId, sessionId)}
           inheritedMode={summary?.lastMode ?? null}
+          // For a live conversation the board is the only thing that knows.
+          tracked={sessionId ? summary?.status.rowId != null : tracked || pendingTodoId != null}
+          onTracked={setTracked}
           onSend={(msg) => void send(msg)}
           onInterrupt={() => {
             if (runId) void api.interruptChat(runId).catch(() => {})

@@ -16,5 +16,18 @@
  */
 export const STATE_DIR = ".aide"
 
-/** Branch name for a task's worktree. */
-export const branchName = (taskId: string) => `aide/task-${taskId}`
+/**
+ * A short, filesystem- and ref-safe slug from arbitrary prose.
+ *
+ * Used for the readable half of a branch name. Capped, because this ends up in
+ * a path and in `git log` forever, and a forty-word todo makes both unusable.
+ */
+export function slugify(title: string): string {
+  const s = title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48)
+    .replace(/-+$/g, "")
+  return s || "untitled"
+}

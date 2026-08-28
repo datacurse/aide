@@ -1,5 +1,8 @@
 import type {
   Attachment,
+  BoardRow,
+  ChatStatus,
+  ChatVerdict,
   ChatMode,
   ConversationSummary,
   EffortLevel,
@@ -9,21 +12,38 @@ import type {
   Health,
   Project,
   RunEvent,
-  Task,
+  Todo,
 } from "@aide/protocol"
 
 export type { ConversationSummary, GitCommitDetail, GitSummary, GitWorkingTree, Health }
 
+/**
+ * A conversation plus what the board knows about it.
+ *
+ * Attached by the daemon rather than stored in the session file: the SDK owns
+ * the transcript, aide owns the lifecycle, and merging them on the wire keeps
+ * the list to one request.
+ */
+export type ConversationRow = ConversationSummary & { status: ChatStatus }
+
 /** A conversation's replayed transcript. */
 export interface ConversationView {
-  summary: ConversationSummary
+  summary: ConversationRow
   events: RunEvent[]
   truncated: boolean
   totalMessages: number
 }
 
-export type ProjectView = Project & { activeRuns: number }
-export type TaskView = Task & { activeRunId: string | null }
+/** Who has a project's checkout right now, if anyone. */
+export interface LockHolder {
+  runId: string
+  /** null for the moment before the SDK names a brand new conversation. */
+  sessionId: string | null
+  title: string
+  startedAt: number
+}
+
+export type ProjectView = Project & { holder: LockHolder | null }
 
 /**
  * Daemon lifecycle, served by the Vite dev server rather than the daemon — the
@@ -42,31 +62,38 @@ export interface DaemonStatus {
   lastExit: { code: number | null; signal: string | null; at: number } | null
 }
 
-export interface DiffView {
-  worktree: string
-  diff: string
-  status: string
+/** The board pane's whole payload: the backlog and the capability list. */
+export interface BoardView {
+  rows: BoardRow[]
+  spec: string
+  /** Project-state problems that would otherwise fail silently. Usually empty. */
+  warnings: string[]
 }
 
-export interface CommitDraft {
+/** What the commit gate offers for review: a message, and the spec it earns. */
+export interface ReviewDraft {
   message: string
-  /** Which model wrote it, so the UI never has to guess. */
+  /** Empty when the change earns no spec update, which is the common case. */
+  spec: string
+  specChanged: boolean
   model: string
+  /**
+   * Files the run changed that were ALREADY modified before it started.
+   *
+   * Empty in the ordinary case. When it is not, committing takes both sets of
+   * edits, because git cannot separate them — so these are named rather than
+   * silently folded in.
+   */
+  mixed: string[]
 }
 
-export interface CommitResult {
-  sha: string
-  /** Path relative to the project root, or null if the entry could not be written. */
-  journal: string | null
-  /** Set when the commit succeeded but something after it did not. */
-  warning: string | null
-}
-
-export interface LandResult {
-  sha: string
-  /** The branch the task was merged into. */
-  into: string
-  warning: string | null
+/** A run's work, measured against the checkpoint taken before it started. */
+export interface DiffView {
+  root: string
+  diff: string
+  /** Exactly what a commit would stage. */
+  paths: string[]
+  mixed: string[]
 }
 
 async function call<T>(url: string, init?: RequestInit): Promise<T> {
@@ -110,27 +137,55 @@ export const api = {
     call<Project>("/api/projects", { method: "POST", body: JSON.stringify({ path }) }),
   removeProject: (id: string) => call<void>(`/api/projects/${id}`, { method: "DELETE" }),
 
-  tasks: (projectId: string) => call<TaskView[]>(`/api/projects/${projectId}/tasks`),
-  createTask: (projectId: string, title: string, body: string) =>
-    call<Task>(`/api/projects/${projectId}/tasks`, {
+  /** Rows and spec together: they are one view and must not render a frame apart. */
+  board: (projectId: string) => call<BoardView>(`/api/projects/${projectId}/board`),
+  addTodo: (projectId: string, text: string) =>
+    call<Todo>(`/api/projects/${projectId}/todos`, {
       method: "POST",
-      body: JSON.stringify({ title, body }),
+      body: JSON.stringify({ text }),
     }),
-  deleteTask: (projectId: string, taskId: string) =>
-    call<void>(`/api/projects/${projectId}/tasks/${taskId}`, { method: "DELETE" }),
-
-  runTask: (projectId: string, taskId: string) =>
-    call<{ runId: string }>(`/api/projects/${projectId}/tasks/${taskId}/run`, { method: "POST" }),
-  interrupt: (runId: string) =>
-    call<{ interrupted: boolean }>(`/api/runs/${runId}/interrupt`, { method: "POST" }),
+  editTodo: (projectId: string, todoId: string, text: string) =>
+    call<Todo>(`/api/projects/${projectId}/todos/${todoId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ text }),
+    }),
+  deleteTodo: (projectId: string, todoId: string) =>
+    call<void>(`/api/projects/${projectId}/todos/${todoId}`, { method: "DELETE" }),
+  /** Attach a conversation to a row, once the SDK has named the session. */
+  linkTodo: (projectId: string, todoId: string, sessionId: string) =>
+    call<void>(`/api/projects/${projectId}/board/${todoId}/session`, {
+      method: "POST",
+      body: JSON.stringify({ sessionId }),
+    }),
+  unlinkTodo: (projectId: string, todoId: string) =>
+    call<void>(`/api/projects/${projectId}/board/${todoId}/session`, { method: "DELETE" }),
 
   events: (runId: string, fromSeq = 0) =>
     call<RunEvent[]>(`/api/runs/${runId}/events?fromSeq=${fromSeq}`),
-  diff: (projectId: string, taskId: string) =>
-    call<DiffView>(`/api/projects/${projectId}/tasks/${taskId}/diff`),
 
   conversations: (projectId: string) =>
-    call<ConversationSummary[]>(`/api/projects/${projectId}/conversations`),
+    call<ConversationRow[]>(`/api/projects/${projectId}/conversations`),
+  /** What this conversation changed, against its checkpoint. */
+  chatDiff: (projectId: string, sessionId: string) =>
+    call<DiffView>(`/api/projects/${projectId}/conversations/${sessionId}/diff`),
+  /** Commit message and spec update, drafted together because they are one review. */
+  draftReview: (projectId: string, sessionId: string) =>
+    call<ReviewDraft>(`/api/projects/${projectId}/conversations/${sessionId}/review/draft`, {
+      method: "POST",
+    }),
+  commitChat: (projectId: string, sessionId: string, message: string, spec: string) =>
+    call<{ sha: string }>(`/api/projects/${projectId}/conversations/${sessionId}/commit`, {
+      method: "POST",
+      body: JSON.stringify({ message, spec }),
+    }),
+  /** The verdict. Nothing an agent runs can reach this. */
+  closeChat: (projectId: string, sessionId: string, verdict: ChatVerdict) =>
+    call<{ rowId: string | null; rowRemoved: boolean; warning: string | null }>(
+      `/api/projects/${projectId}/conversations/${sessionId}/close`,
+      { method: "POST", body: JSON.stringify({ verdict }) },
+    ),
+  reopenChat: (projectId: string, sessionId: string) =>
+    call<void>(`/api/projects/${projectId}/conversations/${sessionId}/reopen`, { method: "POST" }),
   conversation: (projectId: string, sessionId: string) =>
     call<ConversationView>(`/api/projects/${projectId}/conversations/${sessionId}`),
 
@@ -142,6 +197,10 @@ export const api = {
       attachments: Attachment[]
       mode: ChatMode
       effort: EffortLevel
+      /** Start this conversation on an existing board row. First message only. */
+      todoId?: string
+      /** Put it on the board with no row yet; the daemon makes one. First message only. */
+      track?: boolean
     },
   ) =>
     call<{ runId: string }>(`/api/projects/${projectId}/chat`, {
@@ -157,17 +216,6 @@ export const api = {
     call<{ interrupted: boolean }>(`/api/runs/${runId}/chat-interrupt`, { method: "POST" }),
 
   branch: (projectId: string) => call<{ branch: string | null }>(`/api/projects/${projectId}/branch`),
-  draftCommit: (projectId: string, taskId: string) =>
-    call<CommitDraft>(`/api/projects/${projectId}/tasks/${taskId}/commit/draft`, {
-      method: "POST",
-    }),
-  commit: (projectId: string, taskId: string, message: string) =>
-    call<CommitResult>(`/api/projects/${projectId}/tasks/${taskId}/commit`, {
-      method: "POST",
-      body: JSON.stringify({ message }),
-    }),
-  land: (projectId: string, taskId: string) =>
-    call<LandResult>(`/api/projects/${projectId}/tasks/${taskId}/land`, { method: "POST" }),
 
   /** Branch, ahead/behind, dirt counts and the log — one poll's worth. */
   git: (projectId: string, limit: number) =>

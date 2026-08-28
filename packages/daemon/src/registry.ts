@@ -3,20 +3,16 @@ import { existsSync } from "node:fs"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { basename, resolve } from "node:path"
 import type { Project, ProjectDoc } from "@aide/protocol"
-import { EMPTY_PROJECT_DOC } from "@aide/protocol"
+import { DEFAULT_TODOS, EMPTY_PROJECT_DOC } from "@aide/protocol"
 import {
   aideHome,
-  decisionsDir,
-  inboxPath,
-  journalDir,
   parseProjectDoc,
   projectDocPath,
   registryPath,
-  specsDir,
   stateDir,
-  tasksDir,
+  todosPath,
 } from "@aide/protocol/node"
-import { isGitRepo, repoRoot } from "./worktree.js"
+import { isGitRepo, repoRoot } from "./repo.js"
 
 /** Stable across re-adds: the same path always yields the same project id. */
 const projectId = (root: string) =>
@@ -40,25 +36,15 @@ async function saveProjects(projects: Project[]): Promise<void> {
 }
 
 /**
- * The frontmatter is commented out on purpose. aide manages arbitrary repos, and
- * guessing a package manager is worse than doing nothing — a wrong bootstrap
- * command fails every run until someone notices.
+ * No frontmatter, because there is no longer anything in it aide acts on.
+ *
+ * There used to be a `bootstrap` command, run once in each fresh worktree
+ * because `git worktree add` checks out tracked files only and left the agent
+ * without `node_modules`. Runs work the project's own checkout now, which is
+ * already installed, so scaffolding a commented-out setting for a step that no
+ * longer exists would be inviting someone to configure nothing.
  */
-const PROJECT_DOC = `---
-# Uncomment and set this to whatever makes a fresh checkout of this project
-# buildable. It runs ONCE in each new task worktree, before the agent starts,
-# because \`git worktree add\` checks out tracked files only — no node_modules,
-# no vendor/, no venv.
-#
-# aide already sets CI=true, NO_COLOR=1 and GIT_TERMINAL_PROMPT=0 for you.
-# Inline VAR=value prefixes are not portable here; the command runs through the
-# platform shell.
-#
-# bootstrap: pnpm install --frozen-lockfile
-# bootstrapTimeoutMs: 600000
----
-
-# Project
+const PROJECT_DOC = `# Project
 
 <!--
 Why this exists. Read by every agent that works here, as a standing constraint
@@ -66,7 +52,7 @@ rather than as part of any one task.
 
 This is the WHY. For HOW to work in the codebase — commands, conventions, what
 never to run — use a CLAUDE.md at the repo root instead: it is versioned with the
-code it describes, and agents read it from their own worktree.
+code it describes, and agents pick it up from the checkout they are working in.
 -->
 
 ## Constraints
@@ -81,14 +67,12 @@ portable. If aide disappears, this directory is still a description of the proje
 
 | Path | What |
 | --- | --- |
-| \`project.md\` | Why this exists, constraints, non-goals. You write it. |
-| \`tasks/\` | One markdown file per unit of work. Body is the agent prompt. |
-| \`inbox.md\` | Freeform dump zone. Consumed by the intake pass. |
-| \`specs/\` | One file per feature area. |
-| \`roadmap.md\` | Generated, ordered, references spec ids. |
-| \`journal/\` | What agents did, written automatically. |
-| \`decisions/\` | ADRs. |
-| \`worktrees/\` | Per-task git worktrees. Gitignored. |
+| \`project.md\` | Why this exists, constraints, non-goals. Rarely changes. |
+| \`todos.md\` | The backlog. One line per row; aide numbers them. |
+| \`spec.md\` | What this project can and cannot do. Agents keep it current. |
+
+Both \`todos.md\` and \`spec.md\` are written by agents as well as by you. What
+is finished is decided by you alone — see the verdict buttons in a chat.
 `
 
 /**
@@ -96,12 +80,14 @@ portable. If aide disappears, this directory is still a description of the proje
  * "works with any repo" real rather than aspirational.
  */
 export async function scaffoldState(root: string): Promise<void> {
-  for (const dir of [tasksDir(root), specsDir(root), journalDir(root), decisionsDir(root)]) {
-    await mkdir(dir, { recursive: true })
-  }
+  // Directories only where something actually lands. Empty ones are worse than
+  // absent ones: they promise a structure that does not exist and quietly shame
+  // you for not filling them, which is what `tasks/`, `specs/`, `journal/` and
+  // `decisions/` did in every project aide ever touched.
+  await mkdir(stateDir(root), { recursive: true })
   const seed: Array<[string, string]> = [
     [projectDocPath(root), PROJECT_DOC],
-    [inboxPath(root), ""],
+    [todosPath(root), DEFAULT_TODOS],
     [`${stateDir(root)}/README.md`, STATE_README],
   ]
   for (const [path, content] of seed) {
@@ -142,7 +128,9 @@ export async function addProject(inputPath: string): Promise<Project> {
   const abs = resolve(inputPath)
   if (!existsSync(abs)) throw new Error(`no such directory: ${abs}`)
   if (!(await isGitRepo(abs))) {
-    throw new Error(`not a git repository: ${abs} (aide runs each task in a git worktree)`)
+    throw new Error(
+      `not a git repository: ${abs} (aide reviews work as a diff, and snapshots the tree before each run, so it needs git)`,
+    )
   }
 
   // Normalize to the repo root so adding a subdirectory does not create a second

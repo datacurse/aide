@@ -28,21 +28,11 @@ export const CONFIG = {
   helperModel: process.env["AIDE_HELPER_MODEL"] ?? "claude-sonnet-5",
 
   /**
-   * Two is a review-bandwidth limit as much as a rate-limit one. Raising this
-   * mostly buys you more diffs than you can actually read.
+   * There is no concurrency setting, and that is the design rather than an
+   * omission. One agent has a project's checkout at a time, because they all
+   * work the SAME checkout — see the lock in `chat.ts`. Parallelism is several
+   * projects, not several agents in one.
    */
-  maxConcurrentRuns: num("AIDE_MAX_CONCURRENT", 2),
-
-  /**
-   * Per TASK run. Ends the run with subtype error_max_budget_usd rather than a
-   * surprise bill.
-   *
-   * A task is autonomous: it runs with nobody watching, so a cap is the only
-   * thing standing between a confused agent and an afternoon of spending. That
-   * argument does not transfer to a chat, which is why chats have their own
-   * setting below.
-   */
-  maxBudgetUsd: num("AIDE_MAX_BUDGET_USD", 5),
 
   /**
    * Per chat turn. Zero means no cap, which is the default.
@@ -52,8 +42,42 @@ export const CONFIG = {
    * mid-sentence costs you the whole turn's spend anyway, buying nothing. Long
    * conversations resend a large context every turn and are legitimately
    * expensive; the outcome line reports what each one cost.
+   *
+   * Read this as per CONVERSATION rather than per turn if you set it. The cap is
+   * a `query()` option and a conversation now holds one query open across its
+   * turns, so the SDK measures it against the session's running total — and a
+   * cold start (first message, after an idle eviction, after a restart) begins a
+   * fresh query and a fresh allowance.
    */
   chatMaxBudgetUsd: num("AIDE_CHAT_MAX_BUDGET_USD", 0),
+
+  /**
+   * How long a conversation's session is kept open with nobody talking to it.
+   *
+   * A warm session is a CLI subprocess and a context window held in memory, and
+   * that is only worth paying for while a follow-up is plausibly coming. Past
+   * this the session is closed, and the next message cold-starts with `resume` —
+   * which costs the ~1.4s the warm path saves and nothing else.
+   */
+  chatIdleMs: num("AIDE_CHAT_IDLE_MS", 10 * 60_000),
+
+  /**
+   * How long open work can sit untouched before the list flags it stale.
+   *
+   * A flag rather than a state: a conversation that has been waiting three weeks
+   * is still waiting FOR YOU, and promoting staleness to a status of its own
+   * would throw away the only useful thing about it.
+   */
+  chatStaleMs: num("AIDE_CHAT_STALE_MS", 3 * 24 * 60 * 60_000),
+
+  /**
+   * How long an evicted worker gets to exit on its own before it is killed.
+   *
+   * Closing is cooperative — the input stream ends and the SDK winds the session
+   * down — so this is only the backstop for a worker that does not come back,
+   * which must not be able to leak a process for the life of the daemon.
+   */
+  chatCloseGraceMs: num("AIDE_CHAT_CLOSE_GRACE_MS", 10_000),
 
   /**
    * Fail closed. Anything not listed is denied, because a headless run has nobody

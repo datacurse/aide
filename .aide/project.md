@@ -1,8 +1,3 @@
----
-bootstrap: pnpm install --frozen-lockfile
-bootstrapTimeoutMs: 600000
----
-
 # aide
 
 A bird's-eye view across projects, with Claude working tasks in each one.
@@ -21,10 +16,17 @@ to review the work without leaving.
   credentials the machine already has. Anthropic does not permit third-party
   products to offer claude.ai login, so bring your own — there is no other
   supported setup, and adding one is not an option.
-- **Two human gates, not one.** `needs-review` → `committed` → `done`.
-  Committing is recoverable; merging is what the rest of the repo has to live
-  with. Collapsing them into one button is not a simplification, it is removing
-  the review.
+- **One agent has the repo.** Runs work the project's own checkout, one at a
+  time, over a snapshot taken before they start. Worktrees isolated *committed*
+  state while the real state of a project lives uncommitted, so a branched run
+  worked against a repo that had not been true for hours — and its changes could
+  never appear in the dev server, which made anything visual unreviewable.
+  Parallelism is several projects, not several agents in one.
+- **A gate on the code, and a gate on the work.** You read the diff and commit
+  it; separately, you decide the work is done and the row closes. There is no
+  merge to be the second gate any more — recoverability comes from the
+  checkpoint instead. Collapsing the two into one button is not a
+  simplification, it is removing the review.
 - **Cost figures are estimates.** They come from a price table bundled into the
   SDK at build time. Fine for a dashboard, never for billing, and anything that
   displays one should say so.

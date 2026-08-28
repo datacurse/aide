@@ -338,11 +338,11 @@ function CommitRow({
         </div>
         <div className="flex items-baseline gap-2 text-[10px]">
           <span className={selected ? "text-white/70" : "text-fg-dim"}>{commit.short}</span>
-          {commit.tasks.map((t) => (
+          {commit.rows.map((t) => (
             <span
               key={t}
               className={selected ? "text-white/70" : "text-diff-add-fg"}
-              title="Aide-Task trailer"
+              title="Aide-Row trailer"
             >
               task {t}
             </span>
@@ -523,8 +523,8 @@ function CommitView({ detail }: { detail: GitCommitDetail }) {
           {commit.refs.map((r) => (
             <RefBadge key={`${r.kind}:${r.name}`} gitRef={r} />
           ))}
-          {commit.tasks.map((t) => (
-            <span key={t} className="text-[10px] text-diff-add-fg" title="Aide-Task trailer">
+          {commit.rows.map((t) => (
+            <span key={t} className="text-[10px] text-diff-add-fg" title="Aide-Row trailer">
               task {t}
             </span>
           ))}

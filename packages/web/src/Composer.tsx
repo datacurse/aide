@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import { readDraft, saveDraft, useDraft } from "./drafts.js"
+import { useAutoGrow } from "./useAutoGrow.js"
 import { useRemembered } from "./useRemembered.js"
 import {
   CHAT_MODES,
@@ -161,12 +162,54 @@ function ModePicker({
  * it maps 1:1 onto the SDK's `permissionMode`, so "Manual" genuinely means the
  * turn will stop and ask.
  */
+/**
+ * Whether this conversation shows up on the board.
+ *
+ * Locked once the conversation exists, because the row is paired with the
+ * session when the SDK first names it. Shown rather than hidden when locked:
+ * "is anyone tracking this?" is worth answering either way.
+ */
+function TrackToggle({
+  locked,
+  tracked,
+  onChange,
+}: {
+  locked: boolean
+  tracked: boolean
+  onChange: (next: boolean) => void
+}) {
+  const label = tracked ? "on the board" : "not tracked"
+  if (locked) {
+    return (
+      <span className={`font-sans text-[11px] ${tracked ? "text-info" : "text-fg-dim"}`}>
+        {label}
+      </span>
+    )
+  }
+  return (
+    <button
+      type="button"
+      onClick={() => onChange(!tracked)}
+      className={`font-sans text-[11px] ${tracked ? "text-info" : "text-fg-dim hover:text-fg-muted"}`}
+      title={
+        tracked
+          ? "Gets a backlog row, so the work is visible on the board."
+          : "Just a question — nothing is added to the backlog."
+      }
+    >
+      {label}
+    </button>
+  )
+}
+
 export function Composer({
   busy,
   usage,
   sessionId,
   draftKey,
   inheritedMode,
+  tracked,
+  onTracked,
   onSend,
   onInterrupt,
 }: {
@@ -178,6 +221,20 @@ export function Composer({
   draftKey: string
   /** The mode this conversation was last driven at, or null if unknown. */
   inheritedMode: ChatMode | null
+  /**
+   * Whether this conversation gets a row on the board.
+   *
+   * This used to be the isolation toggle, and choosing it wrong used to matter:
+   * it decided whether the agent got a worktree of its own or edited the tree
+   * you were looking at. Every conversation edits that tree now, so all this
+   * decides is whether the work is VISIBLE on the board — which is worth a
+   * control, but not a warning.
+   *
+   * Still first-message-only. A row is paired with a session at the moment the
+   * SDK names it, and there is no second moment to do it in.
+   */
+  tracked: boolean
+  onTracked: (next: boolean) => void
   onSend: (msg: {
     text: string
     attachments: Attachment[]
@@ -230,6 +287,7 @@ export function Composer({
   }
   const [note, setNote] = useState<string | null>(null)
   const area = useRef<HTMLTextAreaElement>(null)
+  useAutoGrow(area, text, { minRows: 2, maxRows: 12 })
 
   const canSend = !busy && (text.trim().length > 0 || attachments.length > 0)
 
@@ -312,7 +370,11 @@ export function Composer({
             send()
           }
         }}
-        rows={Math.min(10, Math.max(2, text.split(/\n/).length))}
+        // Height comes from useAutoGrow, which measures the wrapped text. The
+        // row count this used to carry counted newlines, so a long message typed
+        // as one paragraph stayed two rows tall and scrolled its own beginning
+        // out of sight.
+        rows={2}
         placeholder={busy ? "Claude is working…" : "Ask, or paste a screenshot"}
         className="w-full resize-none rounded border border-line-soft bg-input px-2 py-1.5 font-sans text-[13px] leading-relaxed outline-none placeholder:text-fg-dim focus:border-accent"
       />
@@ -321,6 +383,7 @@ export function Composer({
 
       <div className="mt-1.5 flex items-center gap-3">
         <ModePicker mode={mode} effort={effort} onMode={chooseMode} onEffort={setEffort} />
+        <TrackToggle locked={sessionId !== null} tracked={tracked} onChange={onTracked} />
         <ContextMeter usage={usage} />
         <div className="ml-auto flex items-center gap-2">
           {busy ? (

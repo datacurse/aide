@@ -11,5 +11,4 @@
  * Node-shaped there to pull.
  */
 export * from "./paths.js"
-export * from "./task-io.js"
 export * from "./project-io.js"
