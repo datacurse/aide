@@ -244,195 +244,201 @@ export function App() {
 
 
   return (
-    <div className="flex h-full flex-col bg-editor font-mono text-fg antialiased">
-      <header className="flex h-9 shrink-0 items-center justify-between gap-4 border-b border-line bg-chrome px-4 font-sans">
-        <div className="flex items-baseline gap-3">
-          <span className="text-sm font-semibold tracking-tight text-fg">aide</span>
-        </div>
-        {error && <span className="min-w-0 flex-1 truncate text-[11px] text-err">{error}</span>}
-        <div className="flex shrink-0 items-center gap-3">
-          <button
-            type="button"
-            onClick={() => setChiming(!chiming)}
-            title={
-              chiming
-                ? "A finished run rings. Click to silence."
-                : "Finished runs are silent. Click to hear them."
-            }
-            className={`text-[11px] underline-offset-2 hover:underline ${
-              chiming ? "text-fg-muted" : "text-fg-dim line-through"
-            }`}
-          >
-            chime
-          </button>
-          <DaemonBar health={health} onChanged={() => void refresh()} />
-        </div>
-      </header>
-
-      <main className="flex min-h-0 flex-1">
-        {/* Projects */}
-        <aside className="flex w-64 shrink-0 flex-col border-r border-line bg-chrome">
-          <PaneHeader title="projects">
-            <Button onClick={addProject}>add</Button>
-          </PaneHeader>
-          <div className="flex-1 overflow-auto py-1">
-            {projects.length === 0 ? (
-              <Empty>No projects yet. Add a git repository to get started.</Empty>
-            ) : (
-              projects.map((p) => (
-                <button
-                  key={p.id}
-                  type="button"
-                  onClick={() => navigate({ projectId: p.id })}
-                  className={`flex w-full items-center gap-2 px-3 py-[3px] text-left font-sans text-[13px] ${
-                    p.id === projectId
-                      ? "bg-active text-white"
-                      : "text-fg-muted hover:bg-hover"
-                  }`}
-                >
-                  <span
-                    className={`inline-block size-1.5 shrink-0 rounded-full ${
-                      p.holder ? "bg-info animate-pulse" : "bg-fg-dim"
-                    }`}
-                  />
-                  <span className="flex-1 truncate">{p.name}</span>
-                  {/* Which conversation has the repo, not how many do — one
-                      project runs one agent, so a count would be a boolean
-                      wearing a number's clothes. The name is what you need
-                      when you are wondering what is in your way. */}
-                  {p.holder && (
-                    <span
-                      className="max-w-[8rem] truncate text-[10px] text-info"
-                      title={`"${p.holder.title}" has this checkout`}
-                    >
-                      {p.holder.title}
-                    </span>
-                  )}
-                </button>
-              ))
-            )}
-          </div>
-        </aside>
-
-        {/* Tasks and conversations */}
-        <aside className="flex w-80 shrink-0 flex-col border-r border-line bg-chrome">
-          <PaneHeader title={mode}>
-            {mode === "board" && <BoardSummary rows={board.rows} />}
-            <div className="mr-1 flex overflow-hidden rounded border border-line">
-              {PANES.map((m) => (
-                <button
-                  key={m}
-                  type="button"
-                  onClick={() => navigate({ pane: m })}
-                  className={`px-2 py-0.5 text-xs ${
-                    mode === m ? "bg-input text-fg" : "text-fg-muted hover:text-fg"
-                  }`}
-                >
-                  {m}
-                </button>
-              ))}
-            </div>
-            {/* Only the chat list has something to create — the board has its
-                own one-line input. */}
-            {mode === "chats" && (
-              <Button
-                // Held back by uncommitted work, for the same reason the daemon
-                // refuses the message: a conversation opened on top of somebody
-                // else's edits takes them as its own baseline. Disabled rather
-                // than hidden — a button that vanishes teaches you nothing.
-                disabled={!project || uncommitted > 0}
-                onClick={() => {
-                  // Idempotent on purpose: a second press is you looking for the
-                  // chat you already started, not asking for another one.
-                  if (project) openNewChat(project.id)
-                  setPendingRow(null)
-                  navigate({ sessionId: null })
-                }}
-                title={
-                  uncommitted > 0
-                    ? `${uncommitted} uncommitted file${uncommitted === 1 ? "" : "s"} — commit this work before starting another chat.`
-                    : "Start a new conversation. Pressing this again opens the one you already started."
-                }
-              >
-                new
-              </Button>
-            )}
-          </PaneHeader>
-
-
-          {mode === "board" ? (
-            <BoardList
-              projectId={projectId}
-              rows={board.rows}
-              warnings={board.warnings}
-              onOpen={openRow}
-              onAdd={(text) => void addRow(text)}
-              onDelete={(row) => void deleteRow(row)}
-            />
+    // No title bar. Nothing up there was worth a row of height across the whole
+    // window — the app's name is in the tab, and the daemon controls are a
+    // footnote that now lives in the foot of the projects rail. The four panes
+    // get the screen.
+    <main className="flex h-full bg-editor font-mono text-fg antialiased">
+      {/* Projects */}
+      <aside className="flex w-64 shrink-0 flex-col border-r border-line bg-chrome">
+        <PaneHeader title="projects">
+          <Button onClick={addProject}>add</Button>
+        </PaneHeader>
+        <div className="flex-1 overflow-auto py-1">
+          {projects.length === 0 ? (
+            <Empty>No projects yet. Add a git repository to get started.</Empty>
           ) : (
-            <ConversationList
-              key={conversationsSeq}
-              projectId={projectId}
-              selected={sessionId}
-              // Picking an existing conversation abandons the row that was
-              // queued up for a new one; without this it would attach itself to
-              // whatever new chat is started next.
-              onSelect={(id) => {
-                setPendingRow(null)
-                navigate({ sessionId: id })
-              }}
-            />
+            projects.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => navigate({ projectId: p.id })}
+                className={`flex w-full items-center gap-2 px-3 py-[3px] text-left font-sans text-[13px] ${
+                  p.id === projectId
+                    ? "bg-active text-white"
+                    : "text-fg-muted hover:bg-hover"
+                }`}
+              >
+                <span
+                  className={`inline-block size-1.5 shrink-0 rounded-full ${
+                    p.holder ? "bg-info animate-pulse" : "bg-fg-dim"
+                  }`}
+                />
+                <span className="flex-1 truncate">{p.name}</span>
+                {/* Which conversation has the repo, not how many do — one
+                    project runs one agent, so a count would be a boolean
+                    wearing a number's clothes. The name is what you need
+                    when you are wondering what is in your way. */}
+                {p.holder && (
+                  <span
+                    className="max-w-[8rem] truncate text-[10px] text-info"
+                    title={`"${p.holder.title}" has this checkout`}
+                  >
+                    {p.holder.title}
+                  </span>
+                )}
+              </button>
+            ))
           )}
-        </aside>
+        </div>
+
+        {/* Below the projects rather than above every pane: this is where you
+            look when something is not answering, and it is the only thing on
+            screen that is about aide itself rather than about the work. */}
+        <div className="shrink-0 border-t border-line px-3 py-2 font-sans">
+          {/* Cleared by the next successful poll, so it is a flash rather
+              than something to dismiss — wrapped, because the sentence
+              explaining why a chat was refused is the whole point of it. */}
+          {error && (
+            <p className="mb-2 text-[11px] leading-relaxed break-words text-err">{error}</p>
+          )}
+          <DaemonBar health={health} onChanged={() => void refresh()}>
+            <button
+              type="button"
+              onClick={() => setChiming(!chiming)}
+              title={
+                chiming
+                  ? "A finished run rings. Click to silence."
+                  : "Finished runs are silent. Click to hear them."
+              }
+              className={`text-[11px] underline-offset-2 hover:underline ${
+                chiming ? "text-fg-muted" : "text-fg-dim line-through"
+              }`}
+            >
+              chime
+            </button>
+          </DaemonBar>
+        </div>
+      </aside>
+
+      {/* Tasks and conversations */}
+      <aside className="flex w-80 shrink-0 flex-col border-r border-line bg-chrome">
+        <PaneHeader title={mode}>
+          {mode === "board" && <BoardSummary rows={board.rows} />}
+          <div className="mr-1 flex overflow-hidden rounded border border-line">
+            {PANES.map((m) => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => navigate({ pane: m })}
+                className={`px-2 py-0.5 text-xs ${
+                  mode === m ? "bg-input text-fg" : "text-fg-muted hover:text-fg"
+                }`}
+              >
+                {m}
+              </button>
+            ))}
+          </div>
+          {/* Only the chat list has something to create — the board has its
+              own one-line input. */}
+          {mode === "chats" && (
+            <Button
+              // Held back by uncommitted work, for the same reason the daemon
+              // refuses the message: a conversation opened on top of somebody
+              // else's edits takes them as its own baseline. Disabled rather
+              // than hidden — a button that vanishes teaches you nothing.
+              disabled={!project || uncommitted > 0}
+              onClick={() => {
+                // Idempotent on purpose: a second press is you looking for the
+                // chat you already started, not asking for another one.
+                if (project) openNewChat(project.id)
+                setPendingRow(null)
+                navigate({ sessionId: null })
+              }}
+              title={
+                uncommitted > 0
+                  ? `${uncommitted} uncommitted file${uncommitted === 1 ? "" : "s"} — commit this work before starting another chat.`
+                  : "Start a new conversation. Pressing this again opens the one you already started."
+              }
+            >
+              new
+            </Button>
+          )}
+        </PaneHeader>
+
 
         {mode === "board" ? (
-          <SpecPane spec={board.spec} />
-        ) : (
-          <ConversationPane
+          <BoardList
             projectId={projectId}
-            openSessionId={sessionId}
-            pendingTodoId={pendingRow}
-            uncommitted={uncommitted}
-            adoptRunId={commitRunId}
-            // A verdict rewrites todos.md and unlinks the row, so both lists are
-            // stale the moment it lands.
-            onChanged={() => {
-              setConversationsSeq((n) => n + 1)
-              void reloadBoard()
-            }}
-            // A new chat has no id until its first turn starts. Put it in the
-            // URL the moment it exists, so a reload mid-first-turn still lands
-            // on the conversation rather than on a blank new one — and refetch
-            // the list so the row appears.
-            onStarted={(id) => {
-              // The draft row is this conversation, so it does not linger next
-              // to the real one the list is about to grow — anything still
-              // unsent in its box moves across with it.
-              if (projectId) carryDraft(draftKey(projectId, null), draftKey(projectId, id))
-              // The daemon records the row-to-session link itself, as part of
-              // the send that already had to know the row to pick a working
-              // directory. Nothing to do here but stop offering it to the next
-              // new chat.
+            rows={board.rows}
+            warnings={board.warnings}
+            onOpen={openRow}
+            onAdd={(text) => void addRow(text)}
+            onDelete={(row) => void deleteRow(row)}
+          />
+        ) : (
+          <ConversationList
+            key={conversationsSeq}
+            projectId={projectId}
+            selected={sessionId}
+            // Picking an existing conversation abandons the row that was
+            // queued up for a new one; without this it would attach itself to
+            // whatever new chat is started next.
+            onSelect={(id) => {
               setPendingRow(null)
               navigate({ sessionId: id })
-              setConversationsSeq((n) => n + 1)
             }}
           />
         )}
+      </aside>
 
-        {/* Always on screen, whichever pane is showing. Not a view of the
-            repository — reading a change belongs to the conversation that made
-            it — but the answer to "can I start the next thing", which has to be
-            visible before you try, and the button that makes the answer yes. */}
-        <PendingRail
+      {mode === "board" ? (
+        <SpecPane spec={board.spec} />
+      ) : (
+        <ConversationPane
           projectId={projectId}
-          pending={pending}
-          error={pendingError}
-          commitBlocked={commitBlocked}
-          committing={committing}
-          onCommit={() => void commitWork()}
+          openSessionId={sessionId}
+          pendingTodoId={pendingRow}
+          uncommitted={uncommitted}
+          adoptRunId={commitRunId}
+          // A verdict rewrites todos.md and unlinks the row, so both lists are
+          // stale the moment it lands.
+          onChanged={() => {
+            setConversationsSeq((n) => n + 1)
+            void reloadBoard()
+          }}
+          // A new chat has no id until its first turn starts. Put it in the
+          // URL the moment it exists, so a reload mid-first-turn still lands
+          // on the conversation rather than on a blank new one — and refetch
+          // the list so the row appears.
+          onStarted={(id) => {
+            // The draft row is this conversation, so it does not linger next
+            // to the real one the list is about to grow — anything still
+            // unsent in its box moves across with it.
+            if (projectId) carryDraft(draftKey(projectId, null), draftKey(projectId, id))
+            // The daemon records the row-to-session link itself, as part of
+            // the send that already had to know the row to pick a working
+            // directory. Nothing to do here but stop offering it to the next
+            // new chat.
+            setPendingRow(null)
+            navigate({ sessionId: id })
+            setConversationsSeq((n) => n + 1)
+          }}
         />
-      </main>
-    </div>
+      )}
+
+      {/* Always on screen, whichever pane is showing. Not a view of the
+          repository — reading a change belongs to the conversation that made
+          it — but the answer to "can I start the next thing", which has to be
+          visible before you try, and the button that makes the answer yes. */}
+      <PendingRail
+        projectId={projectId}
+        pending={pending}
+        error={pendingError}
+        commitBlocked={commitBlocked}
+        committing={committing}
+        onCommit={() => void commitWork()}
+      />
+    </main>
   )
 }

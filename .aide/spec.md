@@ -1,3 +1,5 @@
+This is purely a UI layout refactor (removing the header bar, moving daemon controls into the projects rail footer). It doesn't add, change, or remove any capability described in the spec — no new behavior, no fixed limitation. The file comes back unchanged.
+
 # What aide can and cannot do
 
 The capability list. One line per thing, present tense, only what is true of the

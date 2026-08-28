@@ -31,7 +31,16 @@ const LABEL: Record<DaemonStatus["state"], string> = {
  * and the whole control surface disappears rather than offering buttons that
  * cannot work.
  */
-export function DaemonBar({ health, onChanged }: { health: Health | null; onChanged: () => void }) {
+export function DaemonBar({
+  health,
+  onChanged,
+  children,
+}: {
+  health: Health | null
+  onChanged: () => void
+  /** Rendered in the button row. The chime toggle lives here so its state can stay in App. */
+  children?: React.ReactNode
+}) {
   const [status, setStatus] = useState<DaemonStatus | null>(null)
   const [supported, setSupported] = useState(true)
   const [busy, setBusy] = useState<"start" | "stop" | "restart" | null>(null)
@@ -65,9 +74,12 @@ export function DaemonBar({ health, onChanged }: { health: Health | null; onChan
 
   if (!supported) {
     return (
-      <span className="text-[11px] text-fg-dim">
-        {health ? `${health.taskModel} · one run at a time` : "daemon offline"}
-      </span>
+      <div className="flex flex-col gap-1.5">
+        <span className="truncate text-[11px] text-fg-dim">
+          {health ? `${health.taskModel} · one run at a time` : "daemon offline"}
+        </span>
+        {children}
+      </div>
     )
   }
 
@@ -124,13 +136,10 @@ export function DaemonBar({ health, onChanged }: { health: Health | null; onChan
           : { text: "older code · restarting…", title: "The source changed; picking it up now." }
 
   return (
-    <div className="relative flex items-center gap-2">
-      {health && state !== "stopped" && (
-        <span className="text-[11px] text-fg-dim">
-          {health.taskModel} · one run at a time
-        </span>
-      )}
-
+    // A column, not a bar: this sits in the foot of a 16rem rail, so the model
+    // line, the status and the buttons each get their own row rather than
+    // fighting over one.
+    <div className="relative flex flex-col gap-1.5">
       <span
         className="flex items-center gap-1.5 text-[11px] text-fg-muted"
         title={
@@ -142,69 +151,84 @@ export function DaemonBar({ health, onChanged }: { health: Health | null; onChan
         }
       >
         <span className={`inline-block size-1.5 shrink-0 rounded-full ${DOT[state]}`} />
-        {LABEL[state]}
+        <span className="truncate">{LABEL[state]}</span>
       </span>
 
+      {health && state !== "stopped" && (
+        <span
+          className="truncate text-[11px] text-fg-dim"
+          title={`${health.taskModel} · one run at a time`}
+        >
+          {health.taskModel} · one run at a time
+        </span>
+      )}
+
       {staleNote && (
-        <span className="text-[11px] text-warn" title={staleNote.title}>
+        <span className="text-[11px] leading-relaxed text-warn" title={staleNote.title}>
           {staleNote.text}
         </span>
       )}
 
-      {state === "stopped" && (
-        <Button
-          tone="primary"
-          disabled={busy !== null}
-          onClick={() => void act("start", api.daemonStart)}
-        >
-          {busy === "start" ? "starting…" : "start"}
-        </Button>
-      )}
+      <div className="flex flex-wrap items-center gap-1.5">
+        {children}
 
-      {(state === "running" || state === "adopted") && (
-        <>
+        {state === "stopped" && (
           <Button
+            tone="primary"
             disabled={busy !== null}
-            title={
-              status?.managed
-                ? "Stop and start the daemon"
-                : "Starts a daemon managed by the dev server once the external one is gone"
-            }
-            onClick={() => void act("restart", api.daemonRestart)}
+            onClick={() => void act("start", api.daemonStart)}
           >
-            {busy === "restart" ? "restarting…" : "restart"}
+            {busy === "start" ? "starting…" : "start"}
           </Button>
-          <Button
-            tone="danger"
-            disabled={busy !== null || !status?.managed}
-            title={
-              status?.managed
-                ? "Stop the daemon. Runs in flight are interrupted cleanly first."
-                : "This daemon was started outside the dev server — stop it where you started it"
-            }
-            onClick={() => void act("stop", api.daemonStop)}
-          >
-            {busy === "stop" ? "stopping…" : "stop"}
-          </Button>
-        </>
-      )}
+        )}
 
-      {(crashed || logOpen || message) && (
-        <button
-          type="button"
-          onClick={() => setLogOpen((v) => !v)}
-          className={`text-[11px] underline-offset-2 hover:underline ${crashed ? "text-err" : "text-fg-dim"}`}
-        >
-          {crashed
-            ? `exited (code ${status?.lastExit?.code ?? "?"})`
-            : logOpen
-              ? "hide log"
-              : "log"}
-        </button>
-      )}
+        {(state === "running" || state === "adopted") && (
+          <>
+            <Button
+              disabled={busy !== null}
+              title={
+                status?.managed
+                  ? "Stop and start the daemon"
+                  : "Starts a daemon managed by the dev server once the external one is gone"
+              }
+              onClick={() => void act("restart", api.daemonRestart)}
+            >
+              {busy === "restart" ? "restarting…" : "restart"}
+            </Button>
+            <Button
+              tone="danger"
+              disabled={busy !== null || !status?.managed}
+              title={
+                status?.managed
+                  ? "Stop the daemon. Runs in flight are interrupted cleanly first."
+                  : "This daemon was started outside the dev server — stop it where you started it"
+              }
+              onClick={() => void act("stop", api.daemonStop)}
+            >
+              {busy === "stop" ? "stopping…" : "stop"}
+            </Button>
+          </>
+        )}
+
+        {(crashed || logOpen || message) && (
+          <button
+            type="button"
+            onClick={() => setLogOpen((v) => !v)}
+            className={`text-[11px] underline-offset-2 hover:underline ${crashed ? "text-err" : "text-fg-dim"}`}
+          >
+            {crashed
+              ? `exited (code ${status?.lastExit?.code ?? "?"})`
+              : logOpen
+                ? "hide log"
+                : "log"}
+          </button>
+        )}
+      </div>
 
       {logOpen && (
-        <div className="absolute top-8 right-0 z-10 w-[46rem] max-w-[80vw] rounded border border-line bg-chrome shadow-lg">
+        // Upwards and out over the panes: anchored to the foot of the rail, a
+        // panel this wide has nowhere else to go.
+        <div className="absolute bottom-full left-0 z-10 mb-2 w-[46rem] max-w-[80vw] rounded border border-line bg-chrome shadow-lg">
           <div className="flex items-center justify-between border-b border-line px-3 py-1.5">
             <span className="text-[11px] text-fg-muted">daemon output</span>
             <button
