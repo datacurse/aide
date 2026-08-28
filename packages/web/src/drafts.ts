@@ -10,10 +10,15 @@ import type { Attachment } from "@aide/protocol"
  * record is its row in the list. And a half-typed message with a screenshot
  * pasted into it is worth more than the reload that would otherwise eat it.
  *
+ * A project may hold any number of those unstarted records, and that is the
+ * backlog: something you want is a chat you have written and not sent. There is
+ * no second list and no file for it, because an unsent sentence is not yet a
+ * fact about the project — it becomes one when you press send.
+ *
  * In the browser rather than in `.aide/`, deliberately: none of this has
- * happened yet. An unsent sentence is not a fact about the project, and a pasted
- * image is bytes that exist in one tab — writing either through the daemon would
- * mean the project carrying state for a conversation that may never exist.
+ * happened yet. A pasted image is bytes that exist in one tab, and writing
+ * either through the daemon would mean the project carrying state for a
+ * conversation that may never exist.
  *
  * IndexedDB rather than localStorage, for one reason: attachments. The composer
  * takes images up to 10MB, whose base64 is 13M characters — several times the
@@ -22,14 +27,14 @@ import type { Attachment } from "@aide/protocol"
  */
 
 export interface Draft {
-  /** `${projectId}:${sessionId}`, with `new` standing in for a chat that has no id yet. */
+  /** `${projectId}:${id}`, where id is a session uuid or a `new-` id for one that has none yet. */
   key: string
   text: string
   attachments: Attachment[]
   /**
-   * Kept even when it is empty, because this record IS the new-chat row in the
-   * list — and an empty box is how a chat you just created looks. Every other
-   * draft is deleted the moment its box is emptied.
+   * Kept even when it is empty, because this record IS the chat's row in the
+   * list — and an empty box is how a chat you just created looks. A draft on a
+   * conversation that already exists is deleted the moment its box is emptied.
    */
   pinned: boolean
   /** epoch ms */
@@ -37,11 +42,26 @@ export interface Draft {
   updatedAt: number
 }
 
-/** Session ids are uuids, so nothing real ever collides with this. */
-const NEW = "new"
+/**
+ * The id of a chat that has not started.
+ *
+ * Session ids are uuids, so this prefix cannot collide with one — which is what
+ * lets a single key space hold both an unstarted chat and the conversation it
+ * turns into, and lets the list tell them apart by looking at the key.
+ */
+const NEW = "new-"
+let draftSeq = 0
 
-export const draftKey = (projectId: string, sessionId: string | null): string =>
-  `${projectId}:${sessionId ?? NEW}`
+/** Unique within a project, which is as far as these ever travel. */
+const newDraftId = (): string => {
+  draftSeq += 1
+  return `${NEW}${Date.now().toString(36)}${draftSeq}`
+}
+
+export const draftKey = (projectId: string, id: string): string => `${projectId}:${id}`
+
+/** The id half of a key. Keys are `<projectId>:<id>` and project ids have no colon. */
+export const idFromKey = (key: string): string => key.slice(key.indexOf(":") + 1)
 
 const DB_NAME = "aide"
 const STORE = "drafts"
@@ -205,16 +225,46 @@ export function discardDraft(key: string): void {
   if (cache.has(key)) commit(key, null)
 }
 
-/**
- * Press "new" twice and you get one chat, not two. A project has at most one
- * conversation that has not started yet — this record — so the second press has
- * nothing to create and just opens what is already there.
- */
-export function openNewChat(projectId: string): void {
-  const key = draftKey(projectId, null)
-  if (cache.has(key)) return
+function createUnstarted(
+  projectId: string,
+  content: { text: string; attachments: Attachment[] },
+): string {
+  const id = newDraftId()
+  const key = draftKey(projectId, id)
   const now = Date.now()
-  commit(key, { key, text: "", attachments: [], pinned: true, createdAt: now, updatedAt: now })
+  commit(key, { key, ...content, pinned: true, createdAt: now, updatedAt: now })
+  return id
+}
+
+/**
+ * Press "new" twice and you get one chat, not two.
+ *
+ * A project may hold as many unstarted chats as you like now — that list is the
+ * backlog — but an EMPTY one is not a thing you can want two of: the second
+ * press is you looking for the blank chat you already made. Anything with text
+ * in it is a real entry and is never reused.
+ */
+export function openNewChat(projectId: string): string {
+  const blank = unstartedFor(projectId).find(
+    (d) => d.text === "" && d.attachments.length === 0,
+  )
+  if (blank) return idFromKey(blank.key)
+  return createUnstarted(projectId, { text: "", attachments: [] })
+}
+
+/**
+ * Something you want, parked as a chat you have not sent.
+ *
+ * This is the whole of the backlog. An entry is a conversation that exists and
+ * has not spoken — the same record pressing "new" makes — so opening one is
+ * selecting it rather than copying it somewhere, and sending it is the only
+ * thing that turns it into work.
+ */
+export function addBacklogChat(
+  projectId: string,
+  content: { text: string; attachments: Attachment[] },
+): string {
+  return createUnstarted(projectId, content)
 }
 
 /**
@@ -243,3 +293,34 @@ export function carryDraft(from: string, to: string): void {
 export function useDraft(key: string | null): Draft | null {
   return useSyncExternalStore(subscribe, () => (key === null ? null : (cache.get(key) ?? null)))
 }
+
+function unstartedFor(projectId: string): Draft[] {
+  const prefix = `${projectId}:${NEW}`
+  return [...cache.values()]
+    .filter((d) => d.key.startsWith(prefix))
+    .sort((a, b) => a.createdAt - b.createdAt)
+}
+
+/**
+ * Every chat in this project that has not started, oldest first.
+ *
+ * Memoized against the cache map itself, which is replaced rather than mutated
+ * on every write: without this the array is a new identity on each read and
+ * useSyncExternalStore treats an unchanged backlog as a change on every
+ * keystroke anywhere in the app, which is an infinite render loop rather than
+ * merely slow.
+ */
+let listCache: { source: typeof cache; projectId: string; rows: Draft[] } | null = null
+
+export function useUnstartedChats(projectId: string | null): Draft[] {
+  return useSyncExternalStore(subscribe, () => {
+    if (!projectId) return NO_DRAFTS
+    if (listCache?.source === cache && listCache.projectId === projectId) return listCache.rows
+    const rows = unstartedFor(projectId)
+    listCache = { source: cache, projectId, rows }
+    return rows
+  })
+}
+
+/** One array for every empty backlog, so the identity is stable across reads. */
+const NO_DRAFTS: Draft[] = []

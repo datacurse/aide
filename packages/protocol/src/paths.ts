@@ -2,19 +2,9 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 import { STATE_DIR } from "./names.js"
 
-
-
 /** `<project>/.aide` */
 export const stateDir = (root: string) => join(root, STATE_DIR)
-/** `<project>/.aide/decisions` — later */
-export const decisionsDir = (root: string) => join(stateDir(root), "decisions")
-
 export const projectDocPath = (root: string) => join(stateDir(root), "project.md")
-/** `<project>/.aide/todos.md` — the backlog, git-tracked */
-export const todosPath = (root: string) => join(stateDir(root), "todos.md")
-/** `<project>/.aide/spec.md` — what the app can and cannot do, git-tracked */
-export const specPath = (root: string) => join(stateDir(root), "spec.md")
-export const inboxPath = (root: string) => join(stateDir(root), "inbox.md")
 /**
  * Daemon-global state, outside any project: `~/.aide`.
  *
@@ -29,12 +19,12 @@ export const inboxPath = (root: string) => join(stateDir(root), "inbox.md")
 export const aideHome = () => process.env["AIDE_HOME"] ?? join(homedir(), STATE_DIR)
 export const registryPath = () => join(aideHome(), "registry.json")
 /**
- * `~/.aide/board.json` — row id to session id, per project.
+ * `~/.aide/board.json` — which conversations you have ticked off, per project.
  *
- * Outside the repo on purpose. It is the one fact about the board with nowhere
- * natural to live: it churns as chats start and close, and it names session ids
- * that only exist under `~/.claude/projects/` on this machine. Everything else
- * the board shows is either in `todos.md` or already known to git.
+ * Outside the repo on purpose. It is the one fact about a chat with nowhere
+ * natural to live: it names session ids that only exist under
+ * `~/.claude/projects/` on this machine. Everything else the list shows comes
+ * from the session store or from git.
  */
 export const boardPath = () => join(aideHome(), "board.json")
 export const runsDir = () => join(aideHome(), "runs")

@@ -14,7 +14,6 @@ import type {
   GitRef,
   GitWorkingTree,
 } from "@aide/protocol"
-import { scoped } from "./changes.js"
 import { git, gitDiffing, gitOr } from "./git.js"
 
 /**
@@ -55,39 +54,6 @@ export async function repoRoot(dir: string): Promise<string | null> {
   }
 }
 
-/**
- * The highest board row id that any commit in this repository already claims.
- *
- * Row ids have to be monotonic across deletions, and `todos.md` cannot tell you
- * that on its own: closing a row deletes its line, while everything that refers
- * to the id by number lives on. So the floor is asked of git, which is where the
- * collision would actually be visible.
- *
- * It used to read branch names — `aide/NNNN-slug` — because a closed row's
- * branch and worktree could still be adopted by a row that reused its number.
- * There are no such branches now, and the durable record that replaced them is
- * the `Aide-Row` trailer that `land` used to write and `commit` still does. Note
- * this is NOT merely the same check by another name: dropping it and numbering
- * from the file alone would let a reused `0003` relabel someone else's commit in
- * the history view, which is a wrong answer rather than an untidy one.
- */
-export async function maxRowIdInHistory(root: string): Promise<number> {
-  const out = await gitOr("", () =>
-    git(root, [
-      "log",
-      "--all",
-      "--format=%(trailers:key=Aide-Row,valueonly,separator=%x2c)",
-    ]),
-  )
-  let max = 0
-  for (const line of out.split(/\r?\n/)) {
-    for (const value of line.split(",")) {
-      const id = value.trim()
-      if (/^\d{1,9}$/.test(id)) max = Math.max(max, Number.parseInt(id, 10) || 0)
-    }
-  }
-  return max
-}
 
 // ---------------------------------------------------------------------------
 // Overview
@@ -204,11 +170,12 @@ export async function status(root: string): Promise<GitFileChange[]> {
  * What is left to commit, as opposed to what git happens to call dirty.
  *
  * `status()` above answers "what does git say"; this answers "what work is
- * outstanding", and the two differ by exactly the files aide owns — see
- * `AGENT_SCOPE` in changes.ts. Asked in the commit's own scope rather than
- * filtered afterwards, so the two can never drift apart: this is the list the
- * indicator lights on, and it must mean the same thing as "there is something a
- * commit could take".
+ * outstanding", and they are now the same question. They were not always: aide
+ * used to own a file in the tree that no commit could take, so an indicator that
+ * counted it would have been lit forever. Nothing is excluded any more, and the
+ * invariant this exists for is unchanged — what the rail lights on and what a
+ * commit would take must be one set, or the screen explains neither the refusal
+ * nor the button that clears it.
  *
  * The branch comes from one `rev-parse` rather than a whole `overview()`. This
  * is polled from the always-visible rail, and three extra round trips per beat
@@ -218,10 +185,7 @@ export async function pending(root: string): Promise<GitPending> {
   const named = await gitOr("HEAD", async () =>
     (await git(root, ["rev-parse", "--abbrev-ref", "HEAD"])).trim(),
   )
-  const z = await git(
-    root,
-    scoped(["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
-  )
+  const z = await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
   return {
     branch: named === "HEAD" || named === "" ? null : named,
     files: parseStatus(z),
@@ -298,10 +262,6 @@ const FIELDS = [
   "%aI",
   "%D",
   "%P",
-  // Comma-separated explicitly: the trailers atom separates with a NEWLINE by
-  // default, so a commit carrying two Aide-Row trailers would split across two
-  // records and desynchronise every field after it.
-  "%(trailers:key=Aide-Row,valueonly,separator=%x2c)",
   "%s",
 ] as const
 
@@ -342,7 +302,7 @@ function parseRefs(raw: string): GitRef[] {
 
 function parseCommit(line: string): GitCommit | null {
   const f = line.split("\x1f")
-  const [sha, short, author, authorEmail, date, refs, parents, rows, ...rest] = f
+  const [sha, short, author, authorEmail, date, refs, parents, ...rest] = f
   if (!sha || !short) return null
   return {
     sha,
@@ -352,7 +312,6 @@ function parseCommit(line: string): GitCommit | null {
     date: date ?? "",
     refs: parseRefs(refs ?? ""),
     parents: (parents ?? "").split(" ").filter(Boolean),
-    rows: (rows ?? "").split(",").map((t) => t.trim()).filter(Boolean),
     // Rejoined rather than taken as one field, so a subject that somehow does
     // contain a separator truncates instead of losing the commit entirely.
     subject: rest.join("\x1f"),

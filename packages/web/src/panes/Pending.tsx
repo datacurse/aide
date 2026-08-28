@@ -59,9 +59,10 @@ const MARK: Record<GitFileState, string> = {
  * the conversation is where it means something. This is the one place both are
  * true at once, which is why the button ended up here and not next to send.
  *
- * `.aide/todos.md` is absent from this list by construction — see `pending` in
- * the daemon. It would otherwise sit here permanently, and since the block on
- * new conversations reads the same list, it would never lift.
+ * Nothing is filtered out of it. Every file here is one a commit can take, which
+ * has to stay true: the block on starting a new conversation reads this same
+ * list, so a file that could sit here uncommittable would be a block with no way
+ * out of it.
  */
 export function PendingRail({
   projectId,

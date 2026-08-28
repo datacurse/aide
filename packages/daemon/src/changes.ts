@@ -1,7 +1,6 @@
 import { access, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { STATE_DIR } from "@aide/protocol"
 import { git, gitOr, withWorkingTreeIndex } from "./git.js"
 
 /**
@@ -22,37 +21,6 @@ import { git, gitOr, withWorkingTreeIndex } from "./git.js"
 // ---------------------------------------------------------------------------
 // Whose files are whose
 // ---------------------------------------------------------------------------
-
-/**
- * The parts of `.aide/` the DAEMON writes, excluded from everything the agent is
- * allowed to stage.
- *
- * `todos.md` is the whole list, and the reason it is excluded got SHARPER when
- * runs moved into the main checkout rather than going away. It used to be a
- * stale-branch problem: a conversation's own copy, committed on a branch and
- * merged later, would write an out-of-date backlog back over the live one. Now
- * the daemon rewrites this file in the SAME tree the agent is working in, as
- * rows are added and verdicts close them — so committing whatever the file
- * happened to contain mid-run is a straight race with the daemon's own writes,
- * and the loser is whichever one the human did not mean.
- *
- * `spec.md` and `project.md` are deliberately NOT excluded. The spec is written
- * at the commit gate on purpose, so the claim and the code that earns it are one
- * commit and one revert; see `review.ts`.
- *
- * `:(top,...)` anchors the pattern to the repo root rather than to cwd.
- */
-const AGENT_SCOPE = [".", `:(top,exclude)${STATE_DIR}/todos.md`] as const
-
-/**
- * Same pathspec, appended after a `--`.
- *
- * Exported because the uncommitted-work indicator has to ask its question in
- * exactly this scope. An indicator that counted `todos.md` would be permanently
- * lit on any project aide manages, and nothing a human could do would put it
- * out — the daemon rewrites that file, and a commit is forbidden from taking it.
- */
-export const scoped = (args: string[]): string[] => [...args, "--", ...AGENT_SCOPE]
 
 // ---------------------------------------------------------------------------
 // What the run did
@@ -99,9 +67,12 @@ export interface RunChanges {
  */
 export async function runChanges(root: string, checkpoint: string): Promise<RunChanges> {
   const { diff, stat, paths } = await withWorkingTreeIndex(root, async (gitTemp) => ({
-    diff: await gitTemp(scoped(["diff", "--cached", checkpoint])),
-    stat: await gitTemp(scoped(["diff", "--cached", "--stat", checkpoint])),
-    paths: splitZ(await gitTemp(scoped(["diff", "--cached", "--name-only", "-z", checkpoint]))),
+    // The trailing `--` is not a leftover: it tells git the argument before it
+    // is a revision, so a file whose name happens to look like the checkpoint
+    // sha cannot turn this into "ambiguous argument".
+    diff: await gitTemp(["diff", "--cached", checkpoint, "--"]),
+    stat: await gitTemp(["diff", "--cached", "--stat", checkpoint, "--"]),
+    paths: splitZ(await gitTemp(["diff", "--cached", "--name-only", "-z", checkpoint, "--"])),
   }))
 
   // Against the checkpoint's own PARENT rather than HEAD. They are the same
@@ -110,7 +81,7 @@ export async function runChanges(root: string, checkpoint: string): Promise<RunC
   // pre-existing dirt" in a repo with no commits, where the checkpoint is
   // parentless and there is nothing it could have been dirty against.
   const preexisting = await gitOr([], async () =>
-    splitZ(await git(root, scoped(["diff", "--name-only", "-z", `${checkpoint}^`, checkpoint]))),
+    splitZ(await git(root, ["diff", "--name-only", "-z", `${checkpoint}^`, checkpoint, "--"])),
   )
 
   const before = new Set(preexisting)
@@ -269,16 +240,15 @@ function chunked(specs: readonly string[], maxChars = 6_000): string[][] {
 // ---------------------------------------------------------------------------
 
 /**
- * `Aide-Session` is the durable one: a conversation outlives any single run, and
- * the session id is what finds its transcript under `~/.claude/projects/` later.
- * `Aide-Row` says which backlog line asked for the change — that line is deleted
- * when the work is closed, so the commit becomes the only place it survives.
+ * Stamp the commit with the conversation that produced it.
+ *
+ * One trailer, because there is one thing worth pointing back at. There used to
+ * be an `Aide-Row` beside it naming a backlog row; in the whole history of this
+ * project not one commit ever carried one, which is as clear a verdict on the
+ * board as anything could be.
  */
-export function withRowTrailers(message: string, rowId: string | null, sessionId: string): string {
-  return appendTrailers(message, [
-    ...(rowId ? ([["Aide-Row", rowId]] as [string, string][]) : []),
-    ["Aide-Session", sessionId],
-  ])
+export function withSessionTrailer(message: string, sessionId: string): string {
+  return appendTrailers(message, [["Aide-Session", sessionId]])
 }
 
 /** Appends `Key: value` lines, unless the message already carries the first key. */

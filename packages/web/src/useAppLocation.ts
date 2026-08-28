@@ -5,7 +5,7 @@ import { useCallback, useEffect, useState } from "react"
  *
  * Held in `location.hash` rather than in component state, because component
  * state does not survive a reload and this is the state you least want to
- * rebuild by hand: which project, which list, which conversation. Putting it in
+ * rebuild by hand: which project, which conversation. Putting it in
  * the URL gets three things at once — reload survives it, browser back and
  * forward step through conversations, and a link to a specific conversation is
  * just the address bar.
@@ -20,43 +20,48 @@ import { useCallback, useEffect, useState } from "react"
 
 const REMEMBERED = "aide.location"
 
-export const PANES = ["board", "chats"] as const
-export type Pane = (typeof PANES)[number]
-
 export interface AppLocation {
   projectId: string | null
-  pane: Pane
-  /** null in the `chats` pane means a new conversation. */
+  /** A conversation the daemon knows about. Null when an unstarted one is open. */
   sessionId: string | null
+  /**
+   * A chat that has not been sent yet, by its local draft id.
+   *
+   * Never set at the same time as `sessionId` — they are the two halves of "which
+   * chat is open", split because only one of them means anything to the daemon.
+   * It survives a reload for the same reason the session id does: an idea you
+   * typed and did not send is exactly the thing you would hate to have to find
+   * again.
+   */
+  draftId: string | null
 }
 
 const EMPTY: AppLocation = {
   projectId: null,
-  pane: "board",
   sessionId: null,
+  draftId: null,
 }
 
 export function parseLocation(hash: string): AppLocation {
-  // "#/p/<projectId>/board" or "#/p/<projectId>/chats/<sessionId>".
+  // "#/p/<projectId>", "#/p/<projectId>/<sessionId>" or "#/p/<projectId>/new/<draftId>".
   const parts = hash.replace(/^#\/?/, "").split("/").filter(Boolean)
   if (parts[0] !== "p" || !parts[1]) return EMPTY
+  const projectId = parts[1]
 
-  const named = parts[2] as Pane | undefined
-  // The board is the front door: it is the one view that answers "what now" —
-  // and so it is also where an unrecognised pane lands, including a saved
-  // location left over from the `git` pane this app used to have.
-  const pane: Pane = named && PANES.includes(named) ? named : "board"
-  return {
-    projectId: parts[1],
-    pane,
-    sessionId: pane === "chats" ? (parts[3] ?? null) : null,
-  }
+  if (parts[2] === "new") return { projectId, sessionId: null, draftId: parts[3] ?? null }
+  // Saved locations from when this app had panes: "#/p/<id>/chats/<sessionId>"
+  // and "#/p/<id>/board". Both land on the project with nothing open rather than
+  // on a 404, because the mirror in localStorage outlives the layout.
+  if (parts[2] === "chats") return { projectId, sessionId: parts[3] ?? null, draftId: null }
+  if (parts[2] === "board") return { projectId, sessionId: null, draftId: null }
+  return { projectId, sessionId: parts[2] ?? null, draftId: null }
 }
 
 export function formatLocation(loc: AppLocation): string {
   if (!loc.projectId) return "#/"
-  const id = loc.pane === "chats" ? loc.sessionId : null
-  return `#/p/${loc.projectId}/${loc.pane}${id ? `/${id}` : ""}`
+  if (loc.draftId) return `#/p/${loc.projectId}/new/${loc.draftId}`
+  if (loc.sessionId) return `#/p/${loc.projectId}/${loc.sessionId}`
+  return `#/p/${loc.projectId}`
 }
 
 export function useAppLocation(): [AppLocation, (patch: Partial<AppLocation>) => void] {
@@ -100,11 +105,16 @@ export function useAppLocation(): [AppLocation, (patch: Partial<AppLocation>) =>
   const navigate = useCallback((patch: Partial<AppLocation>) => {
     setLoc((prev) => {
       const next = { ...prev, ...patch }
-      // Selecting a different project cannot keep the old selection: a session
-      // id from another project resolves to nothing.
+      // Selecting a different project cannot keep the old selection: neither a
+      // session id nor a draft id from another project resolves to anything.
       if (patch.projectId !== undefined && patch.projectId !== prev.projectId) {
         next.sessionId = null
+        next.draftId = null
       }
+      // The two are one field wearing two names — opening either closes the
+      // other, so a patch naming one clears the other unless it named both.
+      if (patch.sessionId !== undefined && patch.draftId === undefined) next.draftId = null
+      if (patch.draftId !== undefined && patch.sessionId === undefined) next.sessionId = null
       const href = formatLocation(next)
       if (href !== formatLocation(prev)) {
         // A real navigation, so it earns a history entry — this is what makes

@@ -1,13 +1,8 @@
-import { mkdir, writeFile } from "node:fs/promises"
-import { dirname } from "node:path"
 import type { ModelSpend, Project, RunDelta, RunEventBody } from "@aide/protocol"
-import { specPath } from "@aide/protocol/node"
-import { rowForSession } from "./board.js"
-import { commitRun, recentSubjects, runChanges, withRowTrailers } from "./changes.js"
+import { commitRun, recentSubjects, runChanges, withSessionTrailer } from "./changes.js"
 import { readCheckpoint } from "./checkpoint.js"
 import { CONFIG } from "./config.js"
-import { draftCommitMessage, draftSpecUpdate } from "./helper.js"
-import { readSpec } from "./todos.js"
+import { draftCommitMessage } from "./helper.js"
 
 /**
  * Reviewing a conversation's work and committing it.
@@ -34,6 +29,13 @@ import { readSpec } from "./todos.js"
  * press, watched: `commitConversation` runs as a run of its own and puts every
  * step, the message it wrote, and what it staged into the conversation. You read
  * it in the same place you read everything else about this work.
+ *
+ * There is no spec update here either, and its absence is deliberate. A model
+ * rewriting `.aide/spec.md` whole on every commit cost more wall-clock than the
+ * rest of the commit put together, went unread because agents are pointed at
+ * that file rather than given it, and on one commit wrote its own reasoning
+ * about not changing the file INTO the file. An agent that earns a capability
+ * can write the line itself, inside the diff you already review.
  */
 
 /**
@@ -46,18 +48,17 @@ import { readSpec } from "./todos.js"
 export async function conversationBaseline(
   project: Project,
   sessionId: string,
-): Promise<{ rowId: string | null; checkpoint: string } | null> {
+): Promise<{ checkpoint: string } | null> {
   const found = await readCheckpoint(project.root, sessionId)
   if (!found) return null
-  return { rowId: await rowForSession(project.id, sessionId), checkpoint: found.sha }
+  return { checkpoint: found.sha }
 }
 
 export interface CommitConversationOptions {
   project: Project
   sessionId: string
-  rowId: string | null
   checkpoint: string
-  /** What the row asked for, so the drafter can tell intent from incident. */
+  /** What the work was asked for, so the drafter can tell intent from incident. */
   request: string
   /** Progress, straight onto the conversation's event stream. */
   emit: (body: RunEventBody) => void
@@ -70,16 +71,16 @@ export interface CommitConversationOptions {
 /**
  * Commit everything this conversation changed, narrating as it goes.
  *
- * One press does all of it: read the diff, draft the message and the spec update
- * from it, write both. The narration is not decoration — the two model calls in
- * the middle take about as long as a short turn, and a button that goes quiet
- * for fifteen seconds gets pressed again.
+ * One press does all of it: read the diff, write a message from it, commit. The
+ * narration is not decoration — the model call in the middle takes about as long
+ * as a short turn, and a button that goes quiet for ten seconds gets pressed
+ * again.
  *
  * The trade is worth naming, because the review gate is the product's whole
  * point: nobody reads the diff before this runs. What replaced that reading is
  * the log it leaves behind — the message a model wrote and the exact list of
  * paths it staged, in the conversation that produced them. The second gate is
- * untouched: the row closes when a human says the work is done, not when it is
+ * untouched: a conversation is finished when a human says so, not when it is
  * committed.
  *
  * Returns what the drafting spent, because the caller is a run, and a run log
@@ -108,68 +109,23 @@ export async function commitConversation(
     })
   }
 
-  emit({
-    type: "commit.step",
-    label: `drafting the message and the spec update · ${CONFIG.helperModel}`,
+  emit({ type: "commit.step", label: `writing the message · ${CONFIG.helperModel}` })
+  const message = await draftCommitMessage({
+    model: CONFIG.helperModel,
+    title: opts.request,
+    prompt: "",
+    diffStat: changes.stat,
+    diff: changes.diff,
+    recentSubjects: await recentSubjects(project.root),
+    // Streamed, so this step is watched rather than waited out.
+    onText: (text) => opts.delta({ kind: "text", text }),
   })
-  const spec = await readSpec(project)
-  /**
-   * The half that finishes first says so, and only it.
-   *
-   * These two calls take about as long as each other but never exactly, and
-   * whichever lands first leaves the screen still for the remainder — which is
-   * the whole complaint this narration exists to answer. The one that lands
-   * second says nothing: by then the drafted message is on its way and there is
-   * nothing left to be waiting for.
-   */
-  let outstanding = 2
-  const landed = (label: string) => {
-    outstanding -= 1
-    if (outstanding > 0) emit({ type: "commit.step", label })
-  }
-  // In parallel: they read the same diff and neither depends on the other's
-  // output, so making them sequential would double the wait.
-  const [message, proposed] = await Promise.all([
-    draftCommitMessage({
-      model: CONFIG.helperModel,
-      title: opts.request,
-      prompt: "",
-      diffStat: changes.stat,
-      diff: changes.diff,
-      recentSubjects: await recentSubjects(project.root),
-      // Only this one streams. The spec call returns a whole file, mostly
-      // unchanged, and the two arriving down one channel at once would
-      // interleave into nonsense — so what you watch being written is the
-      // message, which is the half worth reading.
-      onText: (text) => opts.delta({ kind: "text", text }),
-    }).then((r) => {
-      landed("message written · still on the spec update")
-      return r
-    }),
-    draftSpecUpdate({
-      model: CONFIG.helperModel,
-      spec,
-      request: opts.request,
-      diffStat: changes.stat,
-      diff: changes.diff,
-    }).then((r) => {
-      landed("spec update drafted · still writing the message")
-      return r
-    }),
-  ])
-  const spend = {
-    costUsd: message.costUsd + proposed.costUsd,
-    modelUsage: mergeSpend(message.modelUsage, proposed.modelUsage),
-  }
+  const spend = { costUsd: message.costUsd, modelUsage: message.modelUsage }
 
-  // An unchanged spec is a normal outcome — most commits add no capability — and
-  // it means "leave the file alone" rather than "write this back".
-  const specChanged = proposed.text.trim() !== "" && proposed.text.trim() !== spec.trim()
   emit({
     type: "commit.drafted",
     message: message.text,
     model: CONFIG.helperModel,
-    specChanged,
   })
 
   // Stop lands here or nowhere. Up to this line an interrupt costs the drafting
@@ -181,84 +137,40 @@ export async function commitConversation(
   const { sha, paths } = await commitReview({
     project,
     sessionId: opts.sessionId,
-    rowId: opts.rowId,
     checkpoint: opts.checkpoint,
     message: message.text,
-    ...(specChanged ? { spec: proposed.text } : {}),
   })
   emit({ type: "commit.landed", sha, paths })
   return spend
 }
 
-/** Two calls against the same model come back as two records under one key. */
-function mergeSpend(
-  a: Record<string, ModelSpend>,
-  b: Record<string, ModelSpend>,
-): Record<string, ModelSpend> {
-  const out: Record<string, ModelSpend> = { ...a }
-  for (const [model, u] of Object.entries(b)) {
-    const prev = out[model]
-    out[model] = prev
-      ? {
-          inputTokens: prev.inputTokens + u.inputTokens,
-          outputTokens: prev.outputTokens + u.outputTokens,
-          cacheReadInputTokens: prev.cacheReadInputTokens + u.cacheReadInputTokens,
-          cacheCreationInputTokens: prev.cacheCreationInputTokens + u.cacheCreationInputTokens,
-          costUSD: prev.costUSD + u.costUSD,
-        }
-      : u
-  }
-  return out
-}
-
 export interface CommitReviewOptions {
   project: Project
   sessionId: string
-  rowId: string | null
   checkpoint: string
   message: string
-  /** Absent leaves `.aide/spec.md` exactly as it is, which is the common case. */
-  spec?: string
 }
 
 /**
- * Write the spec, then commit everything the run changed as one change.
- *
- * The spec is written BEFORE the paths are computed, not after, and that
- * ordering is the whole reason the claim and the code land together: writing it
- * afterwards would leave `spec.md` dirty in the tree and absent from the commit
- * that earned it, which is the capability list describing work that is not in
- * the history.
+ * Commit everything the run changed as one change.
  *
  * The paths come back out because they are the answer to "what did that button
  * take", and this is the only place that knows.
  *
- * Exported for `pnpm smoke`, which drives it with a message and a spec written
- * by hand: it is the half of the commit that touches git, and the only half that
- * can be checked without spending money on a model.
+ * Exported for `pnpm smoke`, which drives it with a message written by hand: it
+ * is the half of the commit that touches git, and the only half that can be
+ * checked without spending money on a model.
  */
 export async function commitReview(
   opts: CommitReviewOptions,
 ): Promise<{ sha: string; paths: string[] }> {
-  const { project, sessionId, rowId, checkpoint } = opts
+  const { project, sessionId, checkpoint } = opts
 
-  if (opts.spec?.trim()) {
-    const path = specPath(project.root)
-    await mkdir(dirname(path), { recursive: true })
-    // Trailing newline normalised here rather than trusted from the model: a
-    // file that gains and loses one on alternate commits makes every spec diff
-    // start with a spurious hunk.
-    await writeFile(path, `${opts.spec.trimEnd()}\n`, "utf8")
-  }
-
-  // Recomputed rather than carried from the read that produced the message: the
-  // spec write above has changed the tree since, and committing the older path
-  // list would leave `spec.md` out of its own commit.
   const changes = await runChanges(project.root, checkpoint)
   const sha = await commitRun(
     project.root,
     changes.paths,
-    withRowTrailers(opts.message, rowId, sessionId),
+    withSessionTrailer(opts.message, sessionId),
   )
   return { sha, paths: changes.paths }
 }

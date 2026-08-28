@@ -186,13 +186,13 @@ export type RunEventBody =
    */
   | { type: "commit.step"; label: string }
   /**
-   * The message the helper model wrote, and whether it also rewrote the spec.
+   * The message the helper model wrote.
    *
    * Shown rather than swallowed. Nobody typed this message, so the transcript is
    * the only place it can be read — and reading it is the whole of the review
    * that is left once the commit has already happened.
    */
-  | { type: "commit.drafted"; message: string; model: string; specChanged: boolean }
+  | { type: "commit.drafted"; message: string; model: string }
   /**
    * What landed. `paths` is exactly what was staged, so the log answers "what
    * did that button take" without a second call to git.

@@ -3,14 +3,13 @@ import { existsSync } from "node:fs"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { basename, resolve } from "node:path"
 import type { Project, ProjectDoc } from "@aide/protocol"
-import { DEFAULT_TODOS, EMPTY_PROJECT_DOC } from "@aide/protocol"
+import { EMPTY_PROJECT_DOC } from "@aide/protocol"
 import {
   aideHome,
   parseProjectDoc,
   projectDocPath,
   registryPath,
   stateDir,
-  todosPath,
 } from "@aide/protocol/node"
 import { isGitRepo, repoRoot } from "./repo.js"
 
@@ -68,11 +67,9 @@ portable. If aide disappears, this directory is still a description of the proje
 | Path | What |
 | --- | --- |
 | \`project.md\` | Why this exists, constraints, non-goals. Rarely changes. |
-| \`todos.md\` | The backlog. One line per row; aide numbers them. |
-| \`spec.md\` | What this project can and cannot do. Agents keep it current. |
 
-Both \`todos.md\` and \`spec.md\` are written by agents as well as by you. What
-is finished is decided by you alone — see the verdict buttons in a chat.
+Agents read \`project.md\` on every turn, so it is where a constraint belongs.
+What is finished is decided by you alone — see the tick beside a chat.
 `
 
 /**
@@ -87,7 +84,6 @@ export async function scaffoldState(root: string): Promise<void> {
   await mkdir(stateDir(root), { recursive: true })
   const seed: Array<[string, string]> = [
     [projectDocPath(root), PROJECT_DOC],
-    [todosPath(root), DEFAULT_TODOS],
     [`${stateDir(root)}/README.md`, STATE_README],
   ]
   for (const [path, content] of seed) {

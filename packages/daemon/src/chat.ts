@@ -11,7 +11,6 @@ import type {
   RunEventBody,
 } from "@aide/protocol"
 import type { FollowUpTurn, RunAgentOptions } from "./agent.js"
-import { linkSession } from "./board.js"
 import {
   adoptCheckpoint,
   readCheckpoint,
@@ -138,15 +137,6 @@ interface SessionWorker {
   projectId: string
   /** The project root, which is also where the agent runs. */
   root: string
-  /**
-   * The backlog row this conversation is working, if it is on the board.
-   *
-   * No longer picks a working directory — every conversation runs in the same
-   * one — but the daemon still has to know it, because the row and the session
-   * are paired at the moment the SDK names the session and the browser is not in
-   * that path.
-   */
-  rowId: string | null
   /** null until the SDK's init message names it. */
   sessionId: string | null
   mode: ChatMode
@@ -174,12 +164,6 @@ export interface SendOptions {
   attachments: Attachment[]
   mode: ChatMode
   effort: EffortLevel
-  /**
-   * The backlog row this conversation is working, resolved by the caller and
-   * never guessed here: for a follow-up it comes from the board's own record of
-   * which row this session is on.
-   */
-  rowId: string | null
 }
 
 export class ChatLane {
@@ -613,7 +597,6 @@ export class ChatLane {
       child,
       projectId: project.id,
       root: project.root,
-      rowId: opts.rowId,
       sessionId: opts.sessionId,
       mode: opts.mode,
       effort: opts.effort,
@@ -683,12 +666,6 @@ export class ChatLane {
           // here is the one case where an undo goes missing — hence doing it the
           // moment the name exists rather than when the turn ends.
           void adoptCheckpoint(worker.root, msg.runId, named).catch(() => {})
-          // Pair the row with the session the moment both halves exist. The
-          // daemon owns this rather than the browser, because a link the browser
-          // was supposed to send is a link lost to a reload at the wrong moment.
-          if (worker.rowId) {
-            void linkSession(worker.projectId, worker.rowId, named).catch(() => {})
-          }
         }
         if (msg.body.type === "run.finished") {
           const outcome = {

@@ -1,57 +1,62 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises"
-import type { BoardRow, ChatStatus, ChatVerdict, Project } from "@aide/protocol"
-import { isChatVerdict, sortBoard } from "@aide/protocol"
+import type { ChatStatus, Project } from "@aide/protocol"
 import { aideHome, boardPath } from "@aide/protocol/node"
 import { readCheckpoint, restoreCommand } from "./checkpoint.js"
-import { CONFIG } from "./config.js"
-import { deleteTodo, listTodos } from "./todos.js"
 
 /**
- * The board: `todos.md` joined to the conversations working it.
+ * Which conversations you have ticked off.
  *
- * Only ONE fact is stored here — which session is on which row. Everything else
- * a row shows is derived on read: the text comes from `todos.md`, and the state
- * comes from asking the chat lane whether that session is mid-turn. Nothing is
- * written when a chat starts thinking or stops, so there is no status field that
- * can be left saying `working` by a daemon that died.
+ * The whole of aide's own bookkeeping about a chat, and it is one bit per
+ * conversation. Everything else the list shows is derived on read: the title and
+ * the timestamps come from the SDK's session store, and "working" comes from
+ * asking the chat lane whether a turn is actually in flight. Nothing is written
+ * when a chat starts thinking or stops, so there is no status field that can be
+ * left saying `working` by a daemon that died.
+ *
+ * This used to be a board — a `todos.md` of rows, joined to the sessions working
+ * them. It went because it was never load-bearing: not one commit in the
+ * project's history carried the `Aide-Row` trailer that was supposed to tie a
+ * row to its work, and the row table was empty. What the board was for, the
+ * chat list already did, so the backlog became what it always was underneath —
+ * a conversation you have written and not sent.
  *
  * It lives in `~/.aide/` rather than the repo because it churns and because it
  * names session ids that only exist under `~/.claude/projects/` on this machine.
- * Lose this file and you lose the ability to click a row and land in the
- * conversation that worked it — the todo, the spec, the branch, the commits and
- * the code are all still there.
+ * Lose this file and you lose which chats were finished; the commits, the
+ * checkpoints and the code are all still there.
  */
 
 interface ProjectBoard {
-  /** Row id to session id. */
-  rows: Record<string, string>
-  /**
-   * Session id to how its work ended.
-   *
-   * The board itself needs none of this — closing a row removes the row — but
-   * the CHAT list does: "this one is finished" is what pushes a conversation to
-   * the bottom, and once the row is gone nothing in the repo says so any more.
-   */
-  verdicts: Record<string, { verdict: ChatVerdict; at: number }>
+  /** Session id to when it was ticked off. */
+  done: Record<string, { at: number }>
 }
 
-/** `{ "<projectId>": { rows, verdicts } }` */
+/** `{ "<projectId>": { done } }` */
 type LinkFile = Record<string, ProjectBoard>
 
 /** Tolerant on every field: this file is machine-local and hand-editable. */
 const boardFor = (links: LinkFile, projectId: string): ProjectBoard => {
-  const held = links[projectId]
-  return {
-    rows: held?.rows && typeof held.rows === "object" ? held.rows : {},
-    verdicts: held?.verdicts && typeof held.verdicts === "object" ? held.verdicts : {},
+  const held = links[projectId] as (ProjectBoard & { verdicts?: unknown }) | undefined
+  if (held?.done && typeof held.done === "object") return { done: held.done }
+  // Written by an older aide, which stored `{ verdict, at }` per session under
+  // three vocabularies in turn. Any of them meant the human had settled it, so
+  // they all read back as done rather than being dropped on the floor.
+  const legacy = held?.verdicts
+  if (legacy && typeof legacy === "object") {
+    const done: Record<string, { at: number }> = {}
+    for (const [sessionId, v] of Object.entries(legacy as Record<string, { at?: unknown }>)) {
+      done[sessionId] = { at: typeof v?.at === "number" ? v.at : 0 }
+    }
+    return { done }
   }
+  return { done: {} }
 }
 
 async function readLinks(): Promise<LinkFile> {
   try {
     const parsed: unknown = JSON.parse(await readFile(boardPath(), "utf8"))
-    // Hand-editable and machine-local, so a corrupt file must degrade to an
-    // unlinked board rather than take the daemon down on boot.
+    // Hand-editable and machine-local, so a corrupt file must degrade to
+    // "nothing is ticked off" rather than take the daemon down on boot.
     return parsed && typeof parsed === "object" ? (parsed as LinkFile) : {}
   } catch {
     return {}
@@ -63,38 +68,6 @@ async function writeLinks(links: LinkFile): Promise<void> {
   await writeFile(boardPath(), `${JSON.stringify(links, null, 2)}\n`, "utf8")
 }
 
-/** Which conversation is working this row, if any. */
-export async function linkedSession(projectId: string, rowId: string): Promise<string | null> {
-  return boardFor(await readLinks(), projectId).rows[rowId] ?? null
-}
-
-/** Which row this conversation is working, if any. Used to close a row out. */
-export async function rowForSession(projectId: string, sessionId: string): Promise<string | null> {
-  const { rows } = boardFor(await readLinks(), projectId)
-  return Object.entries(rows).find(([, s]) => s === sessionId)?.[0] ?? null
-}
-
-export async function linkSession(
-  projectId: string,
-  rowId: string,
-  sessionId: string,
-): Promise<void> {
-  const links = await readLinks()
-  const board = boardFor(links, projectId)
-  board.rows[rowId] = sessionId
-  links[projectId] = board
-  await writeLinks(links)
-}
-
-export async function unlinkRow(projectId: string, rowId: string): Promise<void> {
-  const links = await readLinks()
-  const board = boardFor(links, projectId)
-  if (!board.rows[rowId]) return
-  delete board.rows[rowId]
-  links[projectId] = board
-  await writeLinks(links)
-}
-
 /** What the chat lane knows about a conversation. Null when it has no live turn. */
 export interface LiveChat {
   /** A turn is in flight. */
@@ -103,90 +76,43 @@ export interface LiveChat {
   blocked: boolean
 }
 
-/**
- * Every row, with its state derived and sorted by what it costs to ignore.
- *
- * Links to rows that no longer exist are filtered out rather than deleted: a row
- * can vanish because someone edited `todos.md` in an editor mid-run, and pruning
- * the file on every read would race that edit. They cost nothing left alone.
- */
-export async function boardRows(
-  project: Project,
-  live: (sessionId: string) => LiveChat | null,
-): Promise<BoardRow[]> {
-  const [todos, links] = await Promise.all([listTodos(project), readLinks()])
-  const forProject = boardFor(links, project.id).rows
-
-  const rows = todos.map((todo): BoardRow => {
-    const sessionId = forProject[todo.id] ?? null
-    const chat = sessionId ? live(sessionId) : null
-    return {
-      id: todo.id,
-      text: todo.text,
-      sessionId,
-      state: !sessionId ? "idle" : chat?.working ? "working" : "needs-you",
-      blocked: chat?.blocked ?? false,
-    }
-  })
-
-  return sortBoard(rows)
-}
-
 // ---------------------------------------------------------------------------
-// Closing a conversation out
+// Ticking a conversation off
 // ---------------------------------------------------------------------------
 
 /**
- * The human's verdict, and what it does to the backlog.
+ * The human says this chat served its purpose.
  *
- * This is the gate the whole design rests on. An agent may write the spec, the
- * todo file and the code; it may not decide that any of it is finished. Which is
- * why nothing here is reachable from a run — only from a person pressing a
- * button.
+ * This is the gate the whole design rests on. An agent may write the code and
+ * the commit message; it may not decide that any of it is finished. Which is why
+ * nothing here is reachable from a run — only from a person pressing a button.
  *
- * The verdict expresses itself as the SHAPE of the backlog rather than a status
- * field on the row: closing a conversation removes its line, either way. So
- * there is no second record of "is this finished" to drift out of step with what
- * the file actually says.
- *
- * Both verdicts remove it because both mean the row is settled — finished, or
- * not wanted. Work that went wrong does not get a button: you say the next thing
- * in the conversation, and the row stays open because nobody closed it.
+ * Nothing is deleted by it. The conversation is the record of the work, and a
+ * "done" that removed something would make the tick the destructive step; as it
+ * is, `reopenChat` genuinely undoes it.
  */
 export async function closeChat(
   project: Project,
   sessionId: string,
-  verdict: ChatVerdict,
-): Promise<{ rowId: string | null; rowRemoved: boolean; warning: string | null }> {
-  const rowId = await rowForSession(project.id, sessionId)
-
-  const rowRemoved = rowId !== null
-  if (rowId) {
-    // Tolerated rather than fatal. Someone may have deleted the line by hand
-    // between starting the chat and closing it, and refusing to record the
-    // verdict over that would strand the conversation as permanently unresolved.
-    await deleteTodo(project, rowId).catch(() => {})
-  }
+): Promise<{ warning: string | null }> {
   const warning = await checkpointNotice(project, sessionId)
-  if (rowId) await unlinkRow(project.id, rowId)
 
   const links = await readLinks()
   const board = boardFor(links, project.id)
-  board.verdicts[sessionId] = { verdict, at: Date.now() }
+  board.done[sessionId] = { at: Date.now() }
   links[project.id] = board
   await writeLinks(links)
 
-  return { rowId, rowRemoved, warning }
+  return { warning }
 }
 
 /**
  * Where this conversation's undo lives, said out loud as it closes.
  *
- * This slot used to report a checkout that could not be reclaimed. There is no
- * checkout now, and the thing worth saying at exactly this moment instead is
- * that the snapshot taken before the conversation started is still there — a
- * verdict is the point at which someone decides whether the work was any good,
- * and "not good" wants a command rather than a shrug.
+ * The snapshot taken before the conversation started is still there, and this is
+ * the moment worth saying so: ticking a chat off is the point at which someone
+ * decides whether the work was any good, and "not good" wants a command rather
+ * than a shrug.
  *
  * The ref is KEPT, deliberately, and not cleaned up here. A checkpoint is a few
  * bytes of ref plus objects git already had; deleting it the moment someone
@@ -199,12 +125,12 @@ async function checkpointNotice(project: Project, sessionId: string): Promise<st
   return `the tree as it was before this conversation is kept at ${found.ref} — undo with \`${restoreCommand(found.ref)}\``
 }
 
-/** Undo a verdict, for when it was the wrong button. The row does not come back. */
+/** Untick it, for when it was the wrong button. */
 export async function reopenChat(project: Project, sessionId: string): Promise<void> {
   const links = await readLinks()
   const board = boardFor(links, project.id)
-  if (!board.verdicts[sessionId]) return
-  delete board.verdicts[sessionId]
+  if (!board.done[sessionId]) return
+  delete board.done[sessionId]
   links[project.id] = board
   await writeLinks(links)
 }
@@ -212,39 +138,27 @@ export async function reopenChat(project: Project, sessionId: string): Promise<v
 /**
  * A status per conversation, for the chat list.
  *
- * Only conversations the board knows about get a lifecycle. An ordinary chat — a
- * question, with no row — reports `state: null`, because calling something you
- * asked last week "needs you" would bury the two that genuinely do.
+ * Three states and no more: it is running, it is finished, or it is just sitting
+ * there. A chat that is sitting there reports `state: null` and gets no badge,
+ * because a badge on every row buries the one that means something.
  */
 export async function chatStatuses(
   project: Project,
-  sessions: readonly { sessionId: string; lastModified: number }[],
+  sessions: readonly { sessionId: string }[],
   live: (sessionId: string) => LiveChat | null,
 ): Promise<Record<string, ChatStatus>> {
   const board = boardFor(await readLinks(), project.id)
-  const rowOf = new Map(Object.entries(board.rows).map(([rowId, s]) => [s, rowId]))
-  const now = Date.now()
 
   const out: Record<string, ChatStatus> = {}
-  for (const { sessionId, lastModified } of sessions) {
-    // Validated on the way out, not trusted. `board.json` on a machine that ran
-    // an older aide holds `failed` verdicts, and under the vocabulary that
-    // replaced it those conversations are not closed at all — the work was left
-    // unfinished, which is the same thing as never having pressed a button.
-    // Reading one back as a closed state would show a verdict that no longer
-    // exists and offer only "reopen" to get out of it.
-    const stored = board.verdicts[sessionId]?.verdict
-    const verdict = isChatVerdict(stored) ? stored : null
-    const rowId = rowOf.get(sessionId) ?? null
+  for (const { sessionId } of sessions) {
+    const done = board.done[sessionId] != null
     const chat = live(sessionId)
     out[sessionId] = {
-      rowId,
-      state: verdict ? "closed" : rowId ? (chat?.working ? "working" : "needs-you") : null,
+      // Working outranks done: a chat you ticked off and then asked one more
+      // thing of is running, whatever the tick says.
+      state: chat?.working ? "working" : done ? "closed" : null,
       blocked: chat?.blocked ?? false,
-      // Only meaningful for work that is still open. A finished conversation is
-      // not going stale, it is done.
-      stale: !verdict && rowId !== null && now - lastModified > CONFIG.chatStaleMs,
-      verdict,
+      done,
     }
   }
   return out

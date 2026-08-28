@@ -87,12 +87,6 @@ export interface GitCommit {
   refs: GitRef[]
   parents: string[]
   subject: string
-  /**
-   * Board row ids from `Aide-Row` trailers. This is what makes history navigable
-   * back to the task that asked for a commit, which is the whole reason
-   * `withTrailers` writes them.
-   */
-  rows: string[]
 }
 
 /**
@@ -169,11 +163,10 @@ export interface GitSummary {
  * poll on every beat — this is the middle, enough to say "these three files"
  * without reading any of their contents.
  *
- * `files` EXCLUDES `.aide/todos.md`. The daemon rewrites that file in the same
- * tree as rows open and close, so it is dirty almost permanently and is never
- * committable; counting it would leave every aide-managed project showing
- * uncommitted work forever — and since a new conversation is refused while this
- * list is non-empty, the block would never lift.
+ * `files` is everything git calls dirty, with nothing filtered out. It used to
+ * hide a file aide owned and no commit could take, which is the shape of bug
+ * worth naming: a new conversation is refused while this list is non-empty, so
+ * anything in it that cannot be committed is a block that never lifts.
  */
 export interface GitPending {
   /** Null when HEAD is detached — the indicator says so rather than guessing. */

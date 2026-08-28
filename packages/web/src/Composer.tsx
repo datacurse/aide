@@ -18,7 +18,7 @@ import {
  * request body enormous, so it is refused with a reason rather than silently
  * dropped.
  */
-const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 
 const kb = (bytes: number) =>
   bytes > 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.round(bytes / 1024)} KB`
@@ -40,7 +40,11 @@ function splitDataUrl(dataUrl: string): { mediaType: string; data: string } | nu
   return { mediaType: match[1], data: match[2] }
 }
 
-function readAsAttachment(file: File): Promise<Attachment | null> {
+/**
+ * Exported because the capture box in the chat list takes screenshots too, and
+ * an idea you park is worth the same picture as one you send straight away.
+ */
+export function readAsAttachment(file: File): Promise<Attachment | null> {
   return new Promise((resolve) => {
     const reader = new FileReader()
     reader.onload = () => {
@@ -162,45 +166,6 @@ function ModePicker({
  * it maps 1:1 onto the SDK's `permissionMode`, so "Manual" genuinely means the
  * turn will stop and ask.
  */
-/**
- * Whether this conversation shows up on the board.
- *
- * Locked once the conversation exists, because the row is paired with the
- * session when the SDK first names it. Shown rather than hidden when locked:
- * "is anyone tracking this?" is worth answering either way.
- */
-function TrackToggle({
-  locked,
-  tracked,
-  onChange,
-}: {
-  locked: boolean
-  tracked: boolean
-  onChange: (next: boolean) => void
-}) {
-  const label = tracked ? "on the board" : "not tracked"
-  if (locked) {
-    return (
-      <span className={`font-sans text-[11px] ${tracked ? "text-info" : "text-fg-dim"}`}>
-        {label}
-      </span>
-    )
-  }
-  return (
-    <button
-      type="button"
-      onClick={() => onChange(!tracked)}
-      className={`font-sans text-[11px] ${tracked ? "text-info" : "text-fg-dim hover:text-fg-muted"}`}
-      title={
-        tracked
-          ? "Gets a backlog row, so the work is visible on the board."
-          : "Just a question — nothing is added to the backlog."
-      }
-    >
-      {label}
-    </button>
-  )
-}
 
 export function Composer({
   busy,
@@ -208,9 +173,7 @@ export function Composer({
   sessionId,
   draftKey,
   inheritedMode,
-  tracked,
   blocked,
-  onTracked,
   onSend,
   onInterrupt,
 }: {
@@ -234,7 +197,6 @@ export function Composer({
    * Still first-message-only. A row is paired with a session at the moment the
    * SDK names it, and there is no second moment to do it in.
    */
-  tracked: boolean
   /**
    * Why this box cannot send, or null. Only ever set on a NEW conversation, and
    * only for uncommitted work: the rule is that one chat's work is committed
@@ -243,7 +205,6 @@ export function Composer({
    * the box it applies to.
    */
   blocked: string | null
-  onTracked: (next: boolean) => void
   onSend: (msg: {
     text: string
     attachments: Attachment[]
@@ -395,7 +356,6 @@ export function Composer({
 
       <div className="mt-1.5 flex items-center gap-3">
         <ModePicker mode={mode} effort={effort} onMode={chooseMode} onEffort={setEffort} />
-        <TrackToggle locked={sessionId !== null} tracked={tracked} onChange={onTracked} />
         <ContextMeter usage={usage} />
         <div className="ml-auto flex items-center gap-2">
           {busy ? (

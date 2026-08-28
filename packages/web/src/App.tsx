@@ -1,12 +1,10 @@
 import { useCallback, useEffect, useState } from "react"
-import type { BoardRow } from "@aide/protocol"
-import { api, type BoardView, type GitPending, type Health, type ProjectView } from "./api.js"
+import { api, type GitPending, type Health, type ProjectView } from "./api.js"
 import { CHIME_KEY } from "./chime.js"
 import { DaemonBar } from "./Daemon.js"
-import { carryDraft, draftKey, openNewChat, readDraft, saveDraft } from "./drafts.js"
-import { PANES, useAppLocation } from "./useAppLocation.js"
+import { carryDraft, draftKey, openNewChat } from "./drafts.js"
+import { useAppLocation } from "./useAppLocation.js"
 import { useRemembered } from "./useRemembered.js"
-import { BoardList, BoardSummary, SpecPane } from "./panes/Board.js"
 import { ConversationList, ConversationPane } from "./panes/Conversations.js"
 import { PendingRail } from "./panes/Pending.js"
 import { Button, Empty, PaneHeader } from "./ui.js"
@@ -17,7 +15,6 @@ const POLL_MS = 1500
 export function App() {
   const [health, setHealth] = useState<Health | null>(null)
   const [projects, setProjects] = useState<ProjectView[]>([])
-  const [board, setBoard] = useState<BoardView>({ rows: [], spec: "", warnings: [] })
   const [error, setError] = useState<string | null>(null)
   /**
    * What the project has left to commit.
@@ -30,21 +27,13 @@ export function App() {
   const [pending, setPending] = useState<GitPending | null>(null)
   const [pendingError, setPendingError] = useState<string | null>(null)
   /**
-   * Which project, which list, which conversation — all of it in the
-   * URL, so a reload lands you back where you were and Back steps through what
-   * you had open. See useAppLocation.
+   * Which project and which chat — in the URL, so a reload lands you back where
+   * you were and Back steps through what you had open. A chat is either a
+   * session the daemon knows or one that has not been sent; see useAppLocation.
    */
-  const [{ projectId, pane: mode, sessionId }, navigate] = useAppLocation()
+  const [{ projectId, sessionId, draftId }, navigate] = useAppLocation()
   /** Bumped to refetch the conversation list — a new chat has no id until it starts. */
   const [conversationsSeq, setConversationsSeq] = useState(0)
-  /**
-   * The board row a new chat was being started from.
-   *
-   * State rather than a ref because the composer renders from it — a chat opened
-   * from a row is tracked by definition — and it is sent with the first message,
-   * because the row is paired with the session the moment the SDK names it.
-   */
-  const [pendingRow, setPendingRow] = useState<string | null>(null)
   /**
    * The commit in flight, and the run it is happening in.
    *
@@ -71,7 +60,7 @@ export function App() {
   const refresh = useCallback(async () => {
     // Health is polled with everything else rather than fetched once at mount.
     // The daemon takes a second or two to boot, so a single attempt races it and
-    // loses about half the time — and losing pinned the header to "daemon
+    // loses about half the time — and losing pinned the status to "daemon
     // offline" for the life of the page even while every other request worked.
     try {
       setHealth(await api.health())
@@ -79,11 +68,7 @@ export function App() {
       setHealth(null)
     }
     try {
-      const next = await api.projects()
-      setProjects(next)
-      // Only while the board is on screen. It reads two files off disk per poll
-      // and no other pane has any use for the result.
-      if (projectId && mode === "board") setBoard(await api.board(projectId))
+      setProjects(await api.projects())
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -103,7 +88,7 @@ export function App() {
     } catch (err) {
       setPendingError(err instanceof Error ? err.message : String(err))
     }
-  }, [projectId, mode])
+  }, [projectId])
 
   useEffect(() => {
     void refresh()
@@ -146,8 +131,8 @@ export function App() {
   /**
    * Commit what the open conversation changed.
    *
-   * Returns as soon as the daemon has a run id — the work itself takes model
-   * calls and lands in the transcript. The refresh is not a nicety: until the
+   * Returns as soon as the daemon has a run id — the work itself takes a model
+   * call and lands in the transcript. The refresh is not a nicety: until the
    * projects list reports the commit as holding the repo, `committing` above is
    * false and the button reads as pressable over a commit already running.
    */
@@ -178,76 +163,11 @@ export function App() {
     }
   }
 
-  const reloadBoard = async () => {
-    if (projectId) setBoard(await api.board(projectId))
-  }
-
-  /**
-   * Clicking a row.
-   *
-   * A row already being worked opens its conversation. A row that is still just
-   * an idea FILLS the message box and stops — you press send yourself, after
-   * pasting a screenshot or adding the sentence that makes it a real request.
-   * Sending on click would turn a mis-click into a running agent.
-   */
-  const openRow = (row: BoardRow) => {
-    if (!projectId) return
-    if (row.sessionId) {
-      navigate({ pane: "chats", sessionId: row.sessionId })
-      return
-    }
-    // Same gate as "new", because this is the same act. Reported rather than
-    // silently ignored: a row that does nothing when clicked is indistinguishable
-    // from a broken one.
-    if (uncommitted > 0) {
-      setError(
-        `${uncommitted} uncommitted file${uncommitted === 1 ? "" : "s"} in this project. Commit that work before starting another chat.`,
-      )
-      return
-    }
-    const key = draftKey(projectId, null)
-    openNewChat(projectId)
-    // Never overwrite something already typed. The new-chat box is shared, and
-    // eating a half-written message to insert a todo is a bad trade.
-    const held = readDraft(key)
-    if (!held.text && held.attachments.length === 0) {
-      saveDraft(key, { text: row.text, attachments: [] })
-    }
-    setPendingRow(row.id)
-    navigate({ pane: "chats", sessionId: null })
-    setConversationsSeq((n) => n + 1)
-  }
-
-  const addRow = async (text: string) => {
-    if (!projectId) return
-    try {
-      await api.addTodo(projectId, text)
-      await reloadBoard()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    }
-  }
-
-  const deleteRow = async (row: BoardRow) => {
-    if (!projectId) return
-    // Only when a conversation is attached: removing an idea nobody has started
-    // is not worth a dialog, but removing the row a running agent is working is
-    // a different thing and reads as a mis-click.
-    if (row.sessionId && !window.confirm(`Remove "${row.text}"? A chat is working it.`)) return
-    try {
-      await api.deleteTodo(projectId, row.id)
-      await reloadBoard()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    }
-  }
-
-
   return (
     // No title bar. Nothing up there was worth a row of height across the whole
     // window — the app's name is in the tab, and the daemon controls are a
-    // footnote that now lives in the foot of the projects rail. The four panes
-    // get the screen.
+    // footnote that lives in the foot of the projects rail. The panes get the
+    // screen.
     <main className="flex h-full bg-editor font-mono text-fg antialiased">
       {/* Projects */}
       <aside className="flex w-64 shrink-0 flex-col border-r border-line bg-chrome">
@@ -264,9 +184,7 @@ export function App() {
                 type="button"
                 onClick={() => navigate({ projectId: p.id })}
                 className={`flex w-full items-center gap-2 px-3 py-[3px] text-left font-sans text-[13px] ${
-                  p.id === projectId
-                    ? "bg-active text-white"
-                    : "text-fg-muted hover:bg-hover"
+                  p.id === projectId ? "bg-active text-white" : "text-fg-muted hover:bg-hover"
                 }`}
               >
                 <span
@@ -321,116 +239,70 @@ export function App() {
         </div>
       </aside>
 
-      {/* Tasks and conversations */}
+      {/* Chats — the only list. A chat you have written and not sent is the
+          backlog, a chat that is running is the work, and a chat you have ticked
+          off is the record. There is no second surface, because a row on one and
+          a conversation on the other were always the same thing twice. */}
       <aside className="flex w-80 shrink-0 flex-col border-r border-line bg-chrome">
-        <PaneHeader title={mode}>
-          {mode === "board" && <BoardSummary rows={board.rows} />}
-          <div className="mr-1 flex overflow-hidden rounded border border-line">
-            {PANES.map((m) => (
-              <button
-                key={m}
-                type="button"
-                onClick={() => navigate({ pane: m })}
-                className={`px-2 py-0.5 text-xs ${
-                  mode === m ? "bg-input text-fg" : "text-fg-muted hover:text-fg"
-                }`}
-              >
-                {m}
-              </button>
-            ))}
-          </div>
-          {/* Only the chat list has something to create — the board has its
-              own one-line input. */}
-          {mode === "chats" && (
-            <Button
-              // Held back by uncommitted work, for the same reason the daemon
-              // refuses the message: a conversation opened on top of somebody
-              // else's edits takes them as its own baseline. Disabled rather
-              // than hidden — a button that vanishes teaches you nothing.
-              disabled={!project || uncommitted > 0}
-              onClick={() => {
-                // Idempotent on purpose: a second press is you looking for the
-                // chat you already started, not asking for another one.
-                if (project) openNewChat(project.id)
-                setPendingRow(null)
-                navigate({ sessionId: null })
-              }}
-              title={
-                uncommitted > 0
-                  ? `${uncommitted} uncommitted file${uncommitted === 1 ? "" : "s"} — commit this work before starting another chat.`
-                  : "Start a new conversation. Pressing this again opens the one you already started."
-              }
-            >
-              new
-            </Button>
-          )}
+        <PaneHeader title="chats">
+          <Button
+            // Held back by uncommitted work, for the same reason the daemon
+            // refuses the message: a conversation opened on top of somebody
+            // else's edits takes them as its own baseline. Disabled rather
+            // than hidden — a button that vanishes teaches you nothing.
+            disabled={!project || uncommitted > 0}
+            onClick={() => {
+              if (!project) return
+              // Idempotent on purpose: a second press is you looking for the
+              // blank chat you already made, not asking for another one.
+              navigate({ draftId: openNewChat(project.id) })
+            }}
+            title={
+              uncommitted > 0
+                ? `${uncommitted} uncommitted file${uncommitted === 1 ? "" : "s"} — commit this work before starting another chat.`
+                : "An empty chat. Pressing this again opens the one you already made."
+            }
+          >
+            new
+          </Button>
         </PaneHeader>
 
-
-        {mode === "board" ? (
-          <BoardList
-            projectId={projectId}
-            rows={board.rows}
-            warnings={board.warnings}
-            onOpen={openRow}
-            onAdd={(text) => void addRow(text)}
-            onDelete={(row) => void deleteRow(row)}
-          />
-        ) : (
-          <ConversationList
-            key={conversationsSeq}
-            projectId={projectId}
-            selected={sessionId}
-            // Picking an existing conversation abandons the row that was
-            // queued up for a new one; without this it would attach itself to
-            // whatever new chat is started next.
-            onSelect={(id) => {
-              setPendingRow(null)
-              navigate({ sessionId: id })
-            }}
-          />
-        )}
+        <ConversationList
+          key={conversationsSeq}
+          projectId={projectId}
+          selected={sessionId}
+          selectedDraft={draftId}
+          onSelect={(id) => navigate({ sessionId: id })}
+          onSelectDraft={(id) => navigate({ draftId: id })}
+          onChanged={() => setConversationsSeq((n) => n + 1)}
+        />
       </aside>
 
-      {mode === "board" ? (
-        <SpecPane spec={board.spec} />
-      ) : (
-        <ConversationPane
-          projectId={projectId}
-          openSessionId={sessionId}
-          pendingTodoId={pendingRow}
-          uncommitted={uncommitted}
-          adoptRunId={commitRunId}
-          // A verdict rewrites todos.md and unlinks the row, so both lists are
-          // stale the moment it lands.
-          onChanged={() => {
-            setConversationsSeq((n) => n + 1)
-            void reloadBoard()
-          }}
-          // A new chat has no id until its first turn starts. Put it in the
-          // URL the moment it exists, so a reload mid-first-turn still lands
-          // on the conversation rather than on a blank new one — and refetch
-          // the list so the row appears.
-          onStarted={(id) => {
-            // The draft row is this conversation, so it does not linger next
-            // to the real one the list is about to grow — anything still
-            // unsent in its box moves across with it.
-            if (projectId) carryDraft(draftKey(projectId, null), draftKey(projectId, id))
-            // The daemon records the row-to-session link itself, as part of
-            // the send that already had to know the row to pick a working
-            // directory. Nothing to do here but stop offering it to the next
-            // new chat.
-            setPendingRow(null)
-            navigate({ sessionId: id })
-            setConversationsSeq((n) => n + 1)
-          }}
-        />
-      )}
+      <ConversationPane
+        projectId={projectId}
+        openSessionId={sessionId}
+        draftId={draftId}
+        uncommitted={uncommitted}
+        adoptRunId={commitRunId}
+        onChanged={() => setConversationsSeq((n) => n + 1)}
+        // A new chat has no id until its first turn starts. Put it in the
+        // URL the moment it exists, so a reload mid-first-turn still lands
+        // on the conversation rather than on a blank new one — and refetch
+        // the list so the row appears.
+        onStarted={(id) => {
+          // The unstarted record IS this conversation, so it does not linger
+          // next to the real one the list is about to grow — anything still
+          // unsent in its box moves across with it.
+          if (projectId && draftId) carryDraft(draftKey(projectId, draftId), draftKey(projectId, id))
+          navigate({ sessionId: id })
+          setConversationsSeq((n) => n + 1)
+        }}
+      />
 
-      {/* Always on screen, whichever pane is showing. Not a view of the
-          repository — reading a change belongs to the conversation that made
-          it — but the answer to "can I start the next thing", which has to be
-          visible before you try, and the button that makes the answer yes. */}
+      {/* Always on screen. Not a view of the repository — reading a change
+          belongs to the conversation that made it — but the answer to "can I
+          start the next thing", which has to be visible before you try, and the
+          button that makes the answer yes. */}
       <PendingRail
         projectId={projectId}
         pending={pending}

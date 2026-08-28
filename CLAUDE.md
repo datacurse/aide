@@ -12,6 +12,45 @@ not a scratch copy of it — see the last section, which is the important one.
   run. Long-lived.
 - **`packages/web`** — React + Vite + Tailwind 4, styled as VS Code Dark Modern.
 
+## What the app does, and where it is
+
+Four panes, left to right: projects, chats, the open conversation, and what is
+left to commit. There is no other surface — no board, no tabs, no history view,
+no editor.
+
+A chat is the unit of everything. One you have written and not sent is the
+backlog; one with a turn in flight is the work; one you have ticked off is the
+record. They are all rows in the same list, in that order of urgency.
+
+| What | Where |
+| --- | --- |
+| The four panes and the polling loop | `packages/web/src/App.tsx` |
+| The chat list, the capture box, the done tick | `packages/web/src/panes/Conversations.tsx` |
+| Unstarted chats, drafts, pasted images (IndexedDB) | `packages/web/src/drafts.ts` |
+| An event log rendered as a conversation | `packages/web/src/panes/Transcript.tsx` |
+| One agent per project, the lock, warm sessions | `packages/daemon/src/chat.ts` |
+| The SDK call, the system prompt, permissions | `packages/daemon/src/agent.ts` |
+| Snapshots and turn boundaries under `refs/aide/` | `packages/daemon/src/checkpoint.ts` |
+| What a conversation changed, and what a commit stages | `packages/daemon/src/changes.ts` |
+| The commit run: read the diff, write a message, commit | `packages/daemon/src/review.ts` |
+| Which chats are ticked off (`~/.aide/board.json`) | `packages/daemon/src/board.ts` |
+| What a run's shell may and may not do | `packages/daemon/src/policy.ts` |
+
+Decisions already taken, which are not gaps to fill:
+
+- **No worktrees and no branches.** Every run works the project's own checkout,
+  one at a time. See the brief for why.
+- **No merge, no `land`.** Recoverability is the checkpoint, not an unmerged
+  branch.
+- **No repository browser** — no history list, no commit view, no graph. A diff
+  is read in the conversation that produced it.
+- **No capability file.** There was a model-maintained `.aide/spec.md`; it cost
+  more wall-clock than the rest of a commit, nothing read it, and it corrupted
+  itself. What the project does is discoverable by reading the code, and what it
+  refuses to do is in `.aide/project.md`.
+- **No backlog file.** `.aide/todos.md` is gone too — an unsent chat IS the row,
+  held in the browser, because nothing about it has happened yet.
+
 ## Commands
 
 ```
@@ -74,10 +113,10 @@ their own work, which is not free. It is a safety net, not a licence.
 from the UI. `git commit` is not in the shell allowlist, and reaching for it is a
 sign something has been misunderstood.
 
-`.aide/todos.md` is excluded from everything a run can stage: the daemon rewrites
-it in this same tree as rows open and close, so a commit carrying your copy is a
-straight race with it. `.aide/spec.md` is deliberately NOT excluded — the claim
-and the code that earns it land in one commit.
+Everything under `.aide/` is fair game, `project.md` included — a change to what
+the project refuses to be should land in the same commit as the code. There is no
+carve-out any more: a run commits exactly what it changed, and there is no file a
+human can watch change in the rail and never be allowed to commit.
 
 Do not create `.claude/settings.json`. Its `permissions.allow` entries widen a
 run's allowlist before aide's own policy sees the call, so aide's repo

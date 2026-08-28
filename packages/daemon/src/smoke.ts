@@ -26,15 +26,6 @@ import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 import { chatModeFromSdk } from "@aide/protocol"
-import {
-  appendTodo,
-  parseTodos,
-  removeTodo,
-  serializeTodos,
-  sortBoard,
-  todosOf,
-  type BoardRow,
-} from "@aide/protocol"
 import { checkBashCommand } from "./policy.js"
 import { restartDecision, type Health } from "@aide/protocol"
 import {
@@ -48,7 +39,7 @@ import {
   status as repoStatus,
   workingTree,
 } from "./repo.js"
-import { commitRun, currentBranch, recentSubjects, runChanges, withRowTrailers } from "./changes.js"
+import { commitRun, currentBranch, recentSubjects, runChanges, withSessionTrailer } from "./changes.js"
 import {
   listTurnCheckpoints,
   readCheckpoint,
@@ -159,16 +150,12 @@ const subjects = await recentSubjects(root)
 check("reads recent subjects", subjects.length === 2, JSON.stringify(subjects))
 
 console.log("\ncommit")
-const message = withRowTrailers(
+const message = withSessionTrailer(
   "Bump n and add lib\n\nBecause the smoke test says so.",
-  ROW,
   SESSION,
 )
-check(
-  "trailers appended",
-  message.includes(`Aide-Row: ${ROW}`) && message.includes(`Aide-Session: ${SESSION}`),
-)
-check("trailers are idempotent", withRowTrailers(message, ROW, SESSION) === message)
+check("trailer appended", message.includes(`Aide-Session: ${SESSION}`))
+check("trailers are idempotent", withSessionTrailer(message, SESSION) === message)
 
 // Staged by hand, by the human, while all this was going on. It must survive.
 await writeFile(join(root, "staged-by-hand.txt"), "mine\n", "utf8")
@@ -178,7 +165,7 @@ const sha = await commitRun(root, changes.paths, message)
 check("returns a sha", /^[0-9a-f]{40}$/.test(sha), sha)
 const body = await git(root, ["log", "-1", "--format=%B"])
 check("multi-line message survived", body.includes("Because the smoke test says so."))
-check("trailer is in the commit", body.includes(`Aide-Row: ${ROW}`))
+check("trailer is in the commit", body.includes(`Aide-Session: ${SESSION}`))
 
 const committed = await git(root, ["show", "--name-only", "--format=", sha])
 check("commits what the diff showed", committed.includes("app.ts") && committed.includes("new.ts"))
@@ -367,43 +354,35 @@ console.log("\nturn boundaries — a restore point per turn, not just per conver
   await rm(join(root, "turnwork.txt"))
 }
 
-console.log("\nagent scope — the agent may write the spec, but not the backlog")
+console.log("\neverything a run touches is a run's to commit")
+// There used to be a carve-out here: `.aide/todos.md` was written by the daemon
+// in the same tree a run was editing, so no commit could take it. Nothing writes
+// it now and the pathspec is gone, which makes this section about the property
+// that replaced it — the scope is simply "the repository", with no file that a
+// human can see change and never commit.
 await mkdir(join(root, STATE_DIR), { recursive: true })
-await writeFile(join(root, STATE_DIR, "todos.md"), "- [0009] written mid-run\n", "utf8")
-await writeFile(join(root, STATE_DIR, "spec.md"), "# What it does\n", "utf8")
+await writeFile(join(root, STATE_DIR, "notes.md"), "# What it does\n", "utf8")
 const scoped = await runChanges(root, cp.sha)
 check(
-  "hides .aide/todos.md",
-  !scoped.diff.includes("written mid-run") && !scoped.paths.includes(".aide/todos.md"),
-  "the daemon rewrites it in the same tree the run is editing",
+  "a run's own file under .aide/ is in the diff",
+  scoped.paths.includes(".aide/notes.md"),
+  "project.md included — a change to what the project refuses to be lands with the code",
 )
-check("shows .aide/spec.md", scoped.paths.includes(".aide/spec.md"), "the spec lands with the code")
 const scopedSha = await commitRun(root, scoped.paths, "Describe what it does\n")
 const shown = await git(root, ["show", "--stat", "--format=", scopedSha])
-check("commit matches the reviewed diff", !shown.includes("todos.md") && shown.includes("spec.md"))
-check(
-  "the backlog file is still on disk, uncommitted",
-  existsSync(join(root, STATE_DIR, "todos.md")),
-)
+check("commit matches the reviewed diff", shown.includes("notes.md"))
 
 console.log("\nwhat is left to commit — the indicator, and the gate it drives")
 {
-  // The state left by the section above is the exact trap: `.aide/todos.md` is
-  // sitting untracked and can never be committed, because the daemon owns it.
-  // A new conversation is refused while `pending` is non-empty, so if this list
-  // counted that file the refusal would be permanent on every aide-managed
-  // project and nothing a human could do would clear it.
-  const backlog = `${STATE_DIR}/todos.md`
-  check(
-    "git itself lists the backlog file",
-    (await repoStatus(root)).some((f) => f.path === backlog),
-    "it really is there and really is untracked",
-  )
+  // A new conversation is refused while `pending` is non-empty, so the list has
+  // to agree with git exactly: anything it reports has to be something a commit
+  // can actually take, or the refusal would never lift.
   const before = await pending(root)
   check(
-    "but it is never outstanding work",
-    !before.files.some((f) => f.path === backlog),
-    "otherwise the block on starting a new chat would never lift",
+    "nothing is hidden from this list",
+    (await repoStatus(root)).map((f) => f.path).sort().join(",") ===
+      before.files.map((f) => f.path).sort().join(","),
+    "there is no file a human can watch change and never be allowed to commit",
   )
   check("and it knows the branch", before.branch === "main", before.branch ?? "(detached)")
 
@@ -413,6 +392,12 @@ console.log("\nwhat is left to commit — the indicator, and the gate it drives"
     "a fresh edit does show",
     dirty.files.some((f) => f.path === "app.ts"),
     `${dirty.files.length} file(s)`,
+  )
+  check(
+    "and git agrees with it, file for file",
+    (await repoStatus(root)).map((f) => f.path).sort().join(",") ===
+      dirty.files.map((f) => f.path).sort().join(","),
+    "the rail is not a filtered view of git any more; it IS git",
   )
   // The invariant tying the rail to the gate: what the indicator lights on and
   // what a commit would take have to be the same set, or the screen explains
@@ -623,12 +608,6 @@ console.log("\nreading the repository")
   // puts third is a tie-break, and an assertion about trailers must not depend
   // on it.
   const full = await readLog(root, 50)
-  check(
-    "reads the Aide-Row trailer",
-    full.commits.some((c) => c.rows.includes("0001")),
-    "this is what links a commit back to the backlog row that asked for it",
-  )
-  check("and leaves it off the commits without one", full.commits.some((c) => c.rows.length === 0))
   check("no more history than there is", !full.more, `${full.commits.length} commits`)
 
   // The assertion this section exists for. `git show` on a cleanly resolved
@@ -798,99 +777,12 @@ console.log("\nthe drawn graph")
 }
 
 // ---------------------------------------------------------------------------
-console.log("\nthe backlog file")
-// The parser has to be forgiving in one direction and exact in the other: a bare
-// line typed by a human is a valid todo, and a numbered one must keep the id a
-// branch is already named after.
-{
-  const raw = [
-    "# Todos",
-    "",
-    "Some prose the human wrote and does not want reformatted.",
-    "",
-    "- [0003] already numbered",
-    "- just typed this",
-    "",
-  ].join("\n")
-
-  const file = parseTodos(raw)
-  const todos = todosOf(file)
-  check("both lines are todos", todos.length === 2, `${todos.length}`)
-  check("an existing id is kept", todos[0]?.id === "0003", todos[0]?.id)
-  check(
-    "a bare line is numbered above the highest existing id",
-    todos[1]?.id === "0004",
-    `${todos[1]?.id} — numbering by position would collide with 0003`,
-  )
-
-  const written = serializeTodos(file)
-  check("prose survives a round trip", written.includes("does not want reformatted"))
-  check("the heading survives", written.startsWith("# Todos"))
-  check(
-    "reparsing is idempotent",
-    serializeTodos(parseTodos(written)) === written,
-    "the file must converge, not renumber itself on every save",
-  )
-
-  const { file: grown, todo } = appendTodo(file, "  a third  ")
-  check("append numbers from the max", todo.id === "0005", todo.id)
-  check("append trims", todo.text === "a third", JSON.stringify(todo.text))
-  check("append does not widen the gap at the bottom", !serializeTodos(grown).includes("\n\n\n"))
-
-  const pruned = removeTodo(grown, "0003")
-  check("remove drops exactly one row", todosOf(pruned).length === 2)
-  check("and leaves the prose", serializeTodos(pruned).includes("Some prose"))
-
-  // A numbered line whose text was deleted must not free its id: a branch called
-  // aide/0007-... may still exist, and reusing the number would point two
-  // different pieces of work at one row.
-  const emptied = parseTodos("- [0007] \n- fresh")
-  check(
-    "an emptied numbered line does not release its id",
-    todosOf(emptied)[0]?.id === "0008",
-    todosOf(emptied)[0]?.id,
-  )
-}
-
-// ---------------------------------------------------------------------------
-console.log("\nboard order")
-{
-  const row = (id: string, state: BoardRow["state"], blocked = false): BoardRow => ({
-    id,
-    text: id,
-    sessionId: state === "idle" ? null : "s",
-    state,
-    blocked,
-  })
-  const sorted = sortBoard([
-    row("0001", "working"),
-    row("0002", "idle"),
-    row("0003", "needs-you"),
-    row("0004", "working", true),
-  ])
-  check(
-    "blocked comes first",
-    sorted[0]?.id === "0004",
-    "an agent stopped on an unanswered prompt is the only thing stuck on you",
-  )
-  check("then needs-you", sorted[1]?.id === "0003", sorted[1]?.id)
-  check("then idle", sorted[2]?.id === "0002", sorted[2]?.id)
-  check(
-    "working sorts last",
-    sorted[3]?.id === "0001",
-    "it is the one state that wants nothing from you",
-  )
-}
-
-// ---------------------------------------------------------------------------
 console.log("\ncommitting a conversation")
-// The review gate end to end, with a conversation's identifiers. The
-// model-written halves — the message and the spec update — are supplied here
-// rather than drafted, so this exercises the git plumbing without spending
-// anything.
+// The review gate end to end, with a conversation's identifiers. The message is
+// supplied here rather than drafted, so this exercises the git plumbing without
+// spending anything.
 {
   const { commitReview } = await import("./review.js")
-  const { specPath } = await import("@aide/protocol/node")
 
   const rowId = "0042"
   const session = "11111111-2222-3333-4444-555555555555"
@@ -903,42 +795,19 @@ console.log("\ncommitting a conversation")
   const { sha } = await commitReview({
     project,
     sessionId: session,
-    rowId,
     checkpoint: baseline.sha,
     message: "Teach the widget to wobble",
-    spec: "# What it can do\n\n- Wobbles the widget.",
   })
   check("it commits", /^[0-9a-f]{40}$/.test(sha), sha.slice(0, 8))
 
   const body = await git(root, ["log", "-1", "--format=%B"])
-  check("the commit carries its row", body.includes(`Aide-Row: ${rowId}`), "provenance")
   check("and its session, which outlives every run in it", body.includes(`Aide-Session: ${session}`))
 
   const tracked = await git(root, ["show", "--name-only", "--format=", "HEAD"])
   check(
-    "the spec lands in the SAME commit as the code",
-    tracked.includes("wobble.txt") && tracked.includes("spec.md"),
-    "the claim and the change that earns it are one revert",
-  )
-  check(
-    "and the spec is what was approved",
-    (await readFile(specPath(root), "utf8")).trim().endsWith("- Wobbles the widget."),
-  )
-
-  // An empty spec means "leave it alone", not "empty the file" — clearing the
-  // box is how a human declines the suggestion.
-  await writeFile(join(root, "wobble.txt"), "it wobbles twice\n", "utf8")
-  await commitReview({
-    project,
-    sessionId: session,
-    rowId,
-    checkpoint: baseline.sha,
-    message: "Wobble harder",
-  })
-  check(
-    "an empty spec leaves the file untouched",
-    (await readFile(specPath(root), "utf8")).includes("Wobbles the widget"),
-    "clearing the box declines the suggestion, it does not blank the spec",
+    "it commits exactly what the conversation changed",
+    tracked.includes("wobble.txt"),
+    "measured against the checkpoint, not against HEAD",
   )
 
   check(

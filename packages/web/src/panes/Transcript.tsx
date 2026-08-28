@@ -107,7 +107,7 @@ type Line =
   | { kind: "error"; seq: number; text: string }
   | CommitStepLine
   | CommitLandedLine
-  | { kind: "commit-message"; seq: number; message: string; model: string; specChanged: boolean }
+  | { kind: "commit-message"; seq: number; message: string; model: string }
 
 /**
  * A run must always end with a visible line saying how it ended. Without one, a
@@ -229,7 +229,6 @@ function toLines(events: RunEvent[]): Line[] {
           seq: e.seq,
           message: e.message,
           model: e.model,
-          specChanged: e.specChanged,
         })
         break
       case "commit.landed":
@@ -532,26 +531,8 @@ function CommitMessageBox({ message, note }: { message: string; note: ReactNode 
   )
 }
 
-function CommitMessageRow({
-  message,
-  model,
-  specChanged,
-}: {
-  message: string
-  model: string
-  specChanged: boolean
-}) {
-  return (
-    <CommitMessageBox
-      message={message}
-      note={
-        <>
-          <span>drafted by {model}</span>
-          {specChanged && <span className="text-warn">· .aide/spec.md rewritten with it</span>}
-        </>
-      }
-    />
-  )
+function CommitMessageRow({ message, model }: { message: string; model: string }) {
+  return <CommitMessageBox message={message} note={<span>drafted by {model}</span>} />
 }
 
 /**
@@ -614,7 +595,6 @@ function renderLine(
         key={line.seq}
         message={line.message}
         model={line.model}
-        specChanged={line.specChanged}
       />
     )
   if (line.kind === "commit-landed") return <CommitLandedRow key={line.seq} line={line} />

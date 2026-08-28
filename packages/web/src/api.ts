@@ -1,8 +1,6 @@
 import type {
   Attachment,
-  BoardRow,
   ChatStatus,
-  ChatVerdict,
   ChatMode,
   ConversationSummary,
   EffortLevel,
@@ -10,13 +8,12 @@ import type {
   Health,
   Project,
   RunEvent,
-  Todo,
 } from "@aide/protocol"
 
 export type { ConversationSummary, GitPending, Health }
 
 /**
- * A conversation plus what the board knows about it.
+ * A conversation plus its status.
  *
  * Attached by the daemon rather than stored in the session file: the SDK owns
  * the transcript, aide owns the lifecycle, and merging them on the wire keeps
@@ -60,14 +57,6 @@ export interface DaemonStatus {
   lastExit: { code: number | null; signal: string | null; at: number } | null
 }
 
-/** The board pane's whole payload: the backlog and the capability list. */
-export interface BoardView {
-  rows: BoardRow[]
-  spec: string
-  /** Project-state problems that would otherwise fail silently. Usually empty. */
-  warnings: string[]
-}
-
 async function call<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
     ...init,
@@ -109,29 +98,6 @@ export const api = {
     call<Project>("/api/projects", { method: "POST", body: JSON.stringify({ path }) }),
   removeProject: (id: string) => call<void>(`/api/projects/${id}`, { method: "DELETE" }),
 
-  /** Rows and spec together: they are one view and must not render a frame apart. */
-  board: (projectId: string) => call<BoardView>(`/api/projects/${projectId}/board`),
-  addTodo: (projectId: string, text: string) =>
-    call<Todo>(`/api/projects/${projectId}/todos`, {
-      method: "POST",
-      body: JSON.stringify({ text }),
-    }),
-  editTodo: (projectId: string, todoId: string, text: string) =>
-    call<Todo>(`/api/projects/${projectId}/todos/${todoId}`, {
-      method: "PATCH",
-      body: JSON.stringify({ text }),
-    }),
-  deleteTodo: (projectId: string, todoId: string) =>
-    call<void>(`/api/projects/${projectId}/todos/${todoId}`, { method: "DELETE" }),
-  /** Attach a conversation to a row, once the SDK has named the session. */
-  linkTodo: (projectId: string, todoId: string, sessionId: string) =>
-    call<void>(`/api/projects/${projectId}/board/${todoId}/session`, {
-      method: "POST",
-      body: JSON.stringify({ sessionId }),
-    }),
-  unlinkTodo: (projectId: string, todoId: string) =>
-    call<void>(`/api/projects/${projectId}/board/${todoId}/session`, { method: "DELETE" }),
-
   events: (runId: string, fromSeq = 0) =>
     call<RunEvent[]>(`/api/runs/${runId}/events?fromSeq=${fromSeq}`),
 
@@ -140,19 +106,19 @@ export const api = {
   /**
    * Commit this conversation's work.
    *
-   * Answers with a run id, not a sha. The drafting is two model calls on the
-   * diff and takes about as long as a short turn, so it goes on the event stream
+   * Answers with a run id, not a sha. The drafting is a model call on the diff
+   * and takes about as long as a short turn, so it goes on the event stream
    * like one — what it wrote and what it took arrive in the transcript.
    */
   commitChat: (projectId: string, sessionId: string) =>
     call<{ runId: string }>(`/api/projects/${projectId}/conversations/${sessionId}/commit`, {
       method: "POST",
     }),
-  /** The verdict. Nothing an agent runs can reach this. */
-  closeChat: (projectId: string, sessionId: string, verdict: ChatVerdict) =>
-    call<{ rowId: string | null; rowRemoved: boolean; warning: string | null }>(
+  /** Done. Nothing an agent runs can reach this. */
+  closeChat: (projectId: string, sessionId: string) =>
+    call<{ warning: string | null }>(
       `/api/projects/${projectId}/conversations/${sessionId}/close`,
-      { method: "POST", body: JSON.stringify({ verdict }) },
+      { method: "POST" },
     ),
   reopenChat: (projectId: string, sessionId: string) =>
     call<void>(`/api/projects/${projectId}/conversations/${sessionId}/reopen`, { method: "POST" }),
@@ -167,10 +133,6 @@ export const api = {
       attachments: Attachment[]
       mode: ChatMode
       effort: EffortLevel
-      /** Start this conversation on an existing board row. First message only. */
-      todoId?: string
-      /** Put it on the board with no row yet; the daemon makes one. First message only. */
-      track?: boolean
     },
   ) =>
     call<{ runId: string }>(`/api/projects/${projectId}/chat`, {

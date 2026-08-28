@@ -92,7 +92,6 @@ const say = (sessionId: string | null, text: string) =>
     attachments: [],
     mode: "manual",
     effort: "medium",
-    rowId: null,
   })
 
 const turnsOf = (runId: string): number => {
@@ -218,7 +217,6 @@ const e1 = await evicting.send({
   attachments: [],
   mode: "manual",
   effort: "medium",
-  rowId: null,
 })
 await wait(TURN_MS)
 check("warm right after the turn", evicting.liveSessions() === 1, `${evicting.liveSessions()}`)
@@ -241,16 +239,12 @@ console.log("\nthe lock — one agent has the repo")
 // could edit at once; they now share the project's own checkout, so the thing
 // worth asserting is that they cannot both be in it.
 {
-  const { addTodo } = await import("./todos.js")
-  const { rowForSession } = await import("./board.js")
   const { readCheckpoint } = await import("./checkpoint.js")
 
   // `addProject` scaffolds this in production; a bare temp repo has no `.aide/`.
   await mkdir(join(root, STATE_DIR), { recursive: true })
 
   const locked = new ChatLane(log, { idleMs: 5_000 })
-  const row = await addTodo(project, "make the widget wobble")
-  check("the row is numbered", /^\d{4}$/.test(row.id), row.id)
 
   const firstRun = await locked.send({
     project,
@@ -259,7 +253,6 @@ console.log("\nthe lock — one agent has the repo")
     attachments: [],
     mode: "manual",
     effort: "medium",
-    rowId: row.id,
   })
 
   // Mid-turn: the lock is held and says by whom.
@@ -275,7 +268,6 @@ console.log("\nthe lock — one agent has the repo")
       attachments: [],
       mode: "manual",
       effort: "medium",
-      rowId: null,
     })
   } catch (err) {
     refusal = err instanceof Error ? err.message : String(err)
@@ -307,7 +299,6 @@ console.log("\nthe lock — one agent has the repo")
       attachments: [],
       mode: "manual",
       effort: "medium",
-      rowId: null,
     }),
     locked.send({
       project,
@@ -316,7 +307,6 @@ console.log("\nthe lock — one agent has the repo")
       attachments: [],
       mode: "manual",
       effort: "medium",
-      rowId: null,
     }),
   ])
   const admitted = both.filter((r) => r.status === "fulfilled").length
@@ -350,13 +340,6 @@ console.log("\nthe lock — one agent has the repo")
   const started2 = events.find((e) => e.type === "run.started")
   const smokeSession = started2?.type === "run.started" ? (started2.sessionId ?? "") : ""
   check("the conversation reported a session id", Boolean(smokeSession), smokeSession || "(none)")
-  const linked = await rowForSession(project.id, smokeSession)
-  check(
-    "the daemon linked the row to the session itself",
-    linked === row.id,
-    `${linked} — the browser is not in this path`,
-  )
-
   // The checkpoint was taken before the session had a name, so it has to have
   // been handed over to one. Without this the only reference to the snapshot is
   // a run id nothing will ever look up again.
@@ -377,7 +360,6 @@ console.log("\nthe lock — one agent has the repo")
     attachments: [],
     mode: "manual",
     effort: "medium",
-    rowId: row.id,
   })
   await wait(TURN_MS)
   check(
@@ -394,125 +376,47 @@ console.log("\nthe lock — one agent has the repo")
 }
 
 // ---------------------------------------------------------------------------
-console.log("\nverdicts")
-// The gate the whole design rests on. What a verdict does is rewrite the
-// BACKLOG — there is no status field on a row — so these assertions are about
-// the shape of todos.md, not about a stored state.
+console.log("\ndone, and undone")
+// The gate the whole design rests on, and the only bit of state aide keeps about
+// a conversation. It is a toggle now rather than a verdict that also rewrote a
+// backlog, so what these assert is that it survives, that it can be taken back,
+// and that a running turn outranks it.
 {
-  const { addTodo, listTodos } = await import("./todos.js")
-  const { closeChat, reopenChat, chatStatuses, linkSession, rowForSession } = await import(
-    "./board.js"
-  )
+  const { closeChat, reopenChat, chatStatuses } = await import("./board.js")
 
-  const mk = async (text: string, session: string) => {
-    const row = await addTodo(project, text)
-    await linkSession(project.id, row.id, session)
-    return row
-  }
-  const ids = async () => (await listTodos(project)).map((t) => t.id)
   const none = () => null
+  const sessions = [{ sessionId: "sess-done" }, { sessionId: "sess-open" }]
 
-  const doneRow = await mk("ship the thing", "sess-done")
-  const droppedRow = await mk("never mind this one", "sess-dropped")
-
-  await closeChat(project, "sess-done", "done")
+  await closeChat(project, "sess-done")
+  let statuses = await chatStatuses(project, sessions, none)
+  check("a ticked chat reads as closed", statuses["sess-done"]?.state === "closed")
+  check("and says so as a flag too", statuses["sess-done"]?.done === true)
   check(
-    "done removes the row",
-    !(await ids()).includes(doneRow.id),
-    "the verdict IS the shape of the file",
+    "an untouched chat has no state at all",
+    statuses["sess-open"]?.state === null,
+    "a badge on every row buries the one that means something",
   )
-  check("and unlinks the session", (await rowForSession(project.id, "sess-done")) === null)
+  check("and is not done", statuses["sess-open"]?.done === false)
 
-  await closeChat(project, "sess-dropped", "dropped")
-  check("dropped removes the row too", !(await ids()).includes(droppedRow.id))
-
-  // Work that did not land has no button of its own. The row stays because
-  // nobody closed it, which is the same state it was in before — and that is the
-  // whole argument for deleting the `failed` verdict.
-  const openRow = await mk("did not work first time", "sess-open")
-  check("an unresolved conversation leaves its row alone", (await ids()).includes(openRow.id))
-  check(
-    "and keeps the row linked to it",
-    (await rowForSession(project.id, "sess-open")) === openRow.id,
-    "so the board still shows who is on it",
-  )
-
-  const closed = await chatStatuses(
-    project,
-    [
-      { sessionId: "sess-done", lastModified: Date.now() },
-      { sessionId: "sess-open", lastModified: Date.now() },
-      { sessionId: "sess-untracked", lastModified: Date.now() },
-    ],
-    none,
-  )
-  check("a closed conversation reports its verdict", closed["sess-done"]?.verdict === "done")
-  check("and reads as closed", closed["sess-done"]?.state === "closed")
-  check(
-    "unresolved work is not closed",
-    closed["sess-open"]?.state === "needs-you" && closed["sess-open"]?.verdict === null,
-    "no button was pressed, so there is nothing to report but the row",
+  // Working outranks done. A chat you ticked off and then asked one more thing
+  // of is running, whatever the tick says — and showing it as finished while an
+  // agent is mid-turn in your checkout is the one reading that could mislead.
+  statuses = await chatStatuses(project, sessions, (s) =>
+    s === "sess-done" ? { working: true, blocked: false } : null,
   )
   check(
-    "an ordinary chat has no lifecycle at all",
-    closed["sess-untracked"]?.state === null,
-    "a question you asked last week is not `needs you` forever",
+    "a new turn on a finished chat reads as working",
+    statuses["sess-done"]?.state === "working",
+    "the tick is not a lock",
   )
-
-  // A board.json written by an older aide still holds `failed` verdicts. Under
-  // the two-verdict vocabulary that work is simply not closed, so the stored
-  // value has to read as "no verdict" rather than as a closed state whose label
-  // no longer exists — and the only way out of which would be `reopen`.
-  {
-    const { readFile, writeFile } = await import("node:fs/promises")
-    const { boardPath } = await import("@aide/protocol/node")
-    const raw = JSON.parse(await readFile(boardPath(), "utf8")) as Record<
-      string,
-      { rows: Record<string, string>; verdicts: Record<string, unknown> }
-    >
-    const board = raw[project.id]
-    if (board) {
-      board.verdicts["sess-legacy"] = { verdict: "failed", at: Date.now() }
-      await writeFile(boardPath(), JSON.stringify(raw), "utf8")
-    }
-    const legacy = await chatStatuses(
-      project,
-      [{ sessionId: "sess-legacy", lastModified: Date.now() }],
-      none,
-    )
-    check(
-      "a stored `failed` verdict reads as unfinished, not as a closed state",
-      legacy["sess-legacy"]?.state === null && legacy["sess-legacy"]?.verdict === null,
-    )
-  }
+  check("though it is still marked done", statuses["sess-done"]?.done === true)
 
   await reopenChat(project, "sess-done")
-  const reopened = await chatStatuses(
-    project,
-    [{ sessionId: "sess-done", lastModified: Date.now() }],
-    none,
-  )
-  check("reopening clears the verdict", reopened["sess-done"]?.state === null)
-
-  // Staleness is a flag on open work, never on finished work.
-  const old = await mk("been sitting a while", "sess-old")
-  const stale = await chatStatuses(
-    project,
-    [{ sessionId: "sess-old", lastModified: Date.now() - 40 * 24 * 60 * 60_000 }],
-    none,
-  )
-  check("untouched open work is flagged stale", stale["sess-old"]?.stale === true)
-  check("and is still `needs you`, not a state of its own", stale["sess-old"]?.state === "needs-you")
-  await closeChat(project, "sess-old", "dropped")
-  const notStale = await chatStatuses(
-    project,
-    [{ sessionId: "sess-old", lastModified: Date.now() - 40 * 24 * 60 * 60_000 }],
-    none,
-  )
+  statuses = await chatStatuses(project, sessions, none)
   check(
-    "a finished conversation is not going stale",
-    notStale["sess-old"]?.stale === false,
-    `row ${old.id} is closed, so there is nothing to chase`,
+    "unticking it undoes the whole thing",
+    statuses["sess-done"]?.state === null && statuses["sess-done"]?.done === false,
+    "nothing was deleted, so there is nothing that cannot come back",
   )
 }
 
@@ -522,75 +426,50 @@ console.log("\nchat list order")
   const { sortChats } = await import("@aide/protocol")
   const at = (n: number) => ({ lastModified: n })
   const st = (state: ChatState | null, extra: Partial<ChatStatus> = {}): ChatStatus => ({
-    rowId: state ? "0001" : null,
     state,
     blocked: false,
-    stale: false,
-    verdict: null,
+    done: state === "closed",
     ...extra,
   })
   const sorted = sortChats([
-    { id: "closed", ...at(500), status: st("closed", { verdict: "done" }) },
+    { id: "closed", ...at(500), status: st("closed") },
     { id: "ordinary", ...at(400), status: st(null) },
     { id: "working", ...at(300), status: st("working") },
-    { id: "needs", ...at(200), status: st("needs-you") },
     { id: "blocked", ...at(100), status: st("working", { blocked: true }) },
   ])
   check("blocked first, even though it is the oldest", sorted[0]?.id === "blocked")
-  check("then needs-you", sorted[1]?.id === "needs")
-  check("then working", sorted[2]?.id === "working")
-  check("then ordinary conversations", sorted[3]?.id === "ordinary")
+  check("then working", sorted[1]?.id === "working")
+  check("then everything else", sorted[2]?.id === "ordinary")
   check(
     "finished is pushed to the bottom, newest though it is",
-    sorted[4]?.id === "closed",
+    sorted[3]?.id === "closed",
     "all finished pushed down",
   )
 }
 
-
 // ---------------------------------------------------------------------------
-console.log("\nclosing a conversation keeps its undo")
-// There is no checkout to reclaim any more. What a verdict has to do instead is
-// leave the way back intact and SAY so — "done" is the point at which someone
-// decides the work was good, and deciding it was not wants a command rather than
-// a shrug.
+console.log("\nticking a conversation off keeps its undo")
+// There is no checkout to reclaim and no row to remove. What the tick has to do
+// instead is leave the way back intact and SAY so — it is the point at which
+// someone decides the work was good, and deciding it was not wants a command
+// rather than a shrug.
 {
-  const { addTodo } = await import("./todos.js")
-  const { closeChat, linkSession } = await import("./board.js")
+  const { closeChat } = await import("./board.js")
   const { takeCheckpoint, readCheckpoint } = await import("./checkpoint.js")
 
   const session = "99999999-8888-7777-6666-555555555555"
-  const row = await addTodo(project, "tidy up after itself")
-  await linkSession(project.id, row.id, session)
   const cp = await takeCheckpoint(root, session)
 
-  const closed = await closeChat(project, session, "dropped")
-  check("the verdict lands", closed.rowRemoved, "the row is gone from the backlog")
+  const closed = await closeChat(project, session)
   check(
-    "and it says where the undo is",
+    "it says where the undo is",
     (closed.warning ?? "").includes(cp.ref),
     closed.warning ?? "(silent)",
   )
   check(
-    "the checkpoint is NOT deleted with the row",
+    "the checkpoint is NOT deleted with the verdict",
     (await readCheckpoint(root, session))?.sha === cp.sha,
-    "closing must not make itself the irreversible step",
-  )
-
-  // An id that reached a COMMIT must never be handed out again: the history view
-  // reads `Aide-Row` back to label commits, so reusing this number would
-  // attribute one row's work to another. An id that left no trace behind is free
-  // to be reused, because there is nothing for it to collide with — which is why
-  // the floor comes from git rather than from a high-water mark in a file.
-  await writeFile(join(root, "landed.txt"), "work\n", "utf8")
-  await git(root, ["add", "landed.txt"])
-  await git(root, ["commit", "-m", `Do the thing\n\nAide-Row: ${row.id}\nAide-Session: ${session}`])
-
-  const next = await addTodo(project, "canary")
-  check(
-    "an id that reached a commit is never handed out again",
-    Number(next.id) > Number(row.id),
-    `${next.id} follows ${row.id}, read back from the Aide-Row trailer`,
+    "ticking a chat off must not make itself the irreversible step",
   )
 }
 

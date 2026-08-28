@@ -11,16 +11,12 @@ import type {
   RunEvent,
   ServerMessage,
 } from "@aide/protocol"
-import { CHAT_MODES, CHAT_VERDICTS, EFFORT_LEVELS, isChatVerdict } from "@aide/protocol"
+import { CHAT_MODES, EFFORT_LEVELS } from "@aide/protocol"
 import { MAX_PROJECT_DOC_CHARS } from "./agent.js"
 import {
-  boardRows,
   chatStatuses,
   closeChat,
-  linkSession,
   reopenChat,
-  rowForSession,
-  unlinkRow,
 } from "./board.js"
 import { currentBranch, runChanges } from "./changes.js"
 import { ChatLane } from "./chat.js"
@@ -32,7 +28,6 @@ import { commitConversation, conversationBaseline } from "./review.js"
 import * as repo from "./repo.js"
 import { BOOT_SOURCE_ID, currentSourceId, isStale } from "./source.js"
 import { getConversation, listConversations } from "./sessions.js"
-import { addTodo, deleteTodo, editTodo, findTodo, readSpec } from "./todos.js"
 
 const log = new EventLog()
 const chat = new ChatLane(log)
@@ -147,18 +142,16 @@ const liveChatTurn = (sessionId: string) => chat.turnForSession(sessionId) ?? nu
 const notFound = (msg: string) => ({ statusCode: 404, error: "Not Found", message: msg })
 
 /**
- * A conversation the board has never heard of.
+ * A conversation nothing is known about.
  *
  * Used when `chatStatuses` has no entry — which should not happen, since it is
  * asked about exactly the sessions being returned, but the alternative is
  * shipping `undefined` over the wire into a field the browser destructures.
  */
 const UNTRACKED: ChatStatus = {
-  rowId: null,
   state: null,
   blocked: false,
-  stale: false,
-  verdict: null,
+  done: false,
 }
 
 // ---------------------------------------------------------------------------
@@ -221,119 +214,17 @@ app.delete("/api/projects/:id", async (req, reply) => {
   return reply.code(204).send()
 })
 
-// ---------------------------------------------------------------------------
-// The board
-// ---------------------------------------------------------------------------
-
 /**
- * What the chat lane knows about a conversation, in the shape the board wants.
+ * What the chat lane knows about a conversation.
  *
  * `turnForSession` returns the turn IN FLIGHT, so null here does not mean the
- * conversation is gone — it means nothing is running, which is exactly the
- * `needs-you` resting state. `boardRows` makes that distinction; this only has
- * to answer honestly.
+ * conversation is gone — it means nothing is running.
  */
 const liveChat = (sessionId: string) => {
   const turn = chat.turnForSession(sessionId)
   return turn ? { working: true, blocked: turn.blocked } : null
 }
 
-/**
- * Rows and spec in one response, because they are one view. Fetching them
- * separately would let the backlog and the capability list render a frame apart,
- * which is the one thing the side-by-side is for.
- */
-app.get("/api/projects/:id/board", async (req, reply) => {
-  const { id } = req.params as { id: string }
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-  const [rows, spec, doc] = await Promise.all([
-    boardRows(project, liveChat),
-    readSpec(project),
-    readProjectDoc(project.root).catch(() => null),
-  ])
-
-  // The things about project state that go wrong SILENTLY. Everything else here
-  // surfaces as an error; these two just quietly stop being true — a brief past
-  // the cap loses its second half on the way into every prompt, and a retired
-  // frontmatter key sits there looking like configuration that still does
-  // something.
-  const size = doc?.body.trim().length ?? 0
-  const warnings: string[] = []
-  if (size > MAX_PROJECT_DOC_CHARS) {
-    warnings.push(
-      `.aide/project.md is ${size} characters and is cut off at ${MAX_PROJECT_DOC_CHARS} in every prompt. Move what belongs in the spec out of it.`,
-    )
-  }
-  if (doc?.retired.length) {
-    warnings.push(
-      `.aide/project.md still sets ${doc.retired.join(" and ")}, which aide no longer reads — runs work the project's own checkout, so there is no fresh worktree to set up. Delete those lines.`,
-    )
-  }
-  return { rows, spec, warnings }
-})
-
-app.post("/api/projects/:id/todos", async (req, reply) => {
-  const { id } = req.params as { id: string }
-  const { text } = (req.body ?? {}) as { text?: string }
-  if (!text?.trim()) return reply.code(400).send({ message: "body must include { text }" })
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-  return addTodo(project, text)
-})
-
-app.patch("/api/projects/:id/todos/:todoId", async (req, reply) => {
-  const { id, todoId } = req.params as { id: string; todoId: string }
-  const { text } = (req.body ?? {}) as { text?: string }
-  if (!text?.trim()) return reply.code(400).send({ message: "body must include { text }" })
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-  try {
-    return await editTodo(project, todoId, text)
-  } catch (err) {
-    return reply.code(404).send(notFound(err instanceof Error ? err.message : String(err)))
-  }
-})
-
-app.delete("/api/projects/:id/todos/:todoId", async (req, reply) => {
-  const { id, todoId } = req.params as { id: string; todoId: string }
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-  try {
-    await deleteTodo(project, todoId)
-  } catch (err) {
-    return reply.code(404).send(notFound(err instanceof Error ? err.message : String(err)))
-  }
-  // The link outlives the row deliberately: `boardRows` filters links whose row
-  // is gone rather than deleting them, so a row removed by hand in an editor and
-  // typed back does not lose the conversation that was working it.
-  return reply.code(204).send()
-})
-
-/**
- * Attach a conversation to a row.
- *
- * Sent by the browser once the SDK has named the session, because that is the
- * first moment both halves of the pair exist: the row id came from the click,
- * and the session id does not exist until the first turn starts.
- */
-app.post("/api/projects/:id/board/:todoId/session", async (req, reply) => {
-  const { id, todoId } = req.params as { id: string; todoId: string }
-  const { sessionId } = (req.body ?? {}) as { sessionId?: string }
-  if (!sessionId?.trim()) return reply.code(400).send({ message: "body must include { sessionId }" })
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-  await linkSession(project.id, todoId, sessionId)
-  return reply.code(204).send()
-})
-
-app.delete("/api/projects/:id/board/:todoId/session", async (req, reply) => {
-  const { id, todoId } = req.params as { id: string; todoId: string }
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-  await unlinkRow(project.id, todoId)
-  return reply.code(204).send()
-})
 
 /**
  * The branch a commit would land on. Shown on the button so it is never a guess.
@@ -499,7 +390,7 @@ const reviewable = async (
   project: Project,
   sessionId: string,
   reply: FastifyReply,
-): Promise<{ rowId: string | null; checkpoint: string } | null> => {
+): Promise<{ checkpoint: string } | null> => {
   // Committing underneath a working agent races its next write. It is also
   // impossible to review honestly: the diff would be a half-finished turn.
   if (chat.turnForSession(sessionId)) {
@@ -570,7 +461,11 @@ app.post("/api/projects/:id/conversations/:sessionId/commit", async (req, reply)
   const found = await reviewable(project, sessionId, reply)
   if (!found) return
 
-  const row = found.rowId ? await findTodo(project, found.rowId) : undefined
+  // What the work was asked for, so the drafter can tell intent from incident.
+  // The conversation's opening message, now that there is no backlog row to
+  // carry it — which is the better source anyway: it is what you actually typed
+  // rather than a line somebody summarised it into.
+  const opening = (await listConversations(project)).find((c) => c.sessionId === sessionId)
   try {
     // Throws if another conversation holds the checkout, with that
     // conversation's name in it. `reviewable` has already refused the narrower
@@ -584,9 +479,8 @@ app.post("/api/projects/:id/conversations/:sessionId/commit", async (req, reply)
         commitConversation({
           project,
           sessionId,
-          rowId: found.rowId,
           checkpoint: found.checkpoint,
-          request: row?.text ?? "",
+          request: opening?.firstPrompt ?? "",
           emit: run.emit,
           delta: run.delta,
           stopped: run.stopped,
@@ -599,22 +493,18 @@ app.post("/api/projects/:id/conversations/:sessionId/commit", async (req, reply)
 })
 
 /**
- * The verdict. The one thing in this product an agent cannot reach.
+ * Done. The one thing in this product an agent cannot reach.
  *
- * Both verdicts remove the backlog row: the work is finished, or it is not
- * wanted. See `closeChat` for why the verdict is expressed as the shape of the
- * todo file rather than as a status field, and why there is no verdict for work
- * that simply is not done yet.
+ * A toggle rather than a verdict: the states worth telling apart are "this
+ * served its purpose" and "not yet", and the transcript already says everything
+ * a third one would have. Nothing is removed by it — the conversation is the
+ * record — so `reopen` below genuinely undoes it.
  */
 app.post("/api/projects/:id/conversations/:sessionId/close", async (req, reply) => {
   const { id, sessionId } = req.params as { id: string; sessionId: string }
-  const { verdict } = (req.body ?? {}) as { verdict?: unknown }
-  if (!isChatVerdict(verdict)) {
-    return reply.code(400).send({ message: `verdict must be one of ${CHAT_VERDICTS.join(", ")}` })
-  }
   const project = await getProject(id)
   if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-  return closeChat(project, sessionId, verdict)
+  return closeChat(project, sessionId)
 })
 
 app.post("/api/projects/:id/conversations/:sessionId/reopen", async (req, reply) => {
@@ -639,10 +529,6 @@ app.post("/api/projects/:id/chat", async (req, reply) => {
     attachments?: Attachment[]
     mode?: string
     effort?: string
-    /** Start this conversation on an existing board row. */
-    todoId?: string
-    /** Put it on the board with no row yet — one gets created from the message. */
-    track?: boolean
   }
   if (!body.text?.trim() && !body.attachments?.length) {
     return reply.code(400).send({ message: "nothing to send" })
@@ -691,34 +577,6 @@ app.post("/api/projects/:id/chat", async (req, reply) => {
     ? (body.effort as EffortLevel)
     : "high"
 
-  /**
-   * Which backlog row this conversation is working, decided HERE.
-   *
-   * It no longer picks a working directory — every conversation runs in the
-   * project root — so getting it wrong is no longer destructive. It is still
-   * resolved server-side rather than trusted from the client, because a
-   * follow-up must stay on the row its conversation is already on and the board
-   * is the thing that knows which that is.
-   */
-  let rowId: string | null = null
-  try {
-    if (body.sessionId) {
-      rowId = await rowForSession(project.id, body.sessionId)
-    } else if (body.todoId) {
-      const row = await findTodo(project, body.todoId)
-      if (!row) return reply.code(404).send(notFound(`no todo ${body.todoId}`))
-      rowId = row.id
-    } else if (body.track) {
-      // A cold conversation that asked to be tracked gets a row. Work happening
-      // off the board is the blindness the board exists to remove — you would
-      // write a todo for something an agent is already doing.
-      const first = (body.text ?? "").trim().split(/\r?\n/)[0]?.slice(0, 120) ?? ""
-      rowId = (await addTodo(project, first || "untitled")).id
-    }
-  } catch (err) {
-    return reply.code(500).send({ message: err instanceof Error ? err.message : String(err) })
-  }
-
   try {
     const runId = await chat.send({
       project,
@@ -727,7 +585,6 @@ app.post("/api/projects/:id/chat", async (req, reply) => {
       attachments: body.attachments ?? [],
       mode,
       effort,
-      rowId,
     })
     return { runId }
   } catch (err) {

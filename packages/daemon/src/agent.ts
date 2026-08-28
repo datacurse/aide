@@ -601,14 +601,6 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
                 .filter(Boolean)
                 .join("\n")
             : "",
-          // Pointed at rather than pasted in. What the project currently DOES is
-          // discoverable by reading the code, which agents are good at, and this
-          // file grows with the project â inlining it would put the whole
-          // capability list in every prompt of every turn forever.
-          "",
-          "`.aide/spec.md`, if it exists, lists what this project can and cannot do.",
-          "Read it before proposing a change to what it does, and treat a `cannot`",
-          "there as a decision already taken rather than a gap to fill.",
         ]
           .filter(Boolean)
           .join("\n"),
