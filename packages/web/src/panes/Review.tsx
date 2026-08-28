@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { api, type DiffView, type ReviewDraft } from "../api.js"
+import { api, type DiffView, type Receipt, type ReviewDraft } from "../api.js"
 import { Diff } from "../Diff.js"
 import { Button } from "../ui.js"
 
@@ -16,6 +16,14 @@ import { Button } from "../ui.js"
  * second gate is the verdict below — the row closes when you say the work is
  * done, having watched it run in the dev server that serves this very tree.
  *
+ * The receipt sits here for the same reason the verdict does: it is evidence for
+ * the gate on the WORK, not the gate on the code. The diff says whether the
+ * change is right; the receipt says what the asking cost and where it went
+ * wrong, which is the thing you would otherwise have to reconstruct by scrolling
+ * the transcript. It is shown as raw markdown on purpose — it exists to be
+ * copied into a question about it, and rendering it would show you something
+ * other than what the clipboard gets.
+ *
  * The spec update sits in the same panel as the commit message, deliberately.
  * "The app can now do X" and the diff that earns it are one claim, and reviewing
  * them apart is how a capability list ends up describing work that never landed.
@@ -31,6 +39,8 @@ export function ReviewPanel({
   onCommitted: () => void
 }) {
   const [diff, setDiff] = useState<DiffView | null>(null)
+  const [receipt, setReceipt] = useState<Receipt | null>(null)
+  const [copied, setCopied] = useState(false)
   const [draft, setDraft] = useState<ReviewDraft | null>(null)
   const [message, setMessage] = useState("")
   const [spec, setSpec] = useState("")
@@ -68,6 +78,25 @@ export function ReviewPanel({
       setSpec(r.spec)
     })
 
+  const receipts = () =>
+    void guard("counting", async () => {
+      // Toggles. The panel is tall and the diff below it is the thing normally
+      // being read, so a second press has to put it away.
+      if (receipt) {
+        setReceipt(null)
+        return
+      }
+      setReceipt(await api.receipt(projectId, sessionId))
+      setCopied(false)
+    })
+
+  const copy = () =>
+    void guard("copying", async () => {
+      if (!receipt) return
+      await navigator.clipboard.writeText(receipt.markdown)
+      setCopied(true)
+    })
+
   const commit = () =>
     void guard("committing", async () => {
       const r = await api.commitChat(projectId, sessionId, message, spec)
@@ -86,6 +115,13 @@ export function ReviewPanel({
         {sha && <span className="text-diff-add-fg">committed {sha.slice(0, 7)}</span>}
         {error && <span className="min-w-0 flex-1 truncate text-err">{error}</span>}
         <div className="ml-auto flex items-center gap-1.5">
+          <Button
+            onClick={receipts}
+            disabled={busy !== null}
+            title="What this conversation cost, where the time went, and what went wrong — derived from its run logs, not written by a model."
+          >
+            {busy === "counting" ? "counting…" : receipt ? "hide receipt" : "receipt"}
+          </Button>
           <Button onClick={review} disabled={busy !== null}>
             {busy === "reading" ? "reading…" : draft ? "re-read" : "read the diff"}
           </Button>
@@ -101,6 +137,24 @@ export function ReviewPanel({
           )}
         </div>
       </div>
+
+      {receipt && (
+        <div className="flex min-h-0 flex-col gap-1">
+          <div className="flex items-center gap-2 font-sans text-[10px] text-fg-dim">
+            <span>
+              {receipt.runs === 0
+                ? "no run log for this conversation"
+                : `${receipt.runs} turn${receipt.runs === 1 ? "" : "s"} of run log`}
+            </span>
+            <Button onClick={copy} disabled={busy !== null}>
+              {copied ? "copied" : "copy"}
+            </Button>
+          </div>
+          <pre className="max-h-64 min-h-0 overflow-auto rounded border border-line-soft bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap">
+            {receipt.markdown}
+          </pre>
+        </div>
+      )}
 
       {diff && (
         <div className="max-h-64 min-h-0 overflow-auto rounded border border-line-soft bg-editor">

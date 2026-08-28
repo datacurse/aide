@@ -87,6 +87,20 @@ export interface ReviewDraft {
   mixed: string[]
 }
 
+/**
+ * What a conversation cost and where it went wrong, derived from its run logs.
+ *
+ * The markdown IS the artifact — there is no structured half that the UI
+ * reformats, because two representations of one set of numbers is two places for
+ * them to disagree. `runs` is here only so the panel can say "no run log for
+ * this conversation" without parsing the document to find out.
+ */
+export interface Receipt {
+  sessionId: string
+  runs: number
+  markdown: string
+}
+
 /** A run's work, measured against the checkpoint taken before it started. */
 export interface DiffView {
   root: string
@@ -168,6 +182,9 @@ export const api = {
   /** What this conversation changed, against its checkpoint. */
   chatDiff: (projectId: string, sessionId: string) =>
     call<DiffView>(`/api/projects/${projectId}/conversations/${sessionId}/diff`),
+  /** Where the time and the money went. Safe to ask for mid-turn. */
+  receipt: (projectId: string, sessionId: string) =>
+    call<Receipt>(`/api/projects/${projectId}/conversations/${sessionId}/receipt`),
   /** Commit message and spec update, drafted together because they are one review. */
   draftReview: (projectId: string, sessionId: string) =>
     call<ReviewDraft>(`/api/projects/${projectId}/conversations/${sessionId}/review/draft`, {

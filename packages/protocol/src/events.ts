@@ -128,6 +128,24 @@ export type RunEventBody =
    * is that case, and the reader has to keep working on them.
    */
   | { type: "user.message"; text: string; images?: MessageImage[] }
+  /**
+   * The API began an assistant message. Carries nothing to draw.
+   *
+   * It exists for its timestamp. Every other event here is stamped when it is
+   * APPENDED, and an assistant message is appended once it is complete — so the
+   * only two stamps around a reply are "the last tool result came back" and "the
+   * whole reply arrived", and the gap between them is queueing, thinking and
+   * generation added together. A receipt reading that log has to bill all of it
+   * to the model's reasoning, which is how "thought for 40s" gets printed over a
+   * turn that spent 38 of those seconds waiting for a slot.
+   *
+   * The one partial message worth keeping, and kept only because it is one per
+   * message rather than one per token — see `RunDelta` for why the rest are
+   * never written down. Which also means it only exists when someone is
+   * watching: a headless task run has no partial stream, and a receipt for one
+   * reports model time as a single bucket rather than inventing the split.
+   */
+  | { type: "assistant.start" }
   /** `parentToolUseId` is non-null for subagent output, null for the main loop. */
   | { type: "assistant.text"; text: string; parentToolUseId: string | null }
   | { type: "assistant.thinking"; text: string; parentToolUseId: string | null }

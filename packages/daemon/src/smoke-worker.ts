@@ -44,6 +44,10 @@ let interrupted = false
 let session = false
 let runId = ""
 let cwd = ""
+/** What the job asked for, so a follow-up can restate it the way the SDK does. */
+let job: RunAgentOptions | null = null
+/** The id this session reports. Minted once and repeated on every turn. */
+let named = ""
 /** Turns the stub has been given, so a test can assert the session was reused. */
 let turnsTaken = 0
 let timer: ReturnType<typeof setTimeout> | undefined
@@ -61,6 +65,22 @@ function work(): void {
   writeFileSync(join(cwd, "smoke-work.txt"), `turn ${turnsTaken}\n`, "utf8")
 }
 
+/** The SDK's init message, as this stub sends it: once per turn, same id. */
+function announce(): void {
+  send({
+    type: "event",
+    runId,
+    body: {
+      type: "run.started",
+      taskId: job?.taskId ?? "",
+      projectId: job?.projectId ?? "",
+      model: job?.model ?? "",
+      cwd,
+      sessionId: named,
+    },
+  })
+}
+
 process.on("message", (raw: unknown) => {
   const msg = raw as ToWorker
   if (msg?.cmd === "interrupt") {
@@ -70,28 +90,16 @@ process.on("message", (raw: unknown) => {
     return
   }
   if (msg?.cmd === "start") {
-    const job = msg.job as RunAgentOptions
+    job = msg.job as RunAgentOptions
     session = Boolean(job.chatMode)
     runId = job.runId
     cwd = job.cwd
+    named = job.resume ?? stubSessionId()
     turnsTaken = 1
     work()
     // A chat session reports its id the way the SDK's init message does, or the
     // lane has nothing to key a warm session by and every follow-up cold-starts.
-    if (session) {
-      send({
-        type: "event",
-        runId,
-        body: {
-          type: "run.started",
-          taskId: job.taskId,
-          projectId: job.projectId,
-          model: job.model,
-          cwd: job.cwd,
-          sessionId: job.resume ?? stubSessionId(),
-        },
-      })
-    }
+    if (session) announce()
     timer = setTimeout(finish, WORK_MS)
     return
   }
@@ -100,6 +108,13 @@ process.on("message", (raw: unknown) => {
     turnsTaken += 1
     interrupted = false
     work()
+    // A follow-up reports the session too. The SDK sends its init message on
+    // every turn of an open session, not only on the first, and that repetition
+    // is load bearing: a run log is the only record of which conversation a turn
+    // belonged to, so a stub that announced it once left every turn after the
+    // first unattributable — and a receipt, which finds a conversation's runs by
+    // exactly this event, read a four-turn chat as a one-turn chat.
+    announce()
     timer = setTimeout(finish, WORK_MS)
     return
   }

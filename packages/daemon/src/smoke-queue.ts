@@ -19,7 +19,7 @@ import { tmpdir } from "node:os"
 import { fileURLToPath } from "node:url"
 import { join } from "node:path"
 import { promisify } from "node:util"
-import type { ChatState, ChatStatus, Project } from "@aide/protocol"
+import type { ChatState, ChatStatus, Project, RunEvent, RunEventBody } from "@aide/protocol"
 import { STATE_DIR } from "@aide/protocol"
 
 // Point the chat lane at the stub and keep turns short, BEFORE importing it —
@@ -591,6 +591,114 @@ console.log("\nclosing a conversation keeps its undo")
     "an id that reached a commit is never handed out again",
     Number(next.id) > Number(row.id),
     `${next.id} follows ${row.id}, read back from the Aide-Row trailer`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+console.log("\nthe receipt")
+// Arithmetic over an event log, which is the kind of thing that goes wrong
+// silently: nobody notices that a receipt bills four minutes of waiting for a
+// human to the model's thinking, or reports six minutes of tool work inside a
+// four-minute turn. The synthetic run below is built to have exactly those two
+// traps in it.
+{
+  const { summarizeRun, conversationReceipt } = await import("./receipt.js")
+
+  let seq = 0
+  const at = (ts: number, body: RunEventBody): RunEvent =>
+    ({ ...body, runId: "synthetic", seq: (seq += 1), ts }) as RunEvent
+
+  const events: RunEvent[] = [
+    at(0, { type: "user.message", text: "do the thing" }),
+    at(100, {
+      type: "run.started",
+      taskId: "",
+      projectId: project.id,
+      model: "m",
+      cwd: root,
+      sessionId: "synthetic",
+    }),
+    at(200, { type: "assistant.start" }),
+    // Two calls in ONE assistant message, so they share both stamps.
+    at(1200, { type: "tool.start", toolUseId: "a", name: "Bash", input: { command: "one" }, parentToolUseId: null }),
+    at(1200, { type: "tool.start", toolUseId: "b", name: "Bash", input: { command: "two" }, parentToolUseId: null }),
+    at(4200, { type: "tool.end", toolUseId: "a", ok: true, summary: "" }),
+    at(4200, { type: "tool.end", toolUseId: "b", ok: false, summary: "boom" }),
+    at(4300, { type: "assistant.start" }),
+    at(5300, { type: "permission.request", requestId: "p", name: "Bash", input: {} }),
+    at(9300, { type: "permission.resolved", requestId: "p", allowed: true, reason: "" }),
+    at(9400, { type: "tool.start", toolUseId: "c", name: "Edit", input: { file_path: "x.ts" }, parentToolUseId: null }),
+    at(9900, { type: "tool.end", toolUseId: "c", ok: true, summary: "" }),
+    at(10_000, {
+      type: "run.finished",
+      subtype: "success",
+      status: "success",
+      totalCostUsd: 1,
+      modelUsage: {},
+      numTurns: 3,
+      durationMs: 10_000,
+      permissionDenials: [],
+    }),
+  ]
+
+  const s = summarizeRun("synthetic", events)
+  check(
+    "parallel tool calls are counted once, not twice",
+    s.toolMs === 3500,
+    `${s.toolMs}ms — the sum would be 6500 and would not fit in the turn`,
+  )
+  check(
+    "a human being asked is not the model thinking",
+    s.blockedMs === 4000,
+    `${s.blockedMs}ms blocked; ${10_000 - s.toolMs - s.blockedMs}ms left for the model`,
+  )
+  check(
+    "thinking is measured from the anchor, not from the last event",
+    s.generatingMs === 2000,
+    `${s.generatingMs}ms`,
+  )
+  check("the failed call is the one that failed", s.calls.filter((c) => c.ok === false).length === 1)
+  check("and it kept what the tool said", s.calls[1]?.summary === "boom", s.calls[1]?.summary ?? "")
+
+  // The same events with the anchors removed. A task run has no partial stream,
+  // so it has no anchors, and the honest answer is one bucket rather than a
+  // number derived from stamps that do not mean what the split needs them to.
+  const unanchored = summarizeRun("synthetic", events.filter((e) => e.type !== "assistant.start"))
+  check(
+    "a run with no anchors declines to split model time",
+    unanchored.generatingMs === null,
+    `${unanchored.generatingMs}`,
+  )
+
+  // And the whole thing, over the logs the stub actually wrote. Four turns:
+  // three that ran to completion and the one that was interrupted.
+  const receipt = await conversationReceipt(log, project, chatSession ?? "")
+  check(
+    "every turn of the conversation is found",
+    receipt.runs === 4,
+    `${receipt.runs} — matched by run.started, since nothing indexes session to run`,
+  )
+  check(
+    "the prompts are in it verbatim",
+    receipt.markdown.includes("> stop me"),
+    "the prompts are the thing the receipt exists to be asked about",
+  )
+  check(
+    "the interrupted turn is reported as cancelled",
+    receipt.markdown.includes("**cancelled**"),
+    "a turn that was stopped must not read as one that succeeded",
+  )
+  check(
+    "the cost is labelled an estimate",
+    receipt.markdown.includes("estimate"),
+    "the brief: anything that displays a cost figure has to say what it is",
+  )
+
+  const empty = await conversationReceipt(log, project, "11111111-2222-4333-8444-555555555555")
+  check(
+    "a conversation aide never ran gets an answer, not an error",
+    empty.runs === 0 && empty.markdown.includes("no run log"),
+    "a chat held in the CLI is readable here and has no event log",
   )
 }
 

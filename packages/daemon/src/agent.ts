@@ -134,9 +134,30 @@ export interface FollowUpTurn {
 
 const truncate = (s: string, n = 300) => (s.length > n ? `${s.slice(0, n)}...` : s)
 
+/**
+ * Keep BOTH ends of a long tool result, not just the front.
+ *
+ * Head-only truncation is fine for `tsc`, which prints its errors first, and
+ * quietly useless for everything that prints them last: a failing test run, a
+ * failing install, a script that logs its progress and then dies. Those put the
+ * reason in the final lines, so 300 characters from the front is the banner and
+ * the summary says nothing about why the call failed — on exactly the calls
+ * anyone reads a log to understand.
+ *
+ * Both ends cost the same budget as one, and the elision says how much went
+ * missing so a reader knows they are looking at a cut rather than at output that
+ * jumps.
+ */
+function clip(s: string, n = 300): string {
+  if (s.length <= n) return s
+  const half = Math.floor((n - 1) / 2)
+  const dropped = s.length - half * 2
+  return `${s.slice(0, half)}\n…${dropped} chars…\n${s.slice(-half)}`
+}
+
 /** tool_result content is either a string or an array of blocks. Render either. */
 function summarizeToolResult(content: unknown): string {
-  if (typeof content === "string") return truncate(content.trim())
+  if (typeof content === "string") return clip(content.trim())
   if (Array.isArray(content)) {
     const text = content
       .map((b) => {
@@ -144,7 +165,7 @@ function summarizeToolResult(content: unknown): string {
         return block["type"] === "text" ? String(block["text"] ?? "") : `[${block["type"]}]`
       })
       .join("\n")
-    return truncate(text.trim())
+    return clip(text.trim())
   }
   return ""
 }
@@ -184,8 +205,13 @@ const CHAT_TO_SDK_MODE: Record<ChatMode, "default" | "acceptEdits" | "plan" | "a
  * The payload is a raw Messages API streaming event, so the shapes worth
  * handling are `content_block_delta` (text and thinking, arriving in pieces) and
  * `message_delta` (cumulative output tokens for the message in flight). The
- * rest â block starts and stops, message_start â carry nothing a reader needs
- * that the finished message will not say better.
+ * rest â block starts and stops â carries nothing a reader needs that
+ * the finished message will not say better.
+ *
+ * `message_start` is the exception, and it is deliberately not handled here: it
+ * carries no content, only the fact that the API has begun, which is a timestamp
+ * rather than something to draw. The streaming loop turns it into an
+ * `assistant.start` EVENT instead, so it survives in the log.
  */
 function toDeltas(message: unknown): RunDelta[] {
   const event = (message as { event?: Record<string, unknown> }).event
@@ -658,6 +684,15 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
       // then dropped: `normalizeSdkMessage` ignores `stream_event`, so nothing
       // token-sized ever reaches the durable event log.
       if (opts.onDelta && (message as { type?: string }).type === "stream_event") {
+        // One partial message survives as a durable event: the one that says the
+        // API has started answering. It is a single event per assistant message
+        // rather than one per token, and it is the only stamp that exists
+        // between "the tool result went back" and "the whole reply arrived" —
+        // without it those two are the same number and a receipt cannot say
+        // whether a slow turn was thinking or queueing. See `assistant.start`.
+        if ((message as { event?: { type?: string } }).event?.type === "message_start") {
+          yield { type: "assistant.start" }
+        }
         for (const delta of toDeltas(message)) opts.onDelta(delta)
         continue
       }
