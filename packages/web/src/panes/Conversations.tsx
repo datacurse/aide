@@ -263,6 +263,7 @@ export function ConversationList({
   projectId,
   selected,
   selectedDraft,
+  reloadSeq,
   onSelect,
   onSelectDraft,
   onChanged,
@@ -271,6 +272,8 @@ export function ConversationList({
   selected: string | null
   /** The unstarted chat that is open, when the open one is not a session. */
   selectedDraft: string | null
+  /** Bumped by the app to ask for a refetch — see App.tsx for why it is not a key. */
+  reloadSeq: number
   onSelect: (sessionId: string) => void
   onSelectDraft: (draftId: string) => void
   /** Ticking a chat off changes the row the pane below is showing. */
@@ -284,9 +287,18 @@ export function ConversationList({
    * `items` — until a first turn, these records are the entire conversation.
    */
   const unstarted = useUnstartedChats(projectId)
+  /** Which project `items` belongs to, so a refetch can tell itself from a switch. */
+  const shown = useRef<string | null>(null)
 
   useEffect(() => {
-    setItems(null)
+    // Blank the list only when the project changed. Blanking on every refetch
+    // swaps the rows for "Reading the session store…" and back, which collapses
+    // the scroller to nothing and loses your place in a long list — the tick you
+    // just clicked would scroll you to the top.
+    if (shown.current !== projectId) {
+      shown.current = projectId
+      setItems(null)
+    }
     setError(null)
     if (!projectId) return
 
@@ -302,19 +314,47 @@ export function ConversationList({
     return () => {
       cancelled = true
     }
-  }, [projectId])
+  }, [projectId, reloadSeq])
 
   const toggleDone = (row: ConversationRow) => {
     if (!projectId) return
-    const call =
-      row.status.state === "closed"
-        ? api.reopenChat(projectId, row.sessionId)
-        : api.closeChat(projectId, row.sessionId)
-    // No local refetch: `onChanged` remounts this list, which fetches. Doing
-    // both would ask the daemon the same question twice per tick.
+    const closing = row.status.state !== "closed"
+    // Move the row now rather than when the daemon answers. A round trip is long
+    // enough that ticking off three chats in a row means clicking, waiting,
+    // finding where the list has settled, clicking again. `onChanged` refetches
+    // and overwrites this with the truth a moment later.
+    setItems(
+      (prev) =>
+        prev?.map((c) =>
+          c.sessionId === row.sessionId
+            ? {
+                ...c,
+                status: {
+                  ...c.status,
+                  // Working outranks done, the same rule chatStatuses applies —
+                  // guess it the daemon's way or the row jumps twice, once to
+                  // where the tick put it and once to where the refetch does.
+                  state:
+                    c.status.state === "working"
+                      ? ("working" as const)
+                      : closing
+                        ? ("closed" as const)
+                        : null,
+                  done: closing,
+                },
+              }
+            : c,
+        ) ?? null,
+    )
+    const call = closing
+      ? api.closeChat(projectId, row.sessionId)
+      : api.reopenChat(projectId, row.sessionId)
     void call
       .then(() => onChanged())
-      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : String(err))
+        onChanged()
+      })
   }
 
   if (!projectId) return <Empty>Select a project.</Empty>

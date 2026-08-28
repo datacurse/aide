@@ -32,7 +32,13 @@ export function App() {
    * session the daemon knows or one that has not been sent; see useAppLocation.
    */
   const [{ projectId, sessionId, draftId }, navigate] = useAppLocation()
-  /** Bumped to refetch the conversation list — a new chat has no id until it starts. */
+  /**
+   * Bumped to refetch the conversation list — a new chat has no id until it starts.
+   *
+   * A prop, not a `key`. As a key it remounted the list on every tick, which
+   * threw away the scroller: ticking a chat off halfway down the list sent you
+   * back to the top, and a half-typed line in the capture box vanished with it.
+   */
   const [conversationsSeq, setConversationsSeq] = useState(0)
   /**
    * The commit in flight, and the run it is happening in.
@@ -268,7 +274,7 @@ export function App() {
         </PaneHeader>
 
         <ConversationList
-          key={conversationsSeq}
+          reloadSeq={conversationsSeq}
           projectId={projectId}
           selected={sessionId}
           selectedDraft={draftId}
