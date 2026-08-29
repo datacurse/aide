@@ -24,6 +24,7 @@ import {
 import { ReceiptOverlay } from "../Receipt.js"
 import { WorkingBar } from "../Working.js"
 import { Button, Empty, PaneHeader } from "../ui.js"
+import { useKeyed } from "../useKeyed.js"
 import { useRunStream } from "../useRunStream.js"
 import { useAutoGrow } from "../useAutoGrow.js"
 import { CommitMessageDraft, Transcript, type LiveText } from "./Transcript.js"
@@ -525,72 +526,76 @@ export function ConversationList({
   /** Ticking a chat off changes the row the pane below is showing. */
   onChanged: () => void
 }) {
-  const [items, setItems] = useState<ConversationRow[] | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  /**
+   * The rows, per project — see `useKeyed`.
+   *
+   * A refetch has never blanked this: swapping the rows for "Reading the session
+   * store…" and back collapses the scroller and loses your place, so the tick you
+   * just clicked would scroll you to the top. A project switch used to be the one
+   * exception, on the grounds that another project's chats must not appear under
+   * this one's name. Filing the rows under the project they were read from says
+   * the same thing without the flash.
+   */
+  const [items, rememberItems] = useKeyed<ConversationRow[]>(projectId)
+  const [error, rememberError] = useKeyed<string>(projectId)
   /**
    * The chats that have not started. They have no session id and no file on
    * disk, so the daemon cannot know about them and they cannot arrive in
    * `items` — until a first turn, these records are the entire conversation.
    */
   const unstarted = useUnstartedChats(projectId)
-  /** Which project `items` belongs to, so a refetch can tell itself from a switch. */
-  const shown = useRef<string | null>(null)
 
   useEffect(() => {
-    // Blank the list only when the project changed. Blanking on every refetch
-    // swaps the rows for "Reading the session store…" and back, which collapses
-    // the scroller to nothing and loses your place in a long list — the tick you
-    // just clicked would scroll you to the top.
-    if (shown.current !== projectId) {
-      shown.current = projectId
-      setItems(null)
-    }
-    setError(null)
     if (!projectId) return
 
+    // Still cancelled on the way out, even though a late answer would now be
+    // filed correctly: ticking a chat off refetches, and an earlier fetch
+    // landing after a later one would put the row back where it was.
     let cancelled = false
     void api
       .conversations(projectId)
       .then((r) => {
-        if (!cancelled) setItems(r)
+        if (cancelled) return
+        rememberItems(projectId, r)
+        rememberError(projectId, null)
       })
       .catch((err) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err))
+        if (!cancelled) rememberError(projectId, err instanceof Error ? err.message : String(err))
       })
     return () => {
       cancelled = true
     }
-  }, [projectId, reloadSeq])
+  }, [projectId, reloadSeq, rememberItems, rememberError])
 
   const toggleDone = (row: ConversationRow) => {
-    if (!projectId) return
+    if (!projectId || !items) return
     const closing = row.status.state !== "closed"
     // Move the row now rather than when the daemon answers. A round trip is long
     // enough that ticking off three chats in a row means clicking, waiting,
     // finding where the list has settled, clicking again. `onChanged` refetches
     // and overwrites this with the truth a moment later.
-    setItems(
-      (prev) =>
-        prev?.map((c) =>
-          c.sessionId === row.sessionId
-            ? {
-                ...c,
-                status: {
-                  ...c.status,
-                  // Working outranks done, the same rule chatStatuses applies —
-                  // guess it the daemon's way or the row jumps twice, once to
-                  // where the tick put it and once to where the refetch does.
-                  state:
-                    c.status.state === "working"
-                      ? ("working" as const)
-                      : closing
-                        ? ("closed" as const)
-                        : null,
-                  done: closing,
-                },
-              }
-            : c,
-        ) ?? null,
+    rememberItems(
+      projectId,
+      items.map((c) =>
+        c.sessionId === row.sessionId
+          ? {
+              ...c,
+              status: {
+                ...c.status,
+                // Working outranks done, the same rule chatStatuses applies —
+                // guess it the daemon's way or the row jumps twice, once to
+                // where the tick put it and once to where the refetch does.
+                state:
+                  c.status.state === "working"
+                    ? ("working" as const)
+                    : closing
+                      ? ("closed" as const)
+                      : null,
+                done: closing,
+              },
+            }
+          : c,
+      ),
     )
     const call = closing
       ? api.closeChat(projectId, row.sessionId)
@@ -598,7 +603,7 @@ export function ConversationList({
     void call
       .then(() => onChanged())
       .catch((err) => {
-        setError(err instanceof Error ? err.message : String(err))
+        rememberError(projectId, err instanceof Error ? err.message : String(err))
         onChanged()
       })
   }
@@ -770,7 +775,18 @@ export function ConversationPane({
   /** Something happened that the list is showing a stale copy of. */
   onChanged?: () => void
 }) {
-  const [view, setView] = useState<ConversationView | null>(null)
+  /**
+   * The conversation as it is on disk, per chat — see `useKeyed`.
+   *
+   * Re-reading a session file is the slowest of the fetches a project switch
+   * fires, and switching projects reopens the chat you left in the one you
+   * arrived at, so this pane blanked to "Reading…" for the longest of the four —
+   * including on the way back to a transcript that was on screen a second ago.
+   * Keyed on the project as well as the session because that is what names a
+   * conversation to the daemon, and neither half is unique on its own.
+   */
+  const chatKey = projectId && openSessionId ? `${projectId}:${openSessionId}` : null
+  const [view, rememberView] = useKeyed<ConversationView>(chatKey)
   const [error, setError] = useState<string | null>(null)
   /** The receipt is open over this conversation. */
   const [receiptOpen, setReceiptOpen] = useState(false)
@@ -836,8 +852,11 @@ export function ConversationPane({
     // turn is streaming, and clearing `runId` unsubscribes from it mid-answer,
     // which is what left a new chat showing your message and nothing else while
     // the daemon carried on.
+    //
+    // The transcript is not among the things cleared here: it is addressed by
+    // the chat it belongs to, so this render is already showing the one you
+    // arrived at — and clearing would throw that away rather than what you left.
     if (openSessionId === null || openSessionId !== startedHere.current) {
-      setView(null)
       setError(null)
       setRunId(null)
       setSent(new Map())
@@ -856,7 +875,21 @@ export function ConversationPane({
     void api
       .conversation(projectId, openSessionId)
       .then((v) => {
-        if (!cancelled) setView(v)
+        if (cancelled) return
+        rememberView(chatKey, v)
+        // Adopt a turn that was already running when this page loaded.
+        //
+        // `runId` lives in component state, so a reload loses it and the pane
+        // goes quiet while the daemon carries on — the only way to find out
+        // whether anything happened was to reload again. The daemon knows what
+        // is running; this asks.
+        //
+        // Off the answer rather than off `view`, which is now remembered across
+        // a switch: a run id read back out of that store belongs to a turn that
+        // may have ended while you were in another project, and adopting a dead
+        // run replays it into the transcript — put-it-back bar and all.
+        const inFlight = v.summary.activeRunId
+        if (inFlight) setRunId((prev) => prev ?? inFlight)
       })
       .catch((err) => {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err))
@@ -864,25 +897,14 @@ export function ConversationPane({
     return () => {
       cancelled = true
     }
-  }, [projectId, openSessionId])
+  }, [projectId, openSessionId, chatKey, rememberView])
 
-  // A run handed to us from outside. Unconditional, unlike the adoption below:
+  // A run handed to us from outside. Unconditional, unlike the adoption above:
   // it has to win over the id of a turn that has already finished, which is
   // exactly the state the pane is in when you press commit.
   useEffect(() => {
     if (adoptRunId) setRunId(adoptRunId)
   }, [adoptRunId])
-
-  // Adopt a turn that was already running when this page loaded.
-  //
-  // `runId` lives in component state, so a reload loses it and the pane goes
-  // quiet while the daemon carries on — the only way to find out whether
-  // anything happened was to reload again. The daemon knows what is running;
-  // this asks.
-  useEffect(() => {
-    const inFlight = view?.summary.activeRunId ?? null
-    if (inFlight && !runId) setRunId(inFlight)
-  }, [view?.summary.activeRunId, runId])
 
   // Fold the live stream into the accumulator. Keyed by runId+seq so the replay
   // a reconnect delivers lands on top of what is already there.

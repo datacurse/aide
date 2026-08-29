@@ -4,6 +4,7 @@ import { CHIME_KEY } from "./chime.js"
 import { DaemonBar } from "./Daemon.js"
 import { carryDraft, draftKey, openNewChat } from "./drafts.js"
 import { useAppLocation } from "./useAppLocation.js"
+import { useKeyed } from "./useKeyed.js"
 import { useRemembered } from "./useRemembered.js"
 import { ConversationList, ConversationPane } from "./panes/Conversations.js"
 import { PendingRail } from "./panes/Pending.js"
@@ -17,21 +18,27 @@ export function App() {
   const [projects, setProjects] = useState<ProjectView[]>([])
   const [error, setError] = useState<string | null>(null)
   /**
+   * Which project and which chat — in the URL, so a reload lands you back where
+   * you were and Back steps through what you had open. A chat is either a
+   * session the daemon knows or one that has not been sent; see useAppLocation.
+   */
+  const [{ projectId, sessionId, draftId }, navigate] = useAppLocation()
+  /**
    * What the project has left to commit.
    *
    * Polled here rather than inside the rail, because two things read it: the
    * rail that shows it and the composer that refuses to start a new chat while
    * it is non-empty. Two pollers would let those two disagree for a second at a
    * time, which is exactly long enough to look like a bug.
+   *
+   * Held per project rather than blanked on the way out — see `useKeyed`. This
+   * is the pane where the blanking cost more than a flicker: `uncommitted`
+   * reads 0 while the list is empty, so every switch took the block off the new
+   * chat button for as long as a `git status`, and a chat started in that window
+   * is one the daemon then refuses.
    */
-  const [pending, setPending] = useState<GitPending | null>(null)
-  const [pendingError, setPendingError] = useState<string | null>(null)
-  /**
-   * Which project and which chat — in the URL, so a reload lands you back where
-   * you were and Back steps through what you had open. A chat is either a
-   * session the daemon knows or one that has not been sent; see useAppLocation.
-   */
-  const [{ projectId, sessionId, draftId }, navigate] = useAppLocation()
+  const [pending, rememberPending] = useKeyed<GitPending>(projectId)
+  const [pendingError, rememberPendingError] = useKeyed<string>(projectId)
   /**
    * Bumped to refetch the conversation list — a new chat has no id until it starts.
    *
@@ -110,33 +117,24 @@ export function App() {
     // has moved out from under us must not take the projects list down with it
     // — and a failure here must not read as "nothing uncommitted", which would
     // offer a new chat the daemon is about to refuse.
-    if (!projectId) {
-      setPending(null)
-      setPendingError(null)
-      return
-    }
+    if (!projectId) return
     try {
-      setPending(await api.gitPending(projectId))
-      setPendingError(null)
+      // Filed under the project it was asked about, never under whatever is open
+      // when it answers: a `git status` on a large repo outlives the switch away
+      // from it, and the rail that decides what you may do next is the last place
+      // another project's files may appear.
+      rememberPending(projectId, await api.gitPending(projectId))
+      rememberPendingError(projectId, null)
     } catch (err) {
-      setPendingError(err instanceof Error ? err.message : String(err))
+      rememberPendingError(projectId, err instanceof Error ? err.message : String(err))
     }
-  }, [projectId])
+  }, [projectId, rememberPending, rememberPendingError])
 
   useEffect(() => {
     void refresh()
     const timer = setInterval(() => void refresh(), POLL_MS)
     return () => clearInterval(timer)
   }, [refresh])
-
-  // Dropped the instant the project changes, not when the next poll answers.
-  // Holding the old one for a beat would put another repository's uncommitted
-  // files under this project's name, which is the one thing a rail that gates
-  // your next action must never do.
-  useEffect(() => {
-    setPending(null)
-    setPendingError(null)
-  }, [projectId])
 
   // A run id belongs to the conversation it was started from. Carrying it across
   // a move would replay one chat's commit under another chat's transcript.

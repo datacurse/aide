@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect } from "react"
 import type {
   GitCommit,
   GitFileChange,
@@ -12,6 +12,7 @@ import type {
 import { api, type GitHistory } from "../api.js"
 import { GraphCell, ROW_H, graphWidth } from "../GitGraph.js"
 import { Button, Empty, PaneHeader } from "../ui.js"
+import { useKeyed } from "../useKeyed.js"
 
 /**
  * What the project has left to commit, and the history it will land on.
@@ -284,26 +285,24 @@ function ago(iso: string): string {
  * where it is used.
  */
 function History({ projectId }: { projectId: string }) {
-  const [history, setHistory] = useState<GitHistory | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  // Kept per project rather than cleared on the way out — see `useKeyed`. The
+  // rule that another repository's commits may never appear under this
+  // project's name is what the clearing was for, and filing each page under the
+  // project it was read from keeps it without emptying the rail on every switch.
+  const [history, rememberHistory] = useKeyed<GitHistory>(projectId)
+  const [error, rememberError] = useKeyed<string>(projectId)
 
   useEffect(() => {
     let live = true
-    // Cleared as the project changes rather than when the next answer lands.
-    // Holding the old page for a beat would put another repository's commits
-    // under this project's name, which is the one thing a rail you are reading
-    // to find out where you are must never do.
-    setHistory(null)
-    setError(null)
     const load = async () => {
       try {
         const next = await api.gitHistory(projectId, PAGE)
         if (!live) return
-        setHistory(next)
-        setError(null)
+        rememberHistory(projectId, next)
+        rememberError(projectId, null)
       } catch (err) {
         if (!live) return
-        setError(err instanceof Error ? err.message : String(err))
+        rememberError(projectId, err instanceof Error ? err.message : String(err))
       }
     }
     void load()
@@ -312,7 +311,7 @@ function History({ projectId }: { projectId: string }) {
       live = false
       clearInterval(timer)
     }
-  }, [projectId])
+  }, [projectId, rememberHistory, rememberError])
 
   return (
     <section className="flex min-h-0 flex-1 flex-col border-t border-line">
