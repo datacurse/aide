@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { api, type GitPending, type Health, type ProjectView } from "./api.js"
 import { CHIME_KEY } from "./chime.js"
 import { DaemonBar } from "./Daemon.js"
@@ -144,6 +144,33 @@ export function App() {
 
   const project = projects.find((p) => p.id === projectId) ?? null
   const uncommitted = pending?.files.length ?? 0
+
+  /**
+   * A run let go of the checkout, so ask the chat list what it says now.
+   *
+   * The list is fetched on arrival and on things you did, never on the beat:
+   * answering it means reading the SDK's session store and every run log, which
+   * is not a thing to do twice a second to redraw thirty rows that did not move.
+   * But a row's figures — its minutes, its dollars, its share — are written by
+   * the end of a turn, and the end of a turn is exactly this transition. So one
+   * refetch here buys what a poll would have, at one request per run instead of
+   * forty a minute. The badge is not what this is for; that reads the lock
+   * directly and is already live.
+   */
+  const holderRunId = project?.holder?.runId ?? null
+  const heldLast = useRef<{ projectId: string | null; runId: string | null }>({
+    projectId: null,
+    runId: null,
+  })
+  useEffect(() => {
+    const was = heldLast.current
+    heldLast.current = { projectId, runId: holderRunId }
+    // Within one project only. Switching projects drops the holder to null with
+    // nothing having finished, and the list refetches on a switch anyway.
+    if (was.projectId === projectId && was.runId !== null && holderRunId === null) {
+      setConversationsSeq((n) => n + 1)
+    }
+  }, [projectId, holderRunId])
 
   /**
    * Why pressing ▶ on a parked chat would be refused right now, or null.
@@ -381,6 +408,8 @@ export function App() {
           projectId={projectId}
           selected={sessionId}
           selectedDraft={draftId}
+          // The rows are not polled; this is. See `withLock` in the list.
+          holder={project?.holder ?? null}
           startBlocked={startBlocked}
           onSelect={(id) => navigate({ sessionId: id })}
           onSelectDraft={(id) => navigate({ draftId: id })}

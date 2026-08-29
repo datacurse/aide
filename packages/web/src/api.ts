@@ -42,13 +42,22 @@ export interface ConversationView {
   totalMessages: number
 }
 
-/** Who has a project's checkout right now, if anyone. */
+/**
+ * Who has a project's checkout right now, if anyone.
+ *
+ * Also the only thing about a running conversation that is polled — see the
+ * route. The chat list's own rows carry a status, but it is as old as the last
+ * time something asked for the list, so anything that has to be true NOW is read
+ * off this instead.
+ */
 export interface LockHolder {
   runId: string
   /** null for the moment before the SDK names a brand new conversation. */
   sessionId: string | null
   title: string
   startedAt: number
+  /** A tool call is waiting on a human. The one thing that is stopped ON you. */
+  blocked: boolean
 }
 
 export type ProjectView = Project & { holder: LockHolder | null }

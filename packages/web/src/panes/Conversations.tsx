@@ -8,7 +8,7 @@ import type {
   RunEvent,
 } from "@aide/protocol"
 import { born, sortChats } from "@aide/protocol"
-import { api, type ConversationRow, type ConversationView } from "../api.js"
+import { api, type ConversationRow, type ConversationView, type LockHolder } from "../api.js"
 import { useDoneChime } from "../chime.js"
 import { MAX_ATTACHMENT_BYTES, readAsAttachment } from "../attachments.js"
 import { Composer } from "../Composer.js"
@@ -321,20 +321,51 @@ function CaptureBox({ projectId }: { projectId: string }) {
 }
 
 /**
- * What a conversation wants from you, in one word.
+ * What a conversation is costing you, in one phrase.
  *
  * Nothing at all for a chat that is simply sitting there. A badge on every row
  * would bury the two that genuinely need something under the thirty that do not.
+ *
+ * It used to read "working", which described the agent rather than the reader,
+ * and in a LIST that is the wrong end of the fact: whether a turn is thinking is
+ * answered by opening it, and what you cannot see from anywhere else is which
+ * single row is the reason every other one is refused. So it says what the
+ * refusals say — `"X" has the repo` — and you can scan the list for the row that
+ * matches the sentence that just turned you away.
+ *
+ * It is also true of a commit, which holds the checkout without an agent
+ * thinking in it. "working" was a small lie there; this is not.
  */
-function StatusBadge({ status }: { status: ChatStatus }) {
+function StatusBadge({ status, heldSince }: { status: ChatStatus; heldSince: number | null }) {
   if (status.blocked && status.state !== "closed") {
-    return <span className="shrink-0 text-[10px] text-err">blocked</span>
+    return (
+      <span
+        className="shrink-0 text-[10px] text-err"
+        title="A tool call is waiting on you. Open this chat and allow it or decline it — nothing moves until you do."
+      >
+        needs you
+      </span>
+    )
   }
   if (status.state === "working") {
-    return <span className="shrink-0 text-[10px] text-info">working</span>
+    return (
+      <span className="shrink-0 text-[10px] text-info" title={HAS_THE_REPO(heldSince)}>
+        has the repo
+      </span>
+    )
   }
   return null
 }
+
+/**
+ * Why the badge matters, on hover — and how long it has mattered for.
+ *
+ * The age is the whole of it. "One agent at a time" without it is a dead end:
+ * the question in the moment is always whether the thing in your way is nearly
+ * done or wedged, which is why the daemon's own refusal prints the same number.
+ */
+const HAS_THE_REPO = (heldSince: number | null) =>
+  `${heldSince === null ? "A run is in flight here" : `A run has been in flight here for ${dur(Date.now() - heldSince)}`}. One agent has a project's checkout at a time, so nothing else in this project can start until it finishes.`
 
 /**
  * Done, or not.
@@ -403,16 +434,26 @@ function GroupLabel({ label, count, ruled }: { label: string; count: number; rul
  */
 function ChatRow({
   chat,
+  status,
+  heldSince,
   selected,
   onOpen,
   onToggleDone,
 }: {
   chat: ConversationRow
+  /**
+   * The row's status as of NOW, which is not `chat.status` — see `withLock`.
+   * Passed in rather than read off the chat so that the badge and the ordering
+   * cannot be looking at two different answers.
+   */
+  status: ChatStatus
+  /** When the run holding the repo started, if this row is the one holding it. */
+  heldSince: number | null
   selected: boolean
   onOpen: () => void
   onToggleDone: () => void
 }) {
-  const closed = chat.status.state === "closed"
+  const closed = status.state === "closed"
   const spend = chat.spend
   // Dim enough to stay behind the title, but not on the row you have selected:
   // fg-dim on the selection blue is the one place it stops being readable.
@@ -440,7 +481,7 @@ function ChatRow({
           >
             {chat.title}
           </span>
-          <StatusBadge status={chat.status} />
+          <StatusBadge status={status} heldSince={heldSince} />
         </div>
         {/* Tabular figures, so the money column does not shuffle sideways as you
             read down a list of costs that differ only in the cents. */}
@@ -466,7 +507,12 @@ function ChatRow({
           )}
         </div>
       </button>
-      <DoneCheck done={closed} onToggle={onToggleDone} />
+      {/* On `done`, not on `closed`. They differ in one case and it is a real
+          one: a chat you ticked off and then asked one more thing of reports
+          `working` so that it sorts as work, which drew an EMPTY box on a
+          conversation you had plainly ticked — and then took a press to say the
+          thing the box was already showing. */}
+      <DoneCheck done={status.done} onToggle={onToggleDone} />
     </div>
   )
 }
@@ -523,6 +569,45 @@ const USAGE_SHARE = (tokens: number) =>
 const PARKED: ChatStatus = { state: null, blocked: false, done: false }
 
 /**
+ * A fetched status, brought up to date from the lock.
+ *
+ * The rows arrive with a `status` the daemon computed, and it is exactly as old
+ * as the last time anything asked for the list — which is when you arrived at the
+ * project and when you ticked something off, and NOT on the app's beat. So a
+ * chat that was running when the list was read went on saying so afterwards: the
+ * badge sat on a conversation that had finished seven minutes earlier and was
+ * waiting on a reply, and the sort kept it pinned to the top of the list while it
+ * did. The other direction was worse and completely silent — a permission prompt
+ * arrives mid-turn, and nothing refetches during a turn, so the badge that means
+ * "an agent is stopped on your click" could essentially never appear.
+ *
+ * The lock IS polled, with the projects, and one agent per project makes it a
+ * complete answer rather than a hint: if this session is not the holder then
+ * nothing is running in it, whatever the row was told earlier. `done` is the
+ * other half and it is the half that does not move on its own — a human sets it,
+ * and setting it refetches — so it is taken from the row as fetched.
+ *
+ * The reconstruction is `chatStatuses`' own rule, in the same order: running
+ * outranks done, because a chat you ticked off and then asked one more thing of
+ * is running whatever the tick says.
+ */
+function withLock(
+  status: ChatStatus,
+  sessionId: string,
+  holdingSession: string | null,
+  holderBlocked: boolean,
+): ChatStatus {
+  const running = sessionId === holdingSession
+  return {
+    state: running ? "working" : status.done ? "closed" : null,
+    // Only ever true of the run in flight, so a row that is not the holder
+    // cannot be left wearing a prompt that was answered while you were away.
+    blocked: running && holderBlocked,
+    done: status.done,
+  }
+}
+
+/**
  * A row in the list, whichever kind it is.
  *
  * Flattened to the three fields `sortChats` reads, so both kinds go through one
@@ -557,6 +642,7 @@ export function ConversationList({
   selected,
   selectedDraft,
   reloadSeq,
+  holder,
   startBlocked,
   onSelect,
   onSelectDraft,
@@ -569,6 +655,12 @@ export function ConversationList({
   selectedDraft: string | null
   /** Bumped by the app to ask for a refetch — see App.tsx for why it is not a key. */
   reloadSeq: number
+  /**
+   * Which conversation has this project's checkout right now, from the app's
+   * poll. The rows below are not polled; this is what keeps their badges from
+   * describing a turn that ended minutes ago. See `withLock`.
+   */
+  holder: LockHolder | null
   /**
    * Why a parked chat cannot be started right now, or null. Computed by the app,
    * which is the only place that knows both what is uncommitted and who holds
@@ -626,32 +718,26 @@ export function ConversationList({
 
   const toggleDone = (row: ConversationRow) => {
     if (!projectId || !items) return
-    const closing = row.status.state !== "closed"
+    // On `done` rather than on `state`, because `done` is the bit this button
+    // owns and `state` is a derivation that outranks it: a chat you ticked off
+    // and then asked one more thing of reports `working`, and reading the
+    // direction off that sent the tick to close a conversation that was already
+    // closed — so the one press that should have reopened it did nothing.
+    const closing = !row.status.done
     // Move the row now rather than when the daemon answers. A round trip is long
     // enough that ticking off three chats in a row means clicking, waiting,
     // finding where the list has settled, clicking again. `onChanged` refetches
     // and overwrites this with the truth a moment later.
+    //
+    // Only `done` is guessed at. It is the only half of a status a tick can
+    // change, and `withLock` derives the rest from it on the way into the list —
+    // so the rule that running outranks done is applied in one place instead of
+    // being re-guessed here, where getting it wrong made the row jump twice:
+    // once to where the tick put it, once to where the refetch did.
     rememberItems(
       projectId,
       items.map((c) =>
-        c.sessionId === row.sessionId
-          ? {
-              ...c,
-              status: {
-                ...c.status,
-                // Working outranks done, the same rule chatStatuses applies —
-                // guess it the daemon's way or the row jumps twice, once to
-                // where the tick put it and once to where the refetch does.
-                state:
-                  c.status.state === "working"
-                    ? ("working" as const)
-                    : closing
-                      ? ("closed" as const)
-                      : null,
-                done: closing,
-              },
-            }
-          : c,
+        c.sessionId === row.sessionId ? { ...c, status: { ...c.status, done: closing } } : c,
       ),
     )
     const call = closing
@@ -666,12 +752,29 @@ export function ConversationList({
   }
 
   /**
+   * The lock as two values rather than as the object it arrived in.
+   *
+   * `holder` is parsed out of a fresh JSON body every 1.5 seconds, so its
+   * identity changes on every poll while the fact it carries almost never does.
+   * Depending on the object below would rebuild and re-sort the whole list twice
+   * a second; depending on what was actually read from it rebuilds only when the
+   * lock genuinely moves.
+   */
+  const holdingSession = holder?.sessionId ?? null
+  const holderBlocked = holder?.blocked ?? false
+
+  /**
    * Every row this project has, in one order.
    *
    * Memoized because `sortChats` copies, and this list is re-rendered on the
    * app's poll: a fresh array every 1.5 seconds is a fresh identity for every
    * row's props, which is enough to make a 200-chat list stutter while you
    * scroll it.
+   *
+   * The status the sort reads is the one the badge draws — `withLock`'s, not the
+   * one the row was fetched with. Ordering by the stale copy is what pinned a
+   * finished conversation to the top of the list until something else asked for
+   * the list again.
    */
   const rows = useMemo<ListRow[]>(
     () =>
@@ -690,13 +793,13 @@ export function ConversationList({
           (c): ListRow => ({
             kind: "chat",
             chat: c,
-            status: c.status,
+            status: withLock(c.status, c.sessionId, holdingSession, holderBlocked),
             createdAt: c.createdAt,
             lastModified: c.lastModified,
           }),
         ),
       ]),
-    [unstarted, items],
+    [unstarted, items, holdingSession, holderBlocked],
   )
 
   /**
@@ -725,6 +828,8 @@ export function ConversationList({
       <ChatRow
         key={row.chat.sessionId}
         chat={row.chat}
+        status={row.status}
+        heldSince={row.chat.sessionId === holdingSession ? (holder?.startedAt ?? null) : null}
         selected={row.chat.sessionId === selected}
         onOpen={() => onSelect(row.chat.sessionId)}
         onToggleDone={() => toggleDone(row.chat)}

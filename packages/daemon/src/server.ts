@@ -195,6 +195,14 @@ app.get("/api/usage", async (): Promise<PlanUsage> => planUsage())
  * The holder rather than a count, because one run at a time makes a count a
  * boolean wearing a number's clothes — and the useful question when you cannot
  * start a run is which conversation to go and look at.
+ *
+ * This is the only per-conversation liveness the browser polls. The chat list is
+ * fetched when you arrive at a project and when something you did changed it,
+ * never on the beat — reading the session store and every run log twice a second
+ * to redraw thirty rows is not worth it. So the two facts that move DURING a turn
+ * ride here instead, on the object that already says who is in your way, and one
+ * agent per project is what makes that possible: at most one conversation is
+ * running, so at most one can be waiting on a click.
  */
 app.get("/api/projects", async () => {
   const projects = await listProjects()
@@ -203,7 +211,13 @@ app.get("/api/projects", async () => {
     return {
       ...p,
       holder: holder
-        ? { runId: holder.runId, sessionId: holder.sessionId, title: firstLine(holder.text), startedAt: holder.startedAt }
+        ? {
+            runId: holder.runId,
+            sessionId: holder.sessionId,
+            title: firstLine(holder.text),
+            startedAt: holder.startedAt,
+            blocked: holder.blocked,
+          }
         : null,
     }
   })
