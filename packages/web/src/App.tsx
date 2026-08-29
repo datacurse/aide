@@ -259,14 +259,12 @@ export function App() {
             disabled={!project || uncommitted > 0}
             onClick={() => {
               if (!project) return
-              // Idempotent on purpose: a second press is you looking for the
-              // blank chat you already made, not asking for another one.
               navigate({ draftId: openNewChat(project.id) })
             }}
             title={
               uncommitted > 0
                 ? `${uncommitted} uncommitted file${uncommitted === 1 ? "" : "s"} — commit this work before starting another chat.`
-                : "An empty chat. Pressing this again opens the one you already made."
+                : "An empty chat, opened here. Discard one you did not want with the ✕ on its row."
             }
           >
             new

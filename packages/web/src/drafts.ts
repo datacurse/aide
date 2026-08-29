@@ -237,18 +237,17 @@ function createUnstarted(
 }
 
 /**
- * Press "new" twice and you get one chat, not two.
+ * Press "new" and you get a new chat. Every press, no exceptions.
  *
- * A project may hold as many unstarted chats as you like now — that list is the
- * backlog — but an EMPTY one is not a thing you can want two of: the second
- * press is you looking for the blank chat you already made. Anything with text
- * in it is a real entry and is never reused.
+ * This used to hand back any blank unstarted chat the project already held, on
+ * the theory that nobody wants two empty boxes. What it did in practice was
+ * make the button do nothing you could see: the list IS the backlog, so a
+ * leftover blank row is usually sitting in it somewhere, and "new" jumped the
+ * selection to that row rather than creating anything — however many times you
+ * pressed it. A blank row you did not want costs one ✕; a button that ignores
+ * you cannot be fixed from the outside.
  */
 export function openNewChat(projectId: string): string {
-  const blank = unstartedFor(projectId).find(
-    (d) => d.text === "" && d.attachments.length === 0,
-  )
-  if (blank) return idFromKey(blank.key)
   return createUnstarted(projectId, { text: "", attachments: [] })
 }
 

@@ -148,8 +148,15 @@ function UnstartedRow({
  * chat, unsent. That is what let the board go: there was never anything in a
  * backlog line that a conversation with no messages could not hold, and keeping
  * both meant keeping them in step with each other forever.
+ *
+ * It parks and stays out of the way: the chat it makes is not opened, and the
+ * pane you were reading does not move. Capturing an idea is the one thing you
+ * do while something else is in front of you, and a box that took over the pane
+ * left your idea sitting in a composer, one Enter away from being sent at a
+ * conversation it had nothing to do with. The row in the list is the whole of
+ * what this does — opening it is a click, and sending it is another.
  */
-function CaptureBox({ projectId, onAdded }: { projectId: string; onAdded: (id: string) => void }) {
+function CaptureBox({ projectId }: { projectId: string }) {
   const [text, setText] = useState("")
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [note, setNote] = useState<string | null>(null)
@@ -161,7 +168,9 @@ function CaptureBox({ projectId, onAdded }: { projectId: string; onAdded: (id: s
     // Not flattened to one line the way a todo had to be: this goes into a
     // message box rather than a line-based file, so a request that wants three
     // paragraphs keeps them.
-    onAdded(addBacklogChat(projectId, { text: text.trim(), attachments }))
+    addBacklogChat(projectId, { text: text.trim(), attachments })
+    // The box keeps the focus it already has, so a second idea is a second
+    // Enter rather than a click back up here.
     setText("")
     setAttachments([])
     setNote(null)
@@ -494,7 +503,7 @@ export function ConversationList({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <CaptureBox projectId={projectId} onAdded={onSelectDraft} />
+      <CaptureBox projectId={projectId} />
       {error && (
         <p className="border-b border-line px-3 py-1.5 font-sans text-[11px] text-err">{error}</p>
       )}
