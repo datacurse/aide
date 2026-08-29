@@ -174,10 +174,7 @@ function UnstartedRow({
         onClick={onOpen}
         className="flex min-w-0 flex-1 flex-col gap-0.5 text-left"
       >
-        <div className="flex items-baseline gap-2">
-          <span className="shrink-0 text-[10px] text-syn-var">chat</span>
-          <span className="flex-1 truncate text-[13px]">{preview || "New chat"}</span>
-        </div>
+        <span className="truncate text-[13px]">{preview || "New chat"}</span>
         <div className="flex items-baseline gap-2 text-[10px] tabular-nums text-fg-dim">
           {/* First in the line, the column a started chat puts its own time in —
               a parked chat is the same list at an earlier age, and a date that
@@ -1601,7 +1598,10 @@ export function ConversationPane({
       )}
 
       <footer className="flex h-[22px] shrink-0 items-center gap-4 border-t border-line bg-chrome px-3 font-sans text-[11px] text-fg-muted">
-        {summary && <span className={`shrink-0 ${kindColor(summary)}`}>{kindLabel(summary)}</span>}
+        {/* Same rule as the row: only when it is NOT a chat. See `ChatRow`. */}
+        {summary && summary.kind !== "chat" && (
+          <span className={`shrink-0 ${kindColor(summary)}`}>{kindLabel(summary)}</span>
+        )}
         {view && <span>{view.totalMessages} messages</span>}
         {busy && <span className="text-info">working…</span>}
         <span className="ml-auto min-w-0 truncate text-fg-dim" title={summary?.cwd}>
