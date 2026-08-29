@@ -240,11 +240,11 @@ export function App() {
       {/* Projects */}
       <aside className="flex w-64 shrink-0 flex-col border-r border-line bg-chrome">
         <PaneHeader title="projects">
-          <Button
-            onClick={addProject}
-            disabled={picking}
-            title={picking ? "Choosing a folder — the dialog may be behind this window" : undefined}
-          >
+          {/* No `title` while picking. A disabled button takes no pointer
+              events, so its tooltip never opens — which meant the one sentence
+              telling you the dialog is a separate window was as hard to find as
+              the window. It is in the rail's foot instead, where it can be read. */}
+          <Button onClick={addProject} disabled={picking}>
             {picking ? "choosing…" : "add"}
           </Button>
         </PaneHeader>
@@ -293,6 +293,17 @@ export function App() {
               explaining why a chat was refused is the whole point of it. */}
           {error && (
             <p className="mb-2 text-[11px] leading-relaxed break-words text-err">{error}</p>
+          )}
+          {/* The folder dialog belongs to the daemon, not to the page, so
+              nothing about it is visible from here — and while it is open the
+              only thing on screen that changed is a button reading
+              "choosing…". Saying where the window went beats leaving that to
+              be worked out. */}
+          {picking && (
+            <p className="mb-2 text-[11px] leading-relaxed text-fg-dim">
+              Choosing a folder. The dialog is a separate window — if you cannot see it, it is
+              behind this one.
+            </p>
           )}
           <DaemonBar health={health} onChanged={() => void refresh()}>
             <button

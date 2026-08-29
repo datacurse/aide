@@ -197,10 +197,18 @@ ${PICKER_CS}
   # HWND drags the dialog over everything. The owner is never seen itself -
   # fully transparent, with no taskbar button - and exists only to be pointed at.
   $owner = New-Object System.Windows.Forms.Form
-  $owner.TopMost = $true
   $owner.ShowInTaskbar = $false
   $owner.Opacity = 0
   $owner.Show()
+  # TopMost AFTER Show(), which is not a style preference: assigning it to a form
+  # whose handle does not exist yet only records it, and $owner.Opacity - which
+  # goes through AllowTransparency and rebuilds the extended style - then throws
+  # that record away. Measured on Windows 11: TopMost then Opacity then Show()
+  # gives exstyle 0x00090100, no WS_EX_TOPMOST, and the dialog opens BEHIND the
+  # browser. An owned dialog is in no taskbar and no Alt-Tab, so there is then
+  # nothing to find it by: add sits on "choosing..." until the daemon is killed.
+  # Past a created handle the setter is a plain SetWindowPos and sticks.
+  $owner.TopMost = $true
 
   $path = [AideFolderDialog]::Pick($owner.Handle, 'Select a git repository', ${psLiteral(startIn)})
   $owner.Close()
