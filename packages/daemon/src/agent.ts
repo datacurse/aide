@@ -244,6 +244,64 @@ function fastBashSettings(deniedBash: readonly string[]): Settings {
   return { permissions: { allow: ["Bash(*)"], deny } }
 }
 
+const SHADOW_WARNING_CODE = "CLAUDE_SDK_CAN_USE_TOOL_SHADOWED"
+
+/** The names out of `canUseTool will not be invoked for: A, B. Bare …`. */
+function toolsNamedInShadowWarning(message: string): string[] {
+  const listed = /^canUseTool will not be invoked for: ([^.]+)\./.exec(message)?.[1]
+  if (!listed) return []
+  return listed
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean)
+}
+
+/** Tool names this process has told the SDK to approve without asking. */
+const shadowedOnPurpose = new Set<string>()
+let shadowWarningFiltered = false
+
+/**
+ * Stop the SDK saying, once per worker, that `canUseTool` will not be consulted
+ * for the tools we asked it not to consult it for.
+ *
+ * A bare name in `allowedTools` approves its whole tool before the callback is
+ * reached. Both of aide's lists are bare on purpose — `CONFIG.allowedTools` is a
+ * headless run's entire permission, and fails closed because what is not on it
+ * is denied; `chatAutoAllowTools` is the short read-only set a chat is never
+ * asked about. The warning's own remedy, a PreToolUse hook, would put a callback
+ * in front of every Read in order to answer yes, which is the round trip the
+ * list exists to skip. So it is two lines of stderr per worker, on every chat,
+ * restating a decision taken in `config.ts` where both lists are commented.
+ *
+ * Swallowed only for tools this process actually passed, and only when the
+ * message parses. The SDK's own text ends "Allow rules from settings files can
+ * also shadow the callback but are not visible here" — and aide writes such a
+ * layer itself in `fastBashSettings` — so a shadow naming something nobody here
+ * asked for is news and still prints. What the lists themselves contain is not
+ * this filter's job to police: that is read in a diff, which is where widening
+ * Manual mode by adding Edit to the auto-allow set gets caught.
+ */
+function expectShadowedTools(allowedTools: readonly string[]): void {
+  for (const tool of allowedTools) shadowedOnPurpose.add(tool)
+  if (shadowWarningFiltered) return
+  shadowWarningFiltered = true
+
+  // Node prints warnings from a listener on this event like any other, so
+  // filtering one means taking that listener off and calling it for everything
+  // kept. Handing warnings back to the listeners that were there — rather than
+  // formatting them here — keeps the prefix, the code and the `--trace-warnings`
+  // hint identical, and keeps whatever tsx registered for its own warnings.
+  const printers = process.listeners("warning") as Array<(warning: Error) => void>
+  process.removeAllListeners("warning")
+  process.on("warning", (warning) => {
+    if ((warning as NodeJS.ErrnoException).code === SHADOW_WARNING_CODE) {
+      const named = toolsNamedInShadowWarning(warning.message)
+      if (named.length && named.every((tool) => shadowedOnPurpose.has(tool))) return
+    }
+    for (const print of printers) print(warning)
+  })
+}
+
 function toModelSpend(raw: unknown): Record<string, ModelSpend> {
   const out: Record<string, ModelSpend> = {}
   const entries = Object.entries((raw ?? {}) as Record<string, Record<string, unknown>>)
@@ -530,6 +588,7 @@ export function composeRequest(title: string, prompt: string): string {
 }
 
 export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventBody> {
+  expectShadowedTools(opts.allowedTools)
   const request = composeRequest(opts.title, opts.prompt)
 
   // Images first, then the text. The Messages API takes either a bare string or

@@ -111,6 +111,19 @@ function killTree(child: ChildProcess): void {
   }
 }
 
+/**
+ * Where one plugin instance leaves its shutdown hook for the next.
+ *
+ * On `globalThis` under a registry symbol, not in a module variable, because a
+ * config reload re-evaluates this module: Vite bundles the config and imports it
+ * afresh, so anything held at module scope is a new copy that has never met the
+ * instance it is replacing. The process is the same one throughout — that is the
+ * whole reason the listeners piled up on it — so the process is where the handle
+ * has to live. See the shutdown hook at the end of `configureServer`.
+ */
+const SHUTDOWN = Symbol.for("aide:daemon-control:shutdown")
+const handover = globalThis as unknown as Record<symbol, (() => void) | undefined>
+
 export function daemonControl(port: number, webPort: number): Plugin {
   let child: ChildProcess | null = null
   let starting = false
@@ -586,9 +599,29 @@ export function daemonControl(port: number, webPort: number): Plugin {
       // the dying process for the port and adopted a corpse. A config reload is
       // not a shutdown, and it has no business stopping a daemon that may be
       // mid-run.
+      //
+      // A config reload DOES build a new plugin instance, though, and this file
+      // is one of the imports that triggers one — so a session spent editing it
+      // registered three more listeners on the same process every few seconds,
+      // and Node called it a leak at eleven. It is one: the count has no ceiling.
+      //
+      // The predecessor's hook cannot simply be removed, which is why this is a
+      // handover rather than a cleanup. It holds the only handle to the daemon IT
+      // spawned — the instance replacing it adopted that daemon over the port and
+      // so has no pid to kill — and the new hook therefore calls the old one and
+      // takes its place. Three listeners for the life of the process, and every
+      // daemon still dies with it.
+      const previous = handover[SHUTDOWN]
       const shutdown = () => {
         if (child) killTree(child)
+        previous?.()
       }
+      if (previous) {
+        process.off("exit", previous)
+        process.off("SIGINT", previous)
+        process.off("SIGTERM", previous)
+      }
+      handover[SHUTDOWN] = shutdown
       process.once("exit", shutdown)
       process.once("SIGINT", shutdown)
       process.once("SIGTERM", shutdown)
