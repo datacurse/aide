@@ -259,7 +259,32 @@ function toModelSpend(raw: unknown): Record<string, ModelSpend> {
   return out
 }
 
-const statusFor = (subtype: string): RunStatus => (subtype === "success" ? "success" : "failed")
+/**
+ * How a turn ended, from the SDK's result message.
+ *
+ * `isError` is read as well as the subtype, and it is not belt-and-braces. The
+ * SDK's own type says a `success` result carries the final assistant text in
+ * `result` — "or, with is_error true, the error text when the turn ended on an
+ * API error". Reading the subtype alone therefore filed a turn that died on an
+ * API error as done, with the error message rendered in the transcript as the
+ * model's closing remark.
+ */
+const statusFor = (subtype: string, isError: boolean): RunStatus =>
+  subtype === "success" && !isError ? "success" : "failed"
+
+/**
+ * What the SDK said went wrong, out of the two places it puts it.
+ *
+ * An error subtype carries `errors`; a `success` that is really a failure has
+ * the text in `result`, where a reply would otherwise be. Neither is read
+ * anywhere else, so this is the only chance to keep it.
+ */
+function errorsFrom(m: Record<string, unknown>, subtype: string, isError: boolean): string[] {
+  const listed = Array.isArray(m["errors"]) ? m["errors"].map((e) => String(e)) : []
+  const inResult =
+    subtype === "success" && isError && typeof m["result"] === "string" ? [m["result"]] : []
+  return [...listed, ...inResult].map((s) => s.trim()).filter(Boolean)
+}
 
 /**
  * aide's mode names to the SDK's. Kept as a table rather than reusing the SDK's
@@ -449,12 +474,17 @@ export function normalizeSdkMessage(
 
   if (type === "result") {
     const subtype = String(m["subtype"] ?? "unknown")
+    const isError = m["is_error"] === true
+    const errors = errorsFrom(m, subtype, isError)
     const denials = (m["permission_denials"] as Array<Record<string, unknown>>) ?? []
     return [
       {
         type: "run.finished",
         subtype,
-        status: statusFor(subtype),
+        status: statusFor(subtype, isError),
+        // Omitted rather than empty, so an outcome with nothing to explain logs
+        // the same line it always did.
+        ...(errors.length ? { errors } : {}),
         // Includes subagent spend; `usage` would not. Both are estimates.
         totalCostUsd: Number(m["total_cost_usd"] ?? 0),
         modelUsage: toModelSpend(m["modelUsage"]),

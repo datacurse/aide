@@ -103,6 +103,9 @@ interface OutcomeLine {
   turns: number
   ms: number
   cost: number
+  /** Why it failed, when the SDK said. Empty for a turn that went fine, and for
+   * every outcome logged before `run.finished` carried this. */
+  errors: string[]
 }
 /**
  * A block of prose, from either copy of it.
@@ -341,6 +344,7 @@ function toLines(events: RunEvent[], live?: LiveText | null): Line[] {
           turns: e.numTurns,
           ms: e.durationMs,
           cost: e.totalCostUsd,
+          errors: e.errors ?? [],
         })
         break
     }
@@ -782,20 +786,26 @@ function renderLine(
   if (line.kind === "outcome") {
     const outcome = describeOutcome(line)
     return (
-      <p
-        key={line.key}
-        title={`SDK result subtype: ${line.subtype}`}
-        className={`mt-3 border-t border-line px-1 pt-2 ${outcome.className}`}
-      >
-        ● {outcome.label}
-        <span className="text-fg-dim">
-          {" — "}
-          {/* A commit run has no SDK steps to count, and "0 turns" on the end of
-              one reads as a failure rather than as a category difference. */}
-          {line.turns > 0 && `${line.turns} turns · `}
-          {(line.ms / 1000).toFixed(1)}s · ~{money(line.cost)} est.
-        </span>
-      </p>
+      <div key={line.key} className="mt-3 border-t border-line px-1 pt-2">
+        <p title={`SDK result subtype: ${line.subtype}`} className={outcome.className}>
+          ● {outcome.label}
+          <span className="text-fg-dim">
+            {" — "}
+            {/* A commit run has no SDK steps to count, and "0 turns" on the end of
+                one reads as a failure rather than as a category difference. */}
+            {line.turns > 0 && `${line.turns} turns · `}
+            {(line.ms / 1000).toFixed(1)}s · ~{money(line.cost)} est.
+          </span>
+        </p>
+        {/* What the SDK said, under the line that says it failed. The subtype
+            names the wall that was hit and is already in the label; these are
+            the only place the actual reason appears. */}
+        {line.errors.map((text, i) => (
+          <p key={i} className="mt-1 break-words text-err">
+            {text}
+          </p>
+        ))}
+      </div>
     )
   }
   return (

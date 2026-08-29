@@ -583,6 +583,45 @@ console.log("\nrestarting a stale daemon")
   check("never restarts on an unreadable source", !decide({ sourceId: null }, null).restart)
 }
 
+console.log("\na failed turn says what failed")
+{
+  // Nine turns in this machine's logs ended in a failure that carried no reason
+  // — one after 62 turns, 13 minutes and $9.59 — because the SDK's `errors` was
+  // read by nobody. What follows five of them is the same message typed again
+  // from memory. These pin the mapping that lost it.
+  const { normalizeSdkMessage } = await import("./agent.js")
+  const ctx = { taskId: "", projectId: "p1", cwd: root, fallbackModel: "m" }
+  const finish = (m: Record<string, unknown>) => {
+    const out = normalizeSdkMessage({ type: "result", ...m }, ctx)
+    const ev = out.find((e) => e.type === "run.finished")
+    return ev?.type === "run.finished" ? ev : null
+  }
+
+  check("a clean success is a success", finish({ subtype: "success", is_error: false })?.status === "success")
+  check(
+    "an error subtype keeps what the SDK said",
+    finish({ subtype: "error_during_execution", errors: ["tool loop detected"] })?.errors?.[0] ===
+      "tool loop detected",
+    "the subtype names the wall; only this says what hit it",
+  )
+  check(
+    "a turn that died on an API error is NOT filed as done",
+    finish({ subtype: "success", is_error: true, result: "overloaded_error" })?.status === "failed",
+    "the SDK puts the error text in `result` under subtype success; reading the subtype alone called that a finished turn",
+  )
+  check(
+    "and its error text is kept too",
+    finish({ subtype: "success", is_error: true, result: "overloaded_error" })?.errors?.[0] ===
+      "overloaded_error",
+  )
+  check(
+    "nothing to explain adds no field",
+    finish({ subtype: "success", is_error: false })?.errors === undefined,
+    "absent rather than empty, so every outcome written before this reads the same",
+  )
+  check("blank entries are dropped", finish({ subtype: "error_max_turns", errors: ["", "  "] })?.errors === undefined)
+}
+
 console.log("\nthe checks a commit has to get past")
 {
   // The gate on the code was half a gate: an agent ran the project's checks

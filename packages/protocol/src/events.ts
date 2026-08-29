@@ -279,6 +279,20 @@ export type RunEventBody =
       numTurns: number
       durationMs: number
       permissionDenials: Array<{ tool: string; reason: string }>
+      /**
+       * Why it failed, in the SDK's own words.
+       *
+       * `SDKResultError` carries an `errors` array and aide threw it away, so a
+       * run that spent thirteen minutes and $9.59 across 62 turns ended with the
+       * word "failed" and nothing else — and the next thing in this machine's
+       * logs is the human retyping their message into a fresh chat. The subtype
+       * says which wall was hit; this says what actually went wrong.
+       *
+       * Absent rather than empty, the same way `user.message.images` is: every
+       * outcome written before this existed has no errors field, and a reader
+       * has to keep working on those.
+       */
+      errors?: string[]
     }
   /** The run never produced a result — process crash, spawn failure, bad config. */
   | { type: "run.error"; message: string }

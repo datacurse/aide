@@ -16,6 +16,7 @@ import {
   discardDraft,
   draftKey,
   idFromKey,
+  saveDraft,
   useUnstartedChats,
   type Draft,
 } from "../drafts.js"
@@ -991,6 +992,61 @@ export function ConversationPane({
     onVerifyRefused?.(verifyRefused)
   }, [verifyRefused, onVerifyRefused])
 
+  /**
+   * The turn on screen failed, and this is what it was asked to do.
+   *
+   * Null unless there is something to offer: a turn that succeeded, one still
+   * running, one the human stopped on purpose, and a commit — which was a button
+   * rather than a message and has no prompt to put back.
+   *
+   * It exists because of what the logs show happening instead. Nine turns here
+   * ended in a failure carrying no reason, one of them after thirteen minutes
+   * and $9.59, and what follows five of them is the same message typed again
+   * from memory — twice into a fresh conversation, which pays for a new context
+   * to re-learn what the failed one already knew.
+   */
+  const failedTurn = useMemo(() => {
+    if (busy || !runId) return null
+    const mine = turnEvents.filter((e) => e.runId === runId)
+    if (mine.some((e) => e.type === "commit.step")) return null
+    const ended = [...mine]
+      .reverse()
+      .find((e) => e.type === "run.finished" || e.type === "run.error")
+    if (!ended) return null
+    // Cancelled is deliberate. Offering to send again what somebody just pressed
+    // stop on is arguing with them.
+    if (ended.type === "run.finished" && ended.status !== "failed") return null
+    const asked = mine.find((e) => e.type === "user.message")
+    if (asked?.type !== "user.message" || !asked.text.trim()) return null
+    return { text: asked.text, images: asked.images ?? [] }
+  }, [busy, runId, turnEvents])
+
+  /**
+   * Put the failed message back in the box, with its screenshots.
+   *
+   * The box rather than straight back to the daemon: a turn that failed may need
+   * a word changed, and one press that respends what just went wrong is how you
+   * lose ten dollars twice. The composer reads this store directly, so writing
+   * it is the whole of the wiring.
+   */
+  const putBack = () => {
+    if (!projectId || !failedTurn) return
+    saveDraft(draftKey(projectId, sessionId ?? draftId ?? ""), {
+      text: failedTurn.text,
+      // Rebuilt rather than carried: the log keeps what the API needs
+      // (`mediaType`, `data`) and the composer additionally wants a key to
+      // remove one by and a size to show. Dropping them instead would silently
+      // resend a message that was half a sentence and a picture as half a
+      // sentence.
+      attachments: failedTurn.images.map((img, i) => ({
+        id: `resend-${i}`,
+        mediaType: img.mediaType,
+        data: img.data,
+        bytes: Math.floor((img.data.length * 3) / 4),
+      })),
+    })
+  }
+
   const usage = useMemo<ContextUsage | null>(() => {
     for (let i = turnEvents.length - 1; i >= 0; i -= 1) {
       const e = turnEvents[i]
@@ -1187,6 +1243,21 @@ export function ConversationPane({
             if (runId) void api.interruptChat(runId).catch(() => {})
           }}
         />
+      )}
+
+      {/* Between the transcript and the box, which is the order the decision is
+          made in: you read what went wrong, then you decide whether to send it
+          again. */}
+      {failedTurn && projectId && (
+        <div className="flex shrink-0 items-center gap-2 border-t border-line bg-chrome px-3 py-1.5 font-sans text-[11px] text-fg-muted">
+          <span className="min-w-0 flex-1">
+            That turn did not finish. Your message is still here — put it back in the box to try
+            again, or say something different.
+          </span>
+          <Button onClick={putBack} title="Copy that message, and anything pasted with it, back into the composer">
+            put it back
+          </Button>
+        </div>
       )}
 
       {projectId && (
