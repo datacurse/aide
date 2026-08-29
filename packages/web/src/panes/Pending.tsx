@@ -12,8 +12,9 @@ import { Button, Empty, PaneHeader } from "../ui.js"
  *
  * What stayed is the list and the one button that acts on it. There is still no
  * staging and no discard, and that is not an oversight: a commit here is the
- * whole of what one conversation changed, measured against its checkpoint, and
- * anything narrower would be a second review with no diff attached.
+ * whole of what is uncommitted, and anything narrower would be a second review
+ * with no diff attached — and would leave files behind in a list whose being
+ * empty is the condition for starting the next chat.
  */
 
 /** Same palette VS Code uses in its own SCM view, so the colours are not a new language. */
@@ -53,16 +54,22 @@ const MARK: Record<GitFileState, string> = {
  * carry that job — you would meet the refusal before you met the reason.
  *
  * The commit button is here, next to the list of what it would take, and it
- * still commits a CONVERSATION's work rather than the rail's: it is pressed with
- * a chat open, it measures against that chat's checkpoint, and the run it starts
- * streams into that chat's transcript. The rail is where the work is visible;
- * the conversation is where it means something. This is the one place both are
- * true at once, which is why the button ended up here and not next to send.
+ * takes exactly this list. That sentence used to be false: it committed a
+ * CONVERSATION's work, measured against that chat's checkpoint, so it could not
+ * be pressed without one open. Nothing makes the files in this rail a chat's —
+ * an editor, a formatter and an install all write to the same tree — and for
+ * those the rail was a permanent block with a dead button beside it and a
+ * terminal as the only way out.
  *
- * Nothing is filtered out of it. Every file here is one a commit can take, which
- * has to stay true: the block on starting a new conversation reads this same
- * list, so a file that could sit here uncommittable would be a block with no way
- * out of it.
+ * A chat still matters to a commit, just not to what it takes: with one open the
+ * run streams into its transcript and the commit carries its id. With none, the
+ * run streams into whatever the middle pane is showing and the commit is
+ * attributed to nobody, which is the truth about it.
+ *
+ * Nothing is filtered out of the list. Every file here is one a commit can take,
+ * which has to stay true: the block on starting a new conversation reads this
+ * same list, so a file that could sit here uncommittable would be a block with
+ * no way out of it.
  */
 export function PendingRail({
   projectId,
@@ -81,8 +88,9 @@ export function PendingRail({
    * Why this work cannot be committed from here, or null when it can.
    *
    * A sentence rather than a boolean, and it goes on the disabled button's
-   * title: "commit is greyed out" with no reason is the shape of a bug, and the
-   * usual reason — no conversation open — is something you can act on.
+   * title: "commit is greyed out" with no reason is the shape of a bug. The only
+   * reason left is another run holding the checkout, which is a wait rather than
+   * something to go and do.
    */
   commitBlocked: string | null
   committing: boolean
@@ -135,8 +143,8 @@ export function PendingRail({
             starting another chat.
             {verifyRefused && (
               <div className="mt-2 text-warn">
-                A check failed, so nothing was committed. It is written out in the conversation —
-                read it, then press again to commit anyway.
+                A check failed, so nothing was committed. It is written out beside this rail — read
+                it, then press again to commit anyway.
               </div>
             )}
             <div className="mt-2">
@@ -148,7 +156,7 @@ export function PendingRail({
                   commitBlocked ??
                   (verifyRefused
                     ? "Commit this work even though a check failed. The failure stays in the log."
-                    : "Draft a message from this conversation's diff and commit everything in it. Both happen in the chat, where you can watch them.")
+                    : `Draft a message from these ${files.length} file${files.length === 1 ? "" : "s"} and commit all of them. Both happen in the pane beside this one, where you can watch them.`)
                 }
               >
                 {committing ? "committing…" : verifyRefused ? "commit anyway" : "commit"}

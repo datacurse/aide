@@ -174,14 +174,27 @@ export function App() {
    * "committing" would clear while the drafting was still going.
    */
   const committing = starting || (commitRunId !== null && project?.holder?.runId === commitRunId)
-  const commitBlocked = !sessionId
-    ? "Open the conversation that made these changes. A commit is measured against the checkpoint that conversation started from, so there is nothing to measure without one."
-    : project?.holder && project.holder.runId !== commitRunId
+  /**
+   * Why the commit button cannot be pressed, or null.
+   *
+   * One reason left, and it is a wait rather than a refusal. There used to be a
+   * second — "open the conversation that made these changes" — from back when a
+   * commit was measured against a chat's checkpoint. Nothing makes the changes
+   * in the rail belong to a chat, so that was a dead button over work your own
+   * editor had made, in a project the same work was blocking every new chat in.
+   */
+  const commitBlocked =
+    project?.holder && project.holder.runId !== commitRunId
       ? `"${project.holder.title}" has the repo right now.`
       : null
 
   /**
-   * Commit what the open conversation changed.
+   * Commit everything uncommitted in this project.
+   *
+   * The open chat is passed for attribution only — the trailer, and the
+   * transcript the run streams into. There need not be one: what gets committed
+   * is the rail's own list either way, which is what makes the rail's list
+   * something you can always clear.
    *
    * Returns as soon as the daemon has a run id — the work itself takes a model
    * call and lands in the transcript. The refresh is not a nicety: until the
@@ -189,17 +202,17 @@ export function App() {
    * false and the button reads as pressable over a commit already running.
    */
   const commitWork = async () => {
-    if (!projectId || !sessionId) return
+    if (!projectId) return
     setStarting(true)
     setError(null)
     try {
       // The override is spent on the press that uses it. Clearing it here rather
       // than waiting for the new run's events means a second failure has to
       // arm it again — otherwise one refusal would leave every later commit in
-      // this conversation forced, silently.
+      // this project forced, silently.
       const force = verifyRefused
       setVerifyRefused(false)
-      const { runId } = await api.commitChat(projectId, sessionId, force)
+      const { runId } = await api.commitProject(projectId, sessionId, force)
       setCommitRunId(runId)
       await refresh()
     } catch (err) {

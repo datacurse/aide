@@ -386,7 +386,7 @@ export class ChatLane {
    * button does not offer to start a conversation on top of a commit in flight.
    *
    * Everything the agent path needs and this does not is simply absent: no
-   * worker, no checkpoint (the conversation's own is what it measures against),
+   * worker, no checkpoint (nothing here edits the tree except by committing it),
    * no permissions. `work` gets an `emit` for progress, a `delta` for text still
    * arriving, and a `stopped` it can check before it writes anything, and the
    * terminal event is appended here so
@@ -395,7 +395,16 @@ export class ChatLane {
    */
   hold(opts: {
     project: Project
-    sessionId: string
+    /**
+     * The conversation this run is attributed to, or null for none.
+     *
+     * Null is a real case, not a gap: a commit can be pressed with no chat open,
+     * over work an editor made, and it still needs the project's lock and a run
+     * id to watch. What it does not get is a session — `spendBySession` reads
+     * `run.started` and skips a run with none, which is the honest answer, since
+     * there is no conversation for its cost to belong to.
+     */
+    sessionId: string | null
     /** What this run is, for the lock refusal the next chat would get. */
     text: string
     /** Named in `run.started` so a receipt bills it to something. */
@@ -409,7 +418,7 @@ export class ChatLane {
     }) => Promise<{ costUsd: number; modelUsage: Record<string, ModelSpend> }>
   }): string {
     const { project, sessionId } = opts
-    if (this.turnForSession(sessionId)) {
+    if (sessionId && this.turnForSession(sessionId)) {
       throw new Error("this conversation already has a turn in flight")
     }
     const holder = this.holderFor(project.id)
@@ -437,7 +446,8 @@ export class ChatLane {
 
     // `run.started` carries the session id, and it is the ONLY event that does.
     // A log without it is a log nothing can attribute to a conversation — which
-    // is how a receipt would end up billing this run to nobody.
+    // is right here when there is no conversation, and a receipt billing this
+    // run to nobody is the truth about a commit nobody asked for in a chat.
     this.log.append(runId, {
       type: "run.started",
       taskId: "",

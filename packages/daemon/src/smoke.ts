@@ -42,7 +42,14 @@ import {
   status as repoStatus,
   workingTree,
 } from "./repo.js"
-import { commitRun, currentBranch, recentSubjects, runChanges, withSessionTrailer } from "./changes.js"
+import {
+  commitRun,
+  currentBranch,
+  recentSubjects,
+  runChanges,
+  treeChanges,
+  withSessionTrailer,
+} from "./changes.js"
 import {
   listTurnCheckpoints,
   readCheckpoint,
@@ -404,8 +411,11 @@ console.log("\nwhat is left to commit — the indicator, and the gate it drives"
   )
   // The invariant tying the rail to the gate: what the indicator lights on and
   // what a commit would take have to be the same set, or the screen explains
-  // neither the refusal nor the button that clears it.
-  const takeable = await runChanges(root, scopedSha)
+  // neither the refusal nor the button that clears it. Both sides are read the
+  // way the app reads them — `pending` for the rail, `treeChanges` for the
+  // commit — because the bug this guards against was those two answering
+  // different questions, not either one answering its own question wrongly.
+  const takeable = await treeChanges(root)
   check(
     "and the list is exactly what a commit would take",
     [...takeable.paths].sort().join(",") ===
@@ -937,14 +947,12 @@ console.log("\nthe drawn graph")
 }
 
 // ---------------------------------------------------------------------------
-console.log("\ncommitting a conversation")
-// The review gate end to end, with a conversation's identifiers. The message is
-// supplied here rather than drafted, so this exercises the git plumbing without
-// spending anything.
+console.log("\ncommitting, with a conversation to attribute it to")
+// The commit gate end to end. The message is supplied here rather than drafted,
+// so this exercises the git plumbing without spending anything.
 {
-  const { commitReview } = await import("./review.js")
+  const { commitTree } = await import("./review.js")
 
-  const rowId = "0042"
   const session = "11111111-2222-3333-4444-555555555555"
   const project = { id: "p", name: "p", root, addedAt: "" }
 
@@ -952,10 +960,18 @@ console.log("\ncommitting a conversation")
   const baseline = await takeCheckpoint(root, session)
   await writeFile(join(root, "wobble.txt"), "it wobbles\n", "utf8")
 
-  const { sha } = await commitReview({
+  const rail = await pending(root)
+  const changes = await treeChanges(root)
+  check(
+    "what a commit takes is exactly what the rail lists",
+    [...changes.paths].sort().join(",") === rail.files.map((f) => f.path).sort().join(","),
+    changes.paths.join(","),
+  )
+
+  const sha = await commitTree({
     project,
     sessionId: session,
-    checkpoint: baseline.sha,
+    paths: changes.paths,
     message: "Teach the widget to wobble",
   })
   check("it commits", /^[0-9a-f]{40}$/.test(sha), sha.slice(0, 8))
@@ -964,11 +980,7 @@ console.log("\ncommitting a conversation")
   check("and its session, which outlives every run in it", body.includes(`Aide-Session: ${session}`))
 
   const tracked = await git(root, ["show", "--name-only", "--format=", "HEAD"])
-  check(
-    "it commits exactly what the conversation changed",
-    tracked.includes("wobble.txt"),
-    "measured against the checkpoint, not against HEAD",
-  )
+  check("it commits what the agent wrote", tracked.includes("wobble.txt"))
 
   check(
     "the work is visible in the project itself",
@@ -976,10 +988,84 @@ console.log("\ncommitting a conversation")
     "no worktree to go and look in — this IS the tree the dev server serves",
   )
   check(
+    "and the rail is empty afterwards",
+    (await pending(root)).files.length === 0,
+    "a commit that leaves files in the rail leaves the project blocked from its next chat",
+  )
+  check(
     "and the checkpoint is still there to undo it",
     (await readCheckpoint(root, session))?.sha === baseline.sha,
     "committing must not throw away the only way back",
   )
+}
+
+// ---------------------------------------------------------------------------
+console.log("\ncommitting work no conversation made")
+// The wedge this whole path was rebuilt for. A tree gets dirty from things that
+// are not chats — your own editor, a formatter, an install that rewrote a
+// lockfile — and while it is dirty the daemon refuses to start a new
+// conversation. The button that clears it used to measure against a
+// conversation's checkpoint and so could not be pressed without one open, which
+// left the project blocked with no way out of aide at all.
+{
+  const { commitTree } = await import("./review.js")
+  const project = { id: "p", name: "p", root, addedAt: "" }
+
+  await writeFile(join(root, "by-hand.txt"), "typed into an editor\n", "utf8")
+  check(
+    "it shows in the rail, which blocks the next chat",
+    (await pending(root)).files.some((f) => f.path === "by-hand.txt"),
+  )
+
+  const changes = await treeChanges(root)
+  check("and a commit can take it with no conversation at all", changes.paths.includes("by-hand.txt"))
+
+  const sha = await commitTree({
+    project,
+    sessionId: null,
+    paths: changes.paths,
+    message: "Add a note",
+  })
+  check("it commits", /^[0-9a-f]{40}$/.test(sha), sha.slice(0, 8))
+  check(
+    "with no session trailer",
+    !(await git(root, ["log", "-1", "--format=%B"])).includes("Aide-Session"),
+    "pointing it at whichever chat was on screen would be a lie in the permanent record",
+  )
+  check(
+    "and the block lifts",
+    (await pending(root)).files.length === 0,
+    "the list that refuses the next chat and the list the button takes are one list",
+  )
+}
+
+// ---------------------------------------------------------------------------
+console.log("\nthe first commit in a repository that has none")
+// Its own repo, because there is exactly one moment in a project's life when
+// HEAD does not resolve and it cannot be reached from the one above. Naming HEAD
+// to `diff --cached` there is a fatal rather than an empty diff, so getting this
+// wrong means aide can never make a first commit — and never says why.
+{
+  const { commitTree } = await import("./review.js")
+  const fresh = await mkdtemp(join(tmpdir(), "aide-smoke-unborn-"))
+  await git(fresh, ["init", "-b", "main"])
+  await git(fresh, ["config", "user.email", "smoke@aide.test"])
+  await git(fresh, ["config", "user.name", "aide smoke"])
+  await writeFile(join(fresh, "first.txt"), "hello\n", "utf8")
+
+  const changes = await treeChanges(fresh)
+  check("the diff is against the empty tree", changes.paths.includes("first.txt"), changes.paths.join(","))
+  check("and it has hunks to read", changes.diff.includes("+hello"))
+
+  const sha = await commitTree({
+    project: { id: "p", name: "p", root: fresh, addedAt: "" },
+    sessionId: null,
+    paths: changes.paths,
+    message: "Add the first file",
+  })
+  check("it commits", /^[0-9a-f]{40}$/.test(sha), sha.slice(0, 8))
+  check("and the rail is empty afterwards", (await pending(fresh)).files.length === 0)
+  await rm(fresh, { recursive: true, force: true })
 }
 
 console.log(`\n${failures === 0 ? "all checks passed" : `${failures} FAILED`}`)

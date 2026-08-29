@@ -130,20 +130,25 @@ export const api = {
   conversations: (projectId: string) =>
     call<ConversationRow[]>(`/api/projects/${projectId}/conversations`),
   /**
-   * Commit this conversation's work.
+   * Commit everything uncommitted in the project.
+   *
+   * The project's route, not a conversation's: what it takes is the working
+   * tree, which is what the rail shows and what the new-chat block reads.
+   * `sessionId` only attributes it — the commit's trailer, what the drafter is
+   * told the work was for, and which transcript the run appears in — so null is
+   * a normal press, made with no chat open over changes no chat made.
    *
    * Answers with a run id, not a sha. The drafting is a model call on the diff
-   * and takes about as long as a short turn, so it goes on the event stream
-   * like one — what it wrote and what it took arrive in the transcript.
-   */
-  /**
+   * and takes about as long as a short turn, so it goes on the event stream like
+   * one — what it wrote and what it took arrive in the transcript.
+   *
    * `force` commits over a failed check. It is a second press, never a setting —
-   * see `CommitConversationOptions.force` for why that distinction is the point.
+   * see `CommitWorkingTreeOptions.force` for why that distinction is the point.
    */
-  commitChat: (projectId: string, sessionId: string, force = false) =>
-    call<{ runId: string }>(`/api/projects/${projectId}/conversations/${sessionId}/commit`, {
+  commitProject: (projectId: string, sessionId: string | null, force = false) =>
+    call<{ runId: string }>(`/api/projects/${projectId}/commit`, {
       method: "POST",
-      body: JSON.stringify({ force }),
+      body: JSON.stringify({ sessionId, force }),
     }),
   /** Done. Nothing an agent runs can reach this. */
   closeChat: (projectId: string, sessionId: string) =>

@@ -665,7 +665,7 @@ console.log("\ncommitting is a run of its own")
   const held = lane.hold({
     project,
     sessionId: session,
-    text: "committing this conversation's work",
+    text: "committing what is uncommitted",
     model: "helper-model",
     work: async (run) => {
       run.emit({ type: "commit.step", label: "reading what this conversation changed" })
@@ -737,6 +737,46 @@ console.log("\ncommitting is a run of its own")
 }
 
 // ---------------------------------------------------------------------------
+console.log("\ncommitting with no conversation to attribute it to")
+// A commit takes the working tree, so it can be pressed over work no chat made —
+// an editor's, a formatter's — and then there is no session to hang the run off.
+// It still needs everything else a run needs: the project's lock, a run id the
+// browser can subscribe to, and a log that ends once.
+{
+  const held = lane.hold({
+    project,
+    sessionId: null,
+    text: "committing what is uncommitted",
+    model: "helper-model",
+    work: async (run) => {
+      run.emit({ type: "commit.landed", sha: "b".repeat(40), paths: ["by-hand.txt"] })
+      return { costUsd: 0.01, modelUsage: {} }
+    },
+  })
+
+  const opening = log.read(held)[0]
+  check(
+    "run.started carries no session",
+    opening?.type === "run.started" && opening.sessionId === null,
+    "naming whichever chat was on screen would bill this to a conversation that did not do it",
+  )
+
+  await wait(200)
+  const events = log.read(held)
+  check(
+    "and it still ends in exactly one terminal event",
+    events.at(-1)?.type === "run.finished" &&
+      events.filter((e) => e.type === "run.finished" || e.type === "run.error").length === 1,
+    events.at(-1)?.type,
+  )
+  check(
+    "and the project is free again",
+    lane.holderFor(project.id) === null,
+    "a sessionless record has no conversation to be found and cleared through",
+  )
+}
+
+// ---------------------------------------------------------------------------
 console.log("\nstopping a commit before it writes")
 // The stop button over a commit is real, and it is real only up to a point:
 // there is a moment after which there is a commit, and stopping would mean
@@ -751,7 +791,7 @@ console.log("\nstopping a commit before it writes")
   const held = lane.hold({
     project,
     sessionId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
-    text: "committing this conversation's work",
+    text: "committing what is uncommitted",
     model: "helper-model",
     work: async (run) => {
       await gate

@@ -732,18 +732,22 @@ export function ConversationPane({
    */
   draftId: string | null
   /**
-   * How many files are uncommitted in the project, in the scope a commit would
-   * take. Passed down rather than polled here: the git rail already asks on the
-   * app's beat, and two pollers would let the box and the rail disagree about
-   * whether a new chat is allowed.
+   * How many files are uncommitted in the project, which is exactly the scope a
+   * commit takes. Passed down rather than polled here: the git rail already asks
+   * on the app's beat, and two pollers would let the box and the rail disagree
+   * about whether a new chat is allowed.
    */
   uncommitted: number
   /**
    * A run started somewhere else that belongs on this transcript.
    *
    * The commit is the only one: it is pressed in the git rail, which is beside
-   * this pane rather than inside it, and it is this conversation's work being
-   * committed — so it streams here, where the work it is describing already is.
+   * this pane rather than inside it, so it streams here — the only pane wide
+   * enough to read a commit message being written and a failed check's output.
+   *
+   * It arrives whatever is open, including an unstarted chat and nothing at all,
+   * because a commit no longer needs a conversation. That is not a mismatch: the
+   * pane is where runs are watched, and this is a run.
    */
   adoptRunId?: string | null
   /**
@@ -1278,7 +1282,7 @@ export function ConversationPane({
           blocked={
             sessionId || busy || uncommitted === 0
               ? null
-              : `${uncommitted} uncommitted file${uncommitted === 1 ? "" : "s"} in this project. Open the chat that made them and press commit in the rail on the right.`
+              : `${uncommitted} uncommitted file${uncommitted === 1 ? "" : "s"} in this project. Press commit in the rail on the right — it takes all of them, whether or not a chat made them.`
           }
           autoSend={autoSend}
           onAutoSent={onAutoSent}

@@ -4,35 +4,93 @@ import { join } from "node:path"
 import { git, gitOr, withWorkingTreeIndex } from "./git.js"
 
 /**
- * What a run changed, and committing it.
+ * What is uncommitted, what a run changed, and committing either.
  *
- * The unit used to be a worktree, and that made this file easy: the checkout
- * started clean, so everything in it was the agent's work by construction.
- * Working in the project's own tree removes that guarantee, and everything below
- * exists to put it back — the run's changes are measured against the checkpoint
- * taken before it started, never against HEAD.
+ * Two readings, and the difference between them is the whole of this file.
  *
- * The invariant this file is here to hold is unchanged, and is worth restating
- * because it is the whole point of the review gate: the diff the human reads and
- * the paths the commit stages must be derived from the same computation. If they
- * disagree, the human approves one change and commits another.
+ * `treeChanges` asks what is uncommitted in the project, full stop. That is what
+ * a commit takes and what the rail lights on, and it needs nothing but the repo.
+ *
+ * `runChanges` asks what ONE conversation did, measured against the checkpoint
+ * taken before it started. The unit used to be a worktree, which answered that
+ * for free — the checkout started clean, so everything in it was the agent's
+ * work by construction — and the checkpoint is what puts the answer back now
+ * that runs work the project's own tree.
+ *
+ * Which reading belongs where took a bug to settle. The commit was measured
+ * against a conversation while the block on starting a new one was measured
+ * against the repository, so a tree dirtied by anything that is not a
+ * conversation — your own editor, a formatter, an install that rewrote a
+ * lockfile — blocked every new chat and had no button in aide that would clear
+ * it. A gate whose precondition and whose release read two different objects can
+ * wedge, and that one did. So the commit reads the tree, and the conversation
+ * reading is for the diff you go and read.
+ *
+ * The invariant both share is the point of the review gate: the diff the human
+ * reads and the paths the commit stages must be derived from the same
+ * computation. If they disagree, the human approves one change and commits
+ * another.
  */
 
 // ---------------------------------------------------------------------------
-// Whose files are whose
+// What is uncommitted
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// What the run did
-// ---------------------------------------------------------------------------
-
-export interface RunChanges {
-  /** The patch the human reviews: exactly what the run changed. */
+/** What a commit would take: everything uncommitted, however it got that way. */
+export interface TreeChanges {
+  /** The patch the human reviews. */
   diff: string
   /** `--stat` of the same. Cheap context for the drafter. */
   stat: string
   /** Repo-relative paths in `diff`. Exactly what a commit will stage. */
   paths: string[]
+}
+
+/**
+ * Everything uncommitted in the working tree, measured against HEAD.
+ *
+ * The commit's own reading, and deliberately not a conversation's — see the
+ * header for the wedge that came of measuring it against one.
+ *
+ * Same one-pass shape as `runChanges` below and for the same reason: the patch,
+ * the stat and the paths are three reads of one staged tree, so what is reviewed
+ * and what is staged cannot drift apart.
+ *
+ * This must agree with `repo.pending`, which is what the rail draws and what the
+ * new-chat block reads. Both come off a scratch `add -A`/`git status` over the
+ * same tree, so both honour `.gitignore` and both count a file the human staged
+ * by hand — a file that could sit in the rail and not be committable would be a
+ * block with no way out of it, which is the bug this function exists to close.
+ *
+ * One state they do not agree on, and it is nothing aide can reach: a hand-run
+ * `git rm --cached` leaves a file that `status` reports twice, as a staged
+ * deletion and as untracked, while the `add -A` here simply puts it back. The
+ * commit then reports nothing to do. It is a legible refusal rather than a wrong
+ * commit, and undoing it is the `git add` the human was already halfway through.
+ */
+export async function treeChanges(root: string): Promise<TreeChanges> {
+  // Resolved to a sha rather than passed as the name `HEAD`, and omitted
+  // entirely when it does not resolve. `diff --cached` with no revision is
+  // git's own spelling of "against the empty tree", which is the only baseline
+  // a repository with no commits has — naming HEAD there is a fatal rather than
+  // an empty diff, so the first commit in a fresh repo could never be made.
+  const head = await gitOr("", async () =>
+    (await git(root, ["rev-parse", "--verify", "HEAD"])).trim(),
+  )
+  const base = head ? [head] : []
+
+  return await withWorkingTreeIndex(root, async (gitTemp) => ({
+    diff: await gitTemp(["diff", "--cached", ...base, "--"]),
+    stat: await gitTemp(["diff", "--cached", "--stat", ...base, "--"]),
+    paths: splitZ(await gitTemp(["diff", "--cached", "--name-only", "-z", ...base, "--"])),
+  }))
+}
+
+// ---------------------------------------------------------------------------
+// What the run did
+// ---------------------------------------------------------------------------
+
+export interface RunChanges extends TreeChanges {
   /**
    * Paths that were ALREADY modified when the checkpoint was taken — the human's
    * own uncommitted work at the moment the run started.
@@ -141,14 +199,14 @@ export async function commitRun(
 ): Promise<string> {
   if (!message.trim()) throw new Error("commit message is empty")
   if (paths.length === 0) {
-    throw new Error("nothing to commit — the run left the working tree unchanged")
+    throw new Error("nothing to commit — the working tree matches the last commit")
   }
 
-  // Where git can still see each path. A run's path list is measured against a
-  // checkpoint, so it can name a file that has since stopped existing anywhere
-  // git looks — and git answers a pathspec matching nothing by refusing the
-  // whole command, which is how one already-landed deletion took a commit of
-  // nine other files down with it.
+  // Where git can still see each path. A path list is read before the project's
+  // checks run and committed after them, so it can name a file that has since
+  // stopped existing anywhere git looks — and git answers a pathspec matching
+  // nothing by refusing the whole command, which is how one already-landed
+  // deletion took a commit of nine other files down with it.
   const inIndex = await matching(root, paths, ["ls-files", "-z"])
   const inHead = await gitOr(new Set<string>(), () =>
     matching(root, paths, ["ls-tree", "-r", "-z", "--name-only", "HEAD"]),
@@ -172,9 +230,7 @@ export async function commitRun(
     if (staged || inHead.has(path)) committable.push(`:(top,literal)${path}`)
   }
   if (committable.length === 0) {
-    throw new Error(
-      "nothing to commit — every path the run changed has already been committed",
-    )
+    throw new Error("nothing to commit — every path in the diff has already been committed")
   }
 
   // Chunked because a pathspec per file is a long command line and Windows caps
@@ -240,14 +296,20 @@ function chunked(specs: readonly string[], maxChars = 6_000): string[][] {
 // ---------------------------------------------------------------------------
 
 /**
- * Stamp the commit with the conversation that produced it.
+ * Stamp the commit with the conversation that produced it, if one did.
  *
  * One trailer, because there is one thing worth pointing back at. There used to
  * be an `Aide-Row` beside it naming a backlog row; in the whole history of this
  * project not one commit ever carried one, which is as clear a verdict on the
  * board as anything could be.
+ *
+ * Null is not a missing id, it is an honest answer: a commit can be pressed with
+ * no conversation open, over work your editor made. Pointing that at whichever
+ * chat happened to be on screen would be a lie in the permanent record, so it
+ * points at nothing.
  */
-export function withSessionTrailer(message: string, sessionId: string): string {
+export function withSessionTrailer(message: string, sessionId: string | null): string {
+  if (!sessionId) return `${message.trimEnd()}\n`
   return appendTrailers(message, [["Aide-Session", sessionId]])
 }
 

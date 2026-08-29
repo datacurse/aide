@@ -32,8 +32,8 @@ record. They are all rows in the same list, in that order of urgency.
 | One agent per project, the lock, warm sessions | `packages/daemon/src/chat.ts` |
 | The SDK call, the system prompt, permissions | `packages/daemon/src/agent.ts` |
 | Snapshots and turn boundaries under `refs/aide/` | `packages/daemon/src/checkpoint.ts` |
-| What a conversation changed, and what a commit stages | `packages/daemon/src/changes.ts` |
-| The commit run: read the diff, write a message, commit | `packages/daemon/src/review.ts` |
+| What is uncommitted, what a conversation changed | `packages/daemon/src/changes.ts` |
+| The commit run: read the tree, write a message, commit | `packages/daemon/src/review.ts` |
 | Which chats are ticked off (`~/.aide/board.json`) | `packages/daemon/src/board.ts` |
 | What is left of the plan, and when it resets | `packages/daemon/src/usage.ts` |
 | What a run's shell may and may not do | `packages/daemon/src/policy.ts` |
@@ -52,6 +52,11 @@ Decisions already taken, which are not gaps to fill:
   refuses to do is in `.aide/project.md`.
 - **No backlog file.** `.aide/todos.md` is gone too — an unsent chat IS the row,
   held in the browser, because nothing about it has happened yet.
+- **A commit takes the working tree, not a conversation's diff.** `POST
+  /api/projects/:id/commit`; a session id on it is attribution only. This is not
+  a shortcut around the review — it is what makes the rail's list, which blocks
+  the next chat, a list you can always clear. Narrowing it back to one chat's
+  paths re-opens the wedge in the brief.
 
 ## Commands
 

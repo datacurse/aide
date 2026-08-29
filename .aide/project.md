@@ -37,6 +37,13 @@ to review the work without leaving.
   merge to be the second gate any more — recoverability comes from the
   checkpoint instead. Collapsing the two into one button is not a
   simplification, it is removing the review.
+- **The gate on the code is on the working tree, not on a chat.** What blocks the
+  next conversation and what the commit button takes must be one list. They were
+  once two — the block read the repository, the button read a conversation's
+  checkpoint — and a project dirtied by anything that was not a chat was then
+  refused every new conversation with no button in aide that would clear it. A
+  gate whose precondition and whose release read different objects can wedge, and
+  the only way out of that one was a terminal.
 - **Cost figures are estimates.** They come from a price table bundled into the
   SDK at build time. Fine for a dashboard, never for billing, and anything that
   displays one should say so.

@@ -1,6 +1,6 @@
 import { dirname } from "node:path"
 import fastifyWebsocket from "@fastify/websocket"
-import Fastify, { type FastifyReply } from "fastify"
+import Fastify from "fastify"
 import type {
   Attachment,
   ChatMode,
@@ -10,7 +10,6 @@ import type {
   FolderPick,
   Health,
   PlanUsage,
-  Project,
   RunEvent,
   ServerMessage,
 } from "@aide/protocol"
@@ -28,7 +27,7 @@ import { EventLog } from "./eventlog.js"
 import { addProject, getProject, listProjects, readProjectDoc, removeProject } from "./registry.js"
 import { pickFolder } from "./picker.js"
 import { conversationReceipt } from "./receipt.js"
-import { commitConversation, conversationBaseline } from "./review.js"
+import { commitWorkingTree, conversationBaseline } from "./review.js"
 import * as repo from "./repo.js"
 import { BOOT_SOURCE_ID, currentSourceId, isStale } from "./source.js"
 import { getConversation, listConversations } from "./sessions.js"
@@ -433,7 +432,7 @@ app.get("/api/projects/:id/conversations/:sessionId", async (req, reply) => {
 })
 
 /**
- * Reviewing a conversation's work.
+ * Reviewing the work, and committing it.
  *
  * There is no `land` here any more, because there is no branch to merge. What
  * used to be two gates on the code — commit to a branch, then merge it — is now
@@ -442,31 +441,14 @@ app.get("/api/projects/:id/conversations/:sessionId", async (req, reply) => {
  * an unmerged branch to the checkpoint ref.
  *
  * The reading moved too, from before the commit to after it. See
- * `commitConversation` for what the commit writes down so that reading is still
+ * `commitWorkingTree` for what the commit writes down so that reading is still
  * possible, and for what that trade actually costs.
+ *
+ * Note which route each half hangs off. The DIFF is a conversation's, because
+ * "what did this chat change" is a question only a checkpoint can answer. The
+ * COMMIT is the project's, because what it takes is the working tree — see
+ * `review.ts` for the wedge that came of hanging it off a conversation too.
  */
-
-/** The review baseline, or a 409 explaining why there is not one. */
-const reviewable = async (
-  project: Project,
-  sessionId: string,
-  reply: FastifyReply,
-): Promise<{ checkpoint: string } | null> => {
-  // Committing underneath a working agent races its next write. It is also
-  // impossible to review honestly: the diff would be a half-finished turn.
-  if (chat.turnForSession(sessionId)) {
-    await reply.code(409).send({ message: "a turn is still in flight for this conversation" })
-    return null
-  }
-  const found = await conversationBaseline(project, sessionId)
-  if (!found) {
-    await reply.code(409).send({
-      message: "this conversation has no checkpoint, so there is nothing to measure a change against",
-    })
-    return null
-  }
-  return found
-}
 
 app.get("/api/projects/:id/conversations/:sessionId/diff", async (req, reply) => {
   const { id, sessionId } = req.params as { id: string; sessionId: string }
@@ -487,11 +469,11 @@ app.get("/api/projects/:id/conversations/:sessionId/diff", async (req, reply) =>
 /**
  * What the conversation cost and where it went wrong, as one pasteable document.
  *
- * Deliberately NOT behind `reviewable`. That guard exists because committing
- * underneath a working agent races its next write; reading a receipt races
- * nothing, and a turn in flight is exactly when you want to see what the last
- * five did. The renderer reports an unfinished turn as unfinished rather than
- * pretending it ended.
+ * Deliberately unguarded, unlike the commit below. That guard exists because
+ * committing underneath a working agent races its next write; reading a receipt
+ * races nothing, and a turn in flight is exactly when you want to see what the
+ * last five did. The renderer reports an unfinished turn as unfinished rather
+ * than pretending it ended.
  */
 app.get("/api/projects/:id/conversations/:sessionId/receipt", async (req, reply) => {
   const { id, sessionId } = req.params as { id: string; sessionId: string }
@@ -501,52 +483,76 @@ app.get("/api/projects/:id/conversations/:sessionId/receipt", async (req, reply)
 })
 
 /**
- * Commit a conversation's work, as a run you can watch.
+ * Commit what is uncommitted, as a run you can watch.
  *
- * Returns a run id rather than a sha, and that is the whole change: the drafting
- * is two model calls on the diff and takes about as long as a short turn, so it
- * goes onto the event stream like one. The browser subscribes to it and the
- * message, the paths and the sha arrive in the transcript of the conversation
- * that earned them.
+ * The project's route, not a conversation's, and that is the point of it. What
+ * this takes is the working tree — the same list the rail draws and the same
+ * list the new-chat block reads — so it can be pressed over work no chat
+ * produced. It used to hang off `/conversations/:sessionId/commit` and measure
+ * against that conversation's checkpoint, which meant a project dirtied by an
+ * editor was blocked from every new chat with no button in aide that would clear
+ * it. See `review.ts`.
  *
- * There is no message in the body any more. There was one when a panel drafted a
- * message, showed it in a textarea and posted it back; that panel is gone,
- * because a review sitting underneath the transcript is not where anybody was
- * looking. See `commitConversation` for what replaced it and what that costs.
+ * `sessionId` is optional and is attribution only: the commit's trailer, the
+ * intent handed to the drafter, and the transcript the run streams into. Absent
+ * is a normal case, not a degraded one.
+ *
+ * Returns a run id rather than a sha: the drafting is a model call on the diff
+ * and takes about as long as a short turn, so it goes onto the event stream like
+ * one. The browser subscribes, and the message, the paths and the sha arrive in
+ * the conversation pane.
+ *
+ * There is no message in the body. There was one when a panel drafted a message,
+ * showed it in a textarea and posted it back; that panel is gone, because a
+ * review sitting underneath the transcript is not where anybody was looking. See
+ * `commitWorkingTree` for what replaced it and what that costs.
  */
-app.post("/api/projects/:id/conversations/:sessionId/commit", async (req, reply) => {
-  const { id, sessionId } = req.params as { id: string; sessionId: string }
+app.post("/api/projects/:id/commit", async (req, reply) => {
+  const { id } = req.params as { id: string }
 
   const project = await getProject(id)
   if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-  const found = await reviewable(project, sessionId, reply)
-  if (!found) return
+
+  const body = (req.body ?? {}) as { sessionId?: unknown; force?: unknown }
+  // Anything that is not a non-empty string is no attribution, including the
+  // `null` the browser sends when no chat is open. A session id off the wire
+  // only ever reaches a trailer and a lookup, so it needs no more shape than
+  // this.
+  const sessionId = typeof body.sessionId === "string" && body.sessionId ? body.sessionId : null
+  const force = body.force === true
+
+  // Committing underneath a working agent races its next write, and the diff
+  // would be a half-finished turn. `hold` refuses the whole project below; this
+  // says the narrower case in the conversation's own words before it gets there.
+  if (sessionId && chat.turnForSession(sessionId)) {
+    return reply.code(409).send({ message: "a turn is still in flight for this conversation" })
+  }
 
   // What the work was asked for, so the drafter can tell intent from incident.
   // The conversation's opening message, now that there is no backlog row to
   // carry it — which is the better source anyway: it is what you actually typed
-  // rather than a line somebody summarised it into.
-  const opening = (await listConversations(project)).find((c) => c.sessionId === sessionId)
+  // rather than a line somebody summarised it into. With no conversation there
+  // is no intent to give it, and the diff is the whole of what it has to go on.
+  const opening = sessionId
+    ? (await listConversations(project)).find((c) => c.sessionId === sessionId)
+    : undefined
   // Read on the press rather than cached from when the project was added: the
   // checks live in the repository, so a run that added one has changed the gate
   // it is about to be measured by, and reading a copy from boot would apply the
   // old gate to the diff that changed it.
   const doc = await readProjectDoc(project.root)
-  const force = (req.body as { force?: unknown } | null)?.force === true
   try {
     // Throws if another conversation holds the checkout, with that
-    // conversation's name in it. `reviewable` has already refused the narrower
-    // case — this one's own turn still running.
+    // conversation's name in it.
     const runId = chat.hold({
       project,
       sessionId,
-      text: "committing this conversation's work",
+      text: "committing what is uncommitted",
       model: CONFIG.helperModel,
       work: (run) =>
-        commitConversation({
+        commitWorkingTree({
           project,
           sessionId,
-          checkpoint: found.checkpoint,
           request: opening?.firstPrompt ?? "",
           verify: doc.verify,
           force,
@@ -608,16 +614,22 @@ app.post("/api/projects/:id/chat", async (req, reply) => {
   if (!project) return reply.code(404).send(notFound(`no project ${id}`))
 
   /**
-   * One conversation's work is committed before the next one begins.
+   * The tree is committed before the next conversation begins.
    *
    * Not tidiness. Every conversation measures its diff against a checkpoint
    * taken when it started, so a chat opened on top of uncommitted work inherits
    * that work as its baseline — and when the two touch the same file, git cannot
-   * separate them again and neither review can be honest about what it is
-   * committing. Refusing here is what keeps `mixed` empty in the ordinary case.
+   * separate them again, so no reading of what THIS chat did can be honest.
+   * Refusing here is what keeps `mixed` empty in the ordinary case.
+   *
+   * The way out is the rail's commit button, which reads this same list and
+   * takes all of it. That is not a detail: this refusal is only fair if the
+   * button that clears it is measured on exactly what is being refused, and for
+   * a long time it was not — it committed a conversation's work, so a tree
+   * dirtied by an editor was refused here and uncommittable there.
    *
    * Only for a NEW conversation. Refusing a follow-up would be the opposite of
-   * the rule: the way out of this state is to finish the chat you are in.
+   * the rule: finishing the chat you are in is one of the ways out.
    *
    * A repo that cannot be read at all lets the message through rather than
    * blocking it — the exception to fail-closed, because the very next thing this
@@ -632,8 +644,8 @@ app.post("/api/projects/:id/chat", async (req, reply) => {
       return reply.code(409).send({
         message:
           `${n} uncommitted file${n === 1 ? "" : "s"} on ${outstanding.branch ?? "this checkout"}. ` +
-          "Commit from the conversation that made them — the commit button beside send does it in " +
-          "one press — or commit them yourself if they are not aide's.",
+          "Press commit in the rail on the right — it takes everything in that list, whether or " +
+          "not a chat made it — or commit them yourself.",
       })
     }
   }
