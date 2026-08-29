@@ -81,10 +81,12 @@ export async function listConversations(
   project: Project,
   /** Which conversations have a turn in flight. Injected so this file stays a reader. */
   activeRunFor: (sessionId: string) => string | null = () => null,
+  /** The turn running in this project right now, if any — see the fallback below. */
+  liveTurn: LiveTurn | null = null,
 ): Promise<ConversationSummary[]> {
   const sessions = await listSessions({ dir: project.root })
 
-  return sessions
+  const rows: ConversationSummary[] = sessions
     .map((s) => {
       const cwd = s.cwd ?? project.root
       const { kind, taskId } = classify(cwd)
@@ -106,7 +108,21 @@ export async function listConversations(
         lastMode: null,
       } satisfies ConversationSummary
     })
-    .sort((a, b) => b.lastModified - a.lastModified)
+
+  // A conversation the daemon is running must not be MISSING from the list of
+  // conversations, for the same reason it must not 404 — see `liveSummary`.
+  //
+  // `listSessions` drops any session it cannot name yet, and the browser asks
+  // for this list exactly once per new chat: the moment `run.started` announces
+  // the session id, which is about 64ms BEFORE the SDK has written the
+  // transcript that would name it. Lose that race and the chat being watched has
+  // no row in the list and nothing selected — for the rest of the turn, because
+  // the list is fetched on things you did rather than on a beat, and the next
+  // thing that asks is the run ending.
+  const live = liveTurn?.sessionId ? liveSummary(project, liveTurn.sessionId, liveTurn) : null
+  if (live && !rows.some((c) => c.sessionId === live.sessionId)) rows.push(live)
+
+  return rows.sort((a, b) => b.lastModified - a.lastModified)
 }
 
 export async function getConversation(
@@ -164,6 +180,8 @@ export async function getConversation(
 export interface LiveTurn {
   runId: string
   projectId: string
+  /** null until the SDK reports one — a brand new conversation has no id yet. */
+  sessionId: string | null
   startedAt: number
   /** The message that opened the turn. */
   text: string

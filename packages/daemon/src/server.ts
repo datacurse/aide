@@ -413,7 +413,9 @@ app.get("/api/projects/:id/conversations", async (req, reply) => {
     // Status is attached here rather than inside `listConversations`, which is
     // deliberately a reader of the SDK's session store and nothing else. The
     // board is aide's own bookkeeping and does not belong in it.
-    const list = await listConversations(project, activeChatRun)
+    // The lock is passed in so a chat whose first turn is in flight has a row
+    // even before the SDK has indexed a name for it — see the fallback there.
+    const list = await listConversations(project, activeChatRun, chat.holderFor(project.id))
     const statuses = await chatStatuses(project, list, liveChat)
     // Spend is attached here for the same reason status is: it is aide's own
     // bookkeeping, read out of aide's event logs, and `listConversations` is a

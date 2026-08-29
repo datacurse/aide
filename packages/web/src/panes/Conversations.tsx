@@ -1481,7 +1481,16 @@ export function ConversationPane({
           ref={scroller}
           className="relative flex-1 overflow-x-hidden overflow-y-auto px-3 py-2 font-mono text-xs leading-relaxed"
         >
-          {openSessionId && view === null && !error ? (
+          {/* Only when there is nothing on screen to keep. `view` is addressed
+              by session id, so a new chat's first turn arrives at a key that has
+              never been fetched: `run.started` names the session a few seconds
+              in, the pane follows it to that id, and the transcript you were
+              already watching was replaced by "Reading…" until a session-store
+              read came back — a full-pane wipe landing between the thinking and
+              the first word of the answer, which reads as the page reloading
+              under the turn. The live stream IS the conversation at that moment;
+              there is nothing to wait for. */}
+          {events.length === 0 && openSessionId && view === null && !error ? (
             <Empty>Reading…</Empty>
           ) : events.length === 0 ? (
             <Empty>
