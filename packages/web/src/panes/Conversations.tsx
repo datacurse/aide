@@ -202,9 +202,13 @@ function UnstartedRow({
         type="button"
         onClick={onDiscard}
         title="Discard this chat"
-        className="shrink-0 text-fg-dim opacity-0 group-hover:opacity-100 hover:text-err"
+        // Still hover-only, and still unfilled — discarding a row is not what
+        // you came to the list to do — but a real target rather than the size
+        // of the glyph: the ✕ was 12px, and the pixels either side of it were a
+        // miss that discarded nothing and cost a second to notice.
+        className="flex size-7 shrink-0 items-center justify-center text-fg-dim opacity-0 group-hover:opacity-100 hover:text-err"
       >
-        <X className="size-3" />
+        <X className="size-4" />
       </button>
       {/*
         Start it, in one press.
@@ -228,6 +232,13 @@ function UnstartedRow({
         them, and six faded triangles read as a list that has not loaded. Six
         padlocks read as one run holding everything, which is the truth, and the
         row wearing "has the repo" a few lines up is the one holding it.
+
+        A 36px square, filled, with a 20px glyph in it — the row's own height, so
+        the slot is a square and not a tall slot with a small triangle rattling
+        around in it. It was a hairline box 16px high, in fg-dim on a background
+        eight percent lighter than it, which made the one control that starts
+        work the hardest thing in the column both to see and to hit, and put it
+        a few pixels from the ✕ that throws the same row away.
       */}
       {written && (
         <button
@@ -237,13 +248,13 @@ function UnstartedRow({
           aria-disabled={blocked ? true : undefined}
           onClick={blocked ? undefined : onStart}
           title={blocked ?? "Start this chat — opens it and sends it"}
-          className={`flex h-4 shrink-0 items-center justify-center rounded-sm border px-1 text-[10px] leading-4 ${
+          className={`flex size-9 shrink-0 items-center justify-center rounded-sm border ${
             blocked
               ? `border-diff-del-fg/40 ${LOCKED}`
-              : "border-line text-fg-dim hover:border-ok hover:text-ok"
+              : "border-line-soft bg-input text-fg-muted hover:border-ok hover:bg-raised hover:text-ok"
           }`}
         >
-          {blocked ? <Lock className="size-2.5" /> : <Play className="size-2.5" />}
+          {blocked ? <Lock className="size-5" /> : <Play className="size-5" />}
         </button>
       )}
     </div>
@@ -415,18 +426,19 @@ function DoneCheck({ done, onToggle }: { done: boolean; onToggle: () => void }) 
       type="button"
       onClick={onToggle}
       title={done ? "Served its purpose. Click to reopen it." : "Mark this chat done"}
-      // The same 4-high bordered box the ▶ on a parked chat wears, because the
-      // two are the same slot at two ages — see `UnstartedRow`.
-      className={`mt-0.5 flex h-4 shrink-0 items-center justify-center rounded-sm border px-1 ${
+      // The same 36px filled square the ▶ on a parked chat wears, because the
+      // two are the same slot at two ages — see `UnstartedRow`, which is also
+      // where the size is argued.
+      className={`flex size-9 shrink-0 items-center justify-center rounded-sm border bg-input ${
         done
           ? "border-ok/60 text-ok"
           : // `text-transparent` rather than `invisible`: the tick is still
             // there to be hovered, and `currentColor` on the icon means it
             // vanishes with the text colour it inherits.
-            "border-line text-transparent group-hover:text-fg-dim hover:border-fg-dim"
+            "border-line-soft text-transparent group-hover:text-fg-muted hover:border-fg-muted"
       }`}
     >
-      <Check className="size-2.5" />
+      <Check className="size-5" />
     </button>
   )
 }
@@ -494,7 +506,7 @@ function ChatRow({
   const meta = selected ? "text-white/70" : "text-fg-dim"
   return (
     <div
-      className={`group flex w-full items-start gap-2 px-3 py-1.5 font-sans ${
+      className={`group flex w-full items-center gap-2 px-3 py-1.5 font-sans ${
         selected ? "bg-active text-white" : "text-fg-muted hover:bg-hover"
       }`}
     >

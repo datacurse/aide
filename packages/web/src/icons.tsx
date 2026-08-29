@@ -37,7 +37,7 @@ function Icon({ d, className }: { d: string; className?: string }) {
 
 type IconProps = { className?: string }
 
-/** `lock-simple`, not `lock`: at 10px the keyhole on the full one is a smudge. */
+/** `lock-simple`, not `lock`: at 12px the keyhole on the full one is a smudge. */
 export function Lock({ className }: IconProps) {
   return (
     <Icon
