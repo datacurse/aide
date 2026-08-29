@@ -66,7 +66,14 @@ to review the work without leaving.
 
 - Being an IDE. No go-to-definition, no blame, no extension host. Reading and
   reviewing code in aide is in scope; replacing the editor is not.
-- A git graph. Fun, and the least useful thing on the list.
+- A repository browser. The rail draws the last thirty commits, because a
+  screen that could not say which commit was the last one left you unable to
+  tell a clean tree on top of your own work from a clean tree on top of
+  somebody else's. Nothing in that list opens: no commit view, no file tree, no
+  diff of an old change. A diff is read in the conversation that produced it,
+  where there is a description and a checkpoint to measure it against. This
+  used to say "a git graph, and the least useful thing on the list" — the graph
+  turned out to be the cheap half and the browser the expensive one.
 - Supporting a database until run-history queries actually hurt.
 - Multi-user, remote access, or anything that assumes this is not running on
   your own machine behind loopback.

@@ -51,14 +51,6 @@ export interface GitOverview {
   unborn: boolean
 }
 
-/** Counts only. The list column needs a badge, not a file list. */
-export interface GitDirty {
-  staged: number
-  unstaged: number
-  untracked: number
-  conflicted: number
-}
-
 /**
  * A name pointing at a commit.
  *
@@ -146,12 +138,34 @@ export interface GitLog {
   graph: GitGraphRow[]
   /** Widest point of the graph, so the column is reserved once and never jitters. */
   lanes: number
+  /**
+   * Sha → how far along the checkout's first-parent line that commit is. The
+   * first commit is 1 and HEAD's number is how many there are.
+   *
+   * A map rather than a field on `GitCommit`, and absence rather than null,
+   * because there is exactly one reason a commit here has no number: it arrived
+   * on a branch and is not a step along the line being counted. A field would
+   * have to mean that AND "nobody computed one" — `commitDetail` answers with a
+   * `GitCommit` too, and it counts nothing.
+   *
+   * Unlike `lanes`, this is NOT a property of the page: ask for ten commits or
+   * five hundred and a given commit's number is the same, which is the whole
+   * point of it. A number that slid down the page every time you committed
+   * would be a row index wearing a progress counter's clothes.
+   */
+  numbers: Record<string, number>
 }
 
-/** Everything the list column needs, in one request, cheap enough to poll. */
-export interface GitSummary {
+/**
+ * Where HEAD is, and the page of history behind it.
+ *
+ * Carries no file counts, and that is the point of it being its own type: what
+ * is uncommitted is `GitPending`, which the same rail polls on a faster beat.
+ * A count here would buy a second `status --untracked-files=all` — the most
+ * expensive call git makes on a big tree — for a number already on the screen.
+ */
+export interface GitHistory {
   overview: GitOverview
-  dirty: GitDirty
   log: GitLog
 }
 

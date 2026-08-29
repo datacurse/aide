@@ -28,6 +28,9 @@ record. They are all rows in the same list, in that order of urgency.
 | The chat list, the capture box, the done tick | `packages/web/src/panes/Conversations.tsx` |
 | Unstarted chats, drafts, pasted images (IndexedDB) | `packages/web/src/drafts.ts` |
 | An event log rendered as a conversation | `packages/web/src/panes/Transcript.tsx` |
+| What is left to commit, and the history under it | `packages/web/src/panes/Pending.tsx` |
+| Where the graph's lines go, and the SVG that draws them | `packages/web/src/graph.ts`, `packages/web/src/GitGraph.tsx` |
+| Branch, history and lanes, read off the repo | `packages/daemon/src/repo.ts` |
 | The folder dialog behind `add`, and why it is the daemon's | `packages/daemon/src/picker.ts` |
 | One agent per project, the lock, warm sessions | `packages/daemon/src/chat.ts` |
 | The SDK call, the system prompt, permissions | `packages/daemon/src/agent.ts` |
@@ -44,8 +47,16 @@ Decisions already taken, which are not gaps to fill:
   one at a time. See the brief for why.
 - **No merge, no `land`.** Recoverability is the checkpoint, not an unmerged
   branch.
-- **No repository browser** — no history list, no commit view, no graph. A diff
-  is read in the conversation that produced it.
+- **A history list, but no repository browser.** The uncommitted rail's lower
+  half draws the last thirty commits, the graph beside them and where HEAD is
+  standing, because nothing on screen said which commit was the last one. No row
+  in it opens anything: no commit view, no file tree, no diff of an old change. A
+  diff is read in the conversation that produced it.
+- **A commit's number counts the branch, not the page.** `GitLog.numbers` is how
+  far along the first-parent line each commit is — the first is 1, HEAD's is how
+  many there are — so it means the same thing tomorrow. Numbering rows 1..30 from
+  the top of the page is the obvious cheap version and is wrong: it renumbers
+  every commit in the project every time you make one.
 - **No capability file.** There was a model-maintained `.aide/spec.md`; it cost
   more wall-clock than the rest of a commit, nothing read it, and it corrupted
   itself. What the project does is discoverable by reading the code, and what it

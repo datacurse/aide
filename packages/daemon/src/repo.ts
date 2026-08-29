@@ -3,7 +3,6 @@ import { join } from "node:path"
 import type {
   GitCommit,
   GitCommitDetail,
-  GitDirty,
   GitFileChange,
   GitFileState,
   GitGraphRow,
@@ -143,19 +142,6 @@ export function parseStatus(z: string): GitFileChange[] {
     })
   }
   return files
-}
-
-export function countDirt(files: GitFileChange[]): GitDirty {
-  const dirty: GitDirty = { staged: 0, unstaged: 0, untracked: 0, conflicted: 0 }
-  for (const f of files) {
-    if (f.code === "??") dirty.untracked++
-    else if (isConflicted(f.code)) dirty.conflicted++
-    else {
-      if (f.staged) dirty.staged++
-      if (f.unstaged) dirty.unstaged++
-    }
-  }
-  return dirty
 }
 
 export async function status(root: string): Promise<GitFileChange[]> {
@@ -418,6 +404,50 @@ export function buildGraph(commits: GitCommit[]): { graph: GitGraphRow[]; lanes:
   return { graph, lanes }
 }
 
+/**
+ * How far along the checkout's own line each commit on the page is.
+ *
+ * The number a human means by "how far have I got": the first commit is 1, HEAD
+ * is however many there are, and a commit keeps its number for as long as the
+ * history behind it is not rewritten. That stability is the entire requirement
+ * — a page numbered 1 to 30 from the top renumbers every commit in the project
+ * every time you make one, which is a row index rather than something to track
+ * progress against.
+ *
+ * The first-parent line rather than `rev-list --count <sha>` per commit. That is
+ * the exact answer to "how many commits can this one reach", and it costs a
+ * process per row per poll to get; the two agree along a mainline anyway. Where
+ * they part is a commit that arrived on a branch, and one of those gets no
+ * number at all rather than a plausible wrong one — it is not a step along the
+ * line being counted, and the UI leaves its column blank.
+ *
+ * Two calls rather than one long list: `--count` walks the whole line, because
+ * the newest commit's number has to be how many there ARE and not how many were
+ * asked for, and the second is bounded by the page so a ten-thousand-commit repo
+ * does not send its entire history down the wire to number thirty rows.
+ */
+async function firstParentNumbers(root: string, limit: number): Promise<Record<string, number>> {
+  const counted = await gitOr("", () =>
+    git(root, ["rev-list", "--count", "--first-parent", "HEAD"]),
+  )
+  const total = Number(counted.trim())
+  // A repo with no commits counts nothing, and there is nothing to number.
+  if (!Number.isInteger(total) || total <= 0) return {}
+
+  const line = await gitOr("", () =>
+    git(root, ["rev-list", "--first-parent", `-n${limit}`, "HEAD"]),
+  )
+  const numbers: Record<string, number> = {}
+  line
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .forEach((sha, i) => {
+      numbers[sha] = total - i
+    })
+  return numbers
+}
+
 export async function log(root: string, limit: number): Promise<GitLog> {
   // `--topo-order` because the default is date order, and date order interleaves
   // two branches by when someone happened to commit — drawing a line that
@@ -428,16 +458,31 @@ export async function log(root: string, limit: number): Promise<GitLog> {
   //
   // One extra, so "is there more history" is an answer rather than a guess made
   // from whether the page came back full.
-  const out = await gitOr("", () =>
-    git(root, ["log", `-n${limit + 1}`, "--topo-order", "--decorate=full", FORMAT, "HEAD", "--branches"]),
-  )
+  //
+  // The numbering is asked for alongside rather than after: it reads different
+  // refs and shares nothing with the page, so making it wait would spend a
+  // round trip to Windows' process table for no ordering that matters.
+  const [out, numbers] = await Promise.all([
+    gitOr("", () =>
+      git(root, [
+        "log",
+        `-n${limit + 1}`,
+        "--topo-order",
+        "--decorate=full",
+        FORMAT,
+        "HEAD",
+        "--branches",
+      ]),
+    ),
+    firstParentNumbers(root, limit),
+  ])
   const all = out.split("\n").map(parseCommit).filter((c): c is GitCommit => c !== null)
   const commits = all.slice(0, limit)
   // Built from the page rather than from `all`: the one extra commit exists to
   // answer "is there more", and letting it open a lane would draw a line for a
   // row that is not on the screen.
   const { graph, lanes } = buildGraph(commits)
-  return { commits, more: all.length > limit, graph, lanes }
+  return { commits, more: all.length > limit, graph, lanes, numbers }
 }
 
 /**

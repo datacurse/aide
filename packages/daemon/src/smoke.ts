@@ -920,6 +920,53 @@ console.log("\nreading the repository")
   await git(root, ["checkout", "--", "app.ts"])
 }
 
+console.log("\nnumbering the history")
+{
+  // The number beside a commit is the one thing on that row a human tracks
+  // across days, so what it must not be is the row's position on the page —
+  // that slides down by one for every commit made after it, and a progress
+  // counter that renumbers the past counts nothing.
+  const page = await readLog(root, 50)
+  const total = Number((await git(root, ["rev-list", "--count", "--first-parent", "HEAD"])).trim())
+  const firstEver = (await git(root, ["rev-list", "--max-parents=0", "HEAD"])).trim().split("\n")[0]
+  // Off the page rather than out of `rev-parse HEAD^2`: the merge's parents are
+  // already on the wire, and the second of them is the commit that arrived on
+  // the branch.
+  const arrived = page.commits.find((c) => c.sha === landed.sha)?.parents[1]
+
+  check(
+    "HEAD's number is how many there are",
+    page.numbers[landed.sha] === total,
+    `${page.numbers[landed.sha]} of ${total}`,
+  )
+  check("the first commit ever made is 1", page.numbers[firstEver ?? ""] === 1)
+
+  const mainline = (await git(root, ["rev-list", "--first-parent", "HEAD"]))
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+  check(
+    "every step down the line is one lower",
+    mainline.every((sha, i) => page.numbers[sha] === total - i),
+    `${mainline.length} commits on the line`,
+  )
+
+  check(
+    "a commit that arrived on a branch has none",
+    arrived !== undefined && page.numbers[arrived] === undefined,
+    "a plausible wrong number is worse than a blank column",
+  )
+
+  // The assertion the whole design is for. Asked for three rows instead of
+  // fifty, a position-derived number would call this commit 1.
+  const short = await readLog(root, 3)
+  check(
+    "a shorter page numbers them the same",
+    short.numbers[landed.sha] === total,
+    `${short.numbers[landed.sha]} either way`,
+  )
+}
+
 console.log("\nthe drawn graph")
 {
   // The half of the history view nobody can eyeball. A lane is a number, and a

@@ -6,6 +6,7 @@ import type {
   ConversationSummary,
   EffortLevel,
   FolderPick,
+  GitHistory,
   GitPending,
   Health,
   PlanUsage,
@@ -14,7 +15,7 @@ import type {
   RunEvent,
 } from "@aide/protocol"
 
-export type { ConversationSummary, FolderPick, GitPending, Health, PlanUsage, Receipt }
+export type { ConversationSummary, FolderPick, GitHistory, GitPending, Health, PlanUsage, Receipt }
 
 /**
  * A conversation, plus the two things aide knows about it that the session file
@@ -201,4 +202,15 @@ export const api = {
    * patch, no log, so the always-visible rail can poll it on the app's beat.
    */
   gitPending: (projectId: string) => call<GitPending>(`/api/projects/${projectId}/git/pending`),
+
+  /**
+   * Where HEAD is, and the commits behind it.
+   *
+   * The rail's other half, and on a beat of its own: history only moves when
+   * somebody commits, so asking as often as the uncommitted list is asked would
+   * be a `git log` and four `rev-parse`s a second for an answer that changes a
+   * few times an hour.
+   */
+  gitHistory: (projectId: string, limit: number) =>
+    call<GitHistory>(`/api/projects/${projectId}/git?limit=${limit}`),
 }

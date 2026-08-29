@@ -301,6 +301,14 @@ app.get("/api/projects/:id/branch", async (req, reply) => {
 const DEFAULT_LOG = 50
 const MAX_LOG = 500
 
+/**
+ * Where HEAD is and what is behind it — the lower half of the uncommitted rail.
+ *
+ * Deliberately without a file count beside the log, though it would be one more
+ * line here: the rail reads `/git/pending` on the app's own beat and already has
+ * that number, and the call behind it is the priciest one git makes on a large
+ * tree. Two beats, two questions, and neither pays for the other's answer.
+ */
 app.get("/api/projects/:id/git", async (req, reply) => {
   const { id } = req.params as { id: string }
   const { limit } = req.query as { limit?: string }
@@ -311,7 +319,6 @@ app.get("/api/projects/:id/git", async (req, reply) => {
   try {
     return {
       overview: await repo.overview(project.root),
-      dirty: repo.countDirt(await repo.status(project.root)),
       log: await repo.log(project.root, n),
     }
   } catch (err) {
@@ -326,12 +333,13 @@ app.get("/api/projects/:id/git", async (req, reply) => {
 /**
  * What is still uncommitted, cheap enough to poll from an always-visible rail.
  *
- * Separate from `/git` above rather than folded into it: that one builds a
- * history graph nothing in the UI asks for any more, this one is read on every
- * beat from every pane. It is also the exact question the new-conversation
- * gate below asks, and the two must never be able to disagree — the indicator
- * saying "clean" while the daemon refuses to start a chat would be unexplainable
- * from the screen.
+ * Separate from `/git` above rather than folded into it, and the split is by
+ * lifetime rather than by subject: history moves when someone commits, this
+ * moves on every keystroke an agent makes, and one route would drag a fifty
+ * commit graph along behind an indicator that has to stay cheap. It is also the
+ * exact question the new-conversation gate below asks, and the two must never be
+ * able to disagree — the indicator saying "clean" while the daemon refuses to
+ * start a chat would be unexplainable from the screen.
  */
 app.get("/api/projects/:id/git/pending", async (req, reply) => {
   const { id } = req.params as { id: string }

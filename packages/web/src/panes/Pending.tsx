@@ -1,20 +1,39 @@
-import type { GitFileChange, GitFileState, GitPending } from "@aide/protocol"
+import { useEffect, useState } from "react"
+import type {
+  GitCommit,
+  GitFileChange,
+  GitFileState,
+  GitGraphRow,
+  GitLog,
+  GitOverview,
+  GitPending,
+  GitRef,
+} from "@aide/protocol"
+import { api, type GitHistory } from "../api.js"
+import { GraphCell, ROW_H, graphWidth } from "../GitGraph.js"
 import { Button, Empty, PaneHeader } from "../ui.js"
 
 /**
- * What the project has left to commit, and nothing else.
+ * What the project has left to commit, and the history it will land on.
  *
- * This used to sit under a `git` pane that also drew the history and the diffs.
- * The history went: reading a change belongs to the conversation that made it,
- * where there is a description and a checkpoint to measure against, so a second
- * copy beside a project-shaped page was one more place to look and no more
- * review. What could not go is this rail — see below.
+ * The rail is two readings of one repository, stacked in the order you ask them
+ * in: what is not committed yet, then what already is. It was only ever the
+ * first, and the second was missing in a way that is easy to state — nothing on
+ * screen said which commit was the last one, so "am I looking at a clean tree on
+ * top of my work, or on top of somebody else's" had no answer without a
+ * terminal.
  *
- * What stayed is the list and the one button that acts on it. There is still no
- * staging and no discard, and that is not an oversight: a commit here is the
- * whole of what is uncommitted, and anything narrower would be a second review
- * with no diff attached — and would leave files behind in a list whose being
- * empty is the condition for starting the next chat.
+ * What is still not here is a repository BROWSER. Nothing in the history is a
+ * link: no commit view, no file tree, no diff of an old change. Reading a diff
+ * belongs to the conversation that produced it, where there is a description and
+ * a checkpoint to measure it against — a second, project-shaped copy of the same
+ * change would be one more place to look and no more review. Orientation is a
+ * cheaper thing than that, and it is all this half is for.
+ *
+ * There is still no staging and no discard either: a commit here is the whole of
+ * what is uncommitted, and anything narrower would be a second review with no
+ * diff attached — and would leave files behind in a list whose being empty is
+ * the condition for starting the next chat.
  */
 
 /** Same palette VS Code uses in its own SCM view, so the colours are not a new language. */
@@ -45,13 +64,23 @@ const MARK: Record<GitFileState, string> = {
   unknown: "?",
 }
 
+/** A short line where the whole-pane `Empty` would be, now that it shares the rail. */
+function Note({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="shrink-0 px-3 py-2 font-sans text-[11px] leading-relaxed text-fg-dim">
+      {children}
+    </p>
+  )
+}
+
 /**
- * The uncommitted-work indicator.
+ * The uncommitted-work indicator, and the history under it.
  *
- * On screen at all times, beside every pane, because it is the one fact that
- * decides what you are allowed to do next: a new conversation is refused while
- * this list has anything in it. A status you have to go to a tab to read cannot
- * carry that job — you would meet the refusal before you met the reason.
+ * On screen at all times, beside every pane, because the top half is the one
+ * fact that decides what you are allowed to do next: a new conversation is
+ * refused while that list has anything in it. A status you have to go to a tab
+ * to read cannot carry that job — you would meet the refusal before you met the
+ * reason.
  *
  * The commit button is here, next to the list of what it would take, and it
  * takes exactly this list. That sentence used to be false: it committed a
@@ -124,50 +153,60 @@ export function PendingRail({
 
       {!projectId ? (
         <Empty>Select a project.</Empty>
-      ) : pending === null ? (
-        <Empty>Reading the working tree…</Empty>
-      ) : files.length === 0 ? (
-        <Empty>
-          Nothing uncommitted on {pending.branch ?? "this checkout"}. A new chat can start.
-        </Empty>
       ) : (
         <>
-          <div className="shrink-0 border-b border-line px-3 py-2 font-sans text-[11px] leading-relaxed text-fg-dim">
-            {/* Said here rather than only at the refusal. Meeting the rule for
-                the first time as an error, after typing a message, is how a
-                deliberate constraint reads as a bug. */}
-            <span className="text-warn">
-              {files.length} file{files.length === 1 ? "" : "s"}
-            </span>{" "}
-            uncommitted on {pending.branch ?? "a detached checkout"}. Commit this work before
-            starting another chat.
-            {verifyRefused && (
-              <div className="mt-2 text-warn">
-                A check failed, so nothing was committed. It is written out beside this rail — read
-                it, then press again to commit anyway.
+          {pending === null ? (
+            <Note>Reading the working tree…</Note>
+          ) : files.length === 0 ? (
+            <Note>
+              Nothing uncommitted on {pending.branch ?? "this checkout"}. A new chat can start.
+            </Note>
+          ) : (
+            <>
+              <div className="shrink-0 border-b border-line px-3 py-2 font-sans text-[11px] leading-relaxed text-fg-dim">
+                {/* Said here rather than only at the refusal. Meeting the rule for
+                    the first time as an error, after typing a message, is how a
+                    deliberate constraint reads as a bug. */}
+                <span className="text-warn">
+                  {files.length} file{files.length === 1 ? "" : "s"}
+                </span>{" "}
+                uncommitted on {pending.branch ?? "a detached checkout"}. Commit this work before
+                starting another chat.
+                {verifyRefused && (
+                  <div className="mt-2 text-warn">
+                    A check failed, so nothing was committed. It is written out beside this rail —
+                    read it, then press again to commit anyway.
+                  </div>
+                )}
+                <div className="mt-2">
+                  <Button
+                    tone={verifyRefused ? "danger" : "primary"}
+                    onClick={onCommit}
+                    disabled={committing || commitBlocked !== null}
+                    title={
+                      commitBlocked ??
+                      (verifyRefused
+                        ? "Commit this work even though a check failed. The failure stays in the log."
+                        : `Draft a message from these ${files.length} file${files.length === 1 ? "" : "s"} and commit all of them. Both happen in the pane beside this one, where you can watch them.`)
+                    }
+                  >
+                    {committing ? "committing…" : verifyRefused ? "commit anyway" : "commit"}
+                  </Button>
+                </div>
               </div>
-            )}
-            <div className="mt-2">
-              <Button
-                tone={verifyRefused ? "danger" : "primary"}
-                onClick={onCommit}
-                disabled={committing || commitBlocked !== null}
-                title={
-                  commitBlocked ??
-                  (verifyRefused
-                    ? "Commit this work even though a check failed. The failure stays in the log."
-                    : `Draft a message from these ${files.length} file${files.length === 1 ? "" : "s"} and commit all of them. Both happen in the pane beside this one, where you can watch them.`)
-                }
-              >
-                {committing ? "committing…" : verifyRefused ? "commit anyway" : "commit"}
-              </Button>
-            </div>
-          </div>
-          <div className="flex-1 overflow-auto py-1">
-            {files.map((f) => (
-              <PendingRow key={`${f.code} ${f.path}`} file={f} />
-            ))}
-          </div>
+              {/* Sized to its contents and capped, rather than given the top half
+                  outright: a run that touched sixty files must not push the
+                  history off the bottom of the rail, and two uncommitted files
+                  must not hold half a column of nothing open to prove it. */}
+              <div className="max-h-[45%] shrink-0 overflow-auto py-1">
+                {files.map((f) => (
+                  <PendingRow key={`${f.code} ${f.path}`} file={f} />
+                ))}
+              </div>
+            </>
+          )}
+
+          <History projectId={projectId} />
         </>
       )}
     </aside>
@@ -196,5 +235,276 @@ function PendingRow({ file }: { file: GitFileChange }) {
         {MARK[state]}
       </span>
     </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// History
+// ---------------------------------------------------------------------------
+
+/**
+ * Its own beat, and a slow one. History moves when somebody commits, which is a
+ * few times an hour; the list above it moves whenever an agent saves a file. One
+ * poll for both would mean a `git log` and four `rev-parse`s every 1.5 seconds
+ * to re-read an answer that had not changed.
+ *
+ * Slow, but still a poll rather than a refresh triggered by aide's own commit
+ * button. Commits also arrive from the terminal the human has open next to this,
+ * and a history that only updated when aide was the one committing would be
+ * wrong exactly when they had gone looking for it.
+ */
+const POLL_MS = 4000
+
+/**
+ * How much history the rail asks for.
+ *
+ * A page rather than a window with a pager under it. This is here to answer
+ * "where am I", and thirty commits is several days of a project moving; going
+ * further back is reading history rather than getting your bearings, and that is
+ * what the terminal is for.
+ */
+const PAGE = 30
+
+function ago(iso: string): string {
+  const t = new Date(iso).getTime()
+  if (!Number.isFinite(t)) return ""
+  const s = Math.round((Date.now() - t) / 1000)
+  if (s < 60) return "just now"
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`
+  if (s < 86_400) return `${Math.floor(s / 3600)}h ago`
+  if (s < 2_592_000) return `${Math.floor(s / 86_400)}d ago`
+  return new Date(t).toLocaleDateString()
+}
+
+/**
+ * What the project has already committed, newest first.
+ *
+ * Polls on its own, unlike the half above it, which App owns because two things
+ * read it. Exactly one thing reads this, and it is this — so the fetch lives
+ * where it is used.
+ */
+function History({ projectId }: { projectId: string }) {
+  const [history, setHistory] = useState<GitHistory | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let live = true
+    // Cleared as the project changes rather than when the next answer lands.
+    // Holding the old page for a beat would put another repository's commits
+    // under this project's name, which is the one thing a rail you are reading
+    // to find out where you are must never do.
+    setHistory(null)
+    setError(null)
+    const load = async () => {
+      try {
+        const next = await api.gitHistory(projectId, PAGE)
+        if (!live) return
+        setHistory(next)
+        setError(null)
+      } catch (err) {
+        if (!live) return
+        setError(err instanceof Error ? err.message : String(err))
+      }
+    }
+    void load()
+    const timer = setInterval(() => void load(), POLL_MS)
+    return () => {
+      live = false
+      clearInterval(timer)
+    }
+  }, [projectId])
+
+  return (
+    <section className="flex min-h-0 flex-1 flex-col border-t border-line">
+      <div className="flex h-7 shrink-0 items-center gap-2 px-3">
+        <h3 className="shrink-0 font-sans text-[11px] font-semibold tracking-wide text-fg-muted uppercase">
+          history
+        </h3>
+        {history && <Upstream overview={history.overview} />}
+      </div>
+
+      {/* A failed poll never blanks the page behind it: this refreshes against a
+          repo an agent may be writing into, so one hiccup taking the history
+          away would be a far commoner sight than an actual outage. */}
+      {error && <div className="shrink-0 px-3 pb-1 font-sans text-[11px] text-err">{error}</div>}
+
+      {!history ? (
+        error ? null : <Note>Reading the history…</Note>
+      ) : history.log.commits.length === 0 ? (
+        <Note>No commits yet. The first one starts the history.</Note>
+      ) : (
+        <Commits log={history.log} head={history.overview.head} />
+      )}
+    </section>
+  )
+}
+
+function Commits({ log, head }: { log: GitLog; head: string | null }) {
+  // Which row the working tree is standing on. Matched on the abbreviation git
+  // itself printed for both, so there is no guess about how many characters
+  // "short" means in this repo.
+  const headIndex = head ? log.commits.findIndex((c) => c.short === head) : -1
+  const rows = new Map<string, GitGraphRow>(log.graph.map((r) => [r.sha, r]))
+
+  return (
+    <div className="min-h-0 flex-1 overflow-auto pb-1">
+      {log.commits.map((c, i) => (
+        <CommitRow
+          key={c.sha}
+          commit={c}
+          // Looked up by sha rather than taken from graph[i]. The daemon sends
+          // them in the same order and the smoke test says so, but a commit is
+          // not allowed to vanish from a history view because a pairing was off
+          // by one — this way the worst case is a row with no line beside it.
+          row={rows.get(c.sha)}
+          lanes={log.lanes}
+          number={log.numbers[c.sha]}
+          head={i === headIndex}
+        />
+      ))}
+      {/* Said rather than left to be inferred from a list that stops. A page
+          that ends silently reads as "this is the whole repository", which on a
+          project older than thirty commits is simply false. */}
+      {log.more && (
+        <p
+          className="py-1 pr-3 font-sans text-[10px] text-fg-dim"
+          style={{ paddingLeft: graphWidth(log.lanes) + 16 }}
+        >
+          history continues past here
+        </p>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Where the branch stands against the remote it tracks.
+ *
+ * The branch NAME is not repeated here — the half above already says which one
+ * the uncommitted work is on, and a 16rem column cannot afford to say it twice.
+ * What this adds is the part nothing else on screen knows: how far the checkout
+ * has drifted from what has been pushed.
+ */
+function Upstream({ overview }: { overview: GitOverview }) {
+  const { branch, head, upstream, ahead, behind } = overview
+  const where = branch ?? `detached at ${head ?? "nothing"}`
+  const title = upstream
+    ? `${where}, against ${upstream}: ${ahead} ahead, ${behind} behind.\n${overview.root}`
+    : `${where}, tracking nothing. Nothing here has been pushed anywhere.\n${overview.root}`
+  return (
+    <span className="ml-auto flex min-w-0 items-center gap-1.5 font-sans text-[11px]" title={title}>
+      {ahead > 0 && <span className="shrink-0 text-diff-add-fg">↑{ahead}</span>}
+      {behind > 0 && <span className="shrink-0 text-warn">↓{behind}</span>}
+      <span className="min-w-0 truncate text-fg-dim">{upstream ?? "no upstream"}</span>
+    </span>
+  )
+}
+
+/**
+ * One commit.
+ *
+ * Fixed height, and that is structural rather than cosmetic: the graph beside it
+ * draws each line from the top edge of the row to the bottom edge, so the lines
+ * only meet if every row is exactly ROW_H tall. Anything here that could grow
+ * the box — a second line of refs, a subject that wraps — has to truncate
+ * instead.
+ *
+ * A div and not a button. There is nothing to open, and that is the boundary
+ * between this and the repository browser it is not: the diff for any of these
+ * is in the conversation that produced it.
+ */
+function CommitRow({
+  commit,
+  row,
+  lanes,
+  number,
+  head,
+}: {
+  commit: GitCommit
+  /** Missing only if the daemon and the browser disagree about the page. */
+  row: GitGraphRow | undefined
+  lanes: number
+  /**
+   * How far along the branch's own line this commit is — 1 for the first one
+   * ever made here. Undefined for a commit that arrived on a branch and is
+   * therefore not a step along it; see `GitLog.numbers`.
+   */
+  number: number | undefined
+  head: boolean
+}) {
+  const place =
+    number === undefined
+      ? "not a step along this branch's line, so it has no number"
+      : `commit ${number}`
+  return (
+    <div
+      title={`${commit.subject}\n\n${place} · ${commit.short} · ${commit.author} · ${new Date(commit.date).toLocaleString()}`}
+      style={{ height: ROW_H }}
+      className="flex w-full items-stretch gap-2 pr-3 pl-2 font-sans"
+    >
+      {row ? (
+        <GraphCell row={row} lanes={lanes} head={head} />
+      ) : (
+        <div className="shrink-0" style={{ width: graphWidth(lanes) }} />
+      )}
+      <div className="flex min-w-0 flex-1 flex-col justify-center">
+        {/* Subject first, badges after, the way VS Code lays out the same row:
+            the badges are `shrink-0`, so a long subject truncates and the name
+            of the branch — the thing you are scanning for — never does. */}
+        <div className="flex items-center gap-1">
+          <span
+            className={`min-w-0 flex-1 truncate text-[12px] leading-[15px] ${
+              head ? "text-fg" : "text-fg-muted"
+            }`}
+          >
+            {commit.subject}
+          </span>
+          {commit.refs.map((r) => (
+            <RefBadge key={`${r.kind}:${r.name}`} gitRef={r} />
+          ))}
+        </div>
+        <div className="flex items-baseline gap-2 text-[10px] leading-[13px] text-fg-dim">
+          {/* A column of its own, right-aligned and never dropped, so the digits
+              stack into something you can read a count off. Held open even when
+              a commit has no number: letting the row close the gap would shunt
+              every sha under it half a column left and turn the one list on
+              screen you scan vertically into a ragged edge. */}
+          <span className="min-w-[1.75rem] shrink-0 text-right font-mono text-fg-muted">
+            {number ?? ""}
+          </span>
+          <span className="shrink-0 font-mono">{commit.short}</span>
+          <span className="ml-auto shrink-0">{ago(commit.date)}</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * A branch, remote or tag, as a pill.
+ *
+ * The checked-out branch is not filtered out as "where you already are": with a
+ * graph it is the opposite, a line with nothing at the end of it is a line you
+ * cannot name, and which commit you are standing on is the first thing anyone
+ * looks for. A remote that has fallen behind is worth its own pill for the same
+ * reason — it draws the line under which everything has been pushed.
+ */
+// Not called `ref`: React 19 would pass it through as an ordinary prop, but a
+// component with a `ref` prop is a trap for whoever reads this next.
+function RefBadge({ gitRef: r }: { gitRef: GitRef }) {
+  const tone = r.head
+    ? "border-accent bg-accent text-white"
+    : r.kind === "tag"
+      ? "border-warn/50 text-warn"
+      : r.kind === "remote"
+        ? "border-line-soft text-fg-dim"
+        : "border-syn-var/40 text-syn-var"
+  return (
+    <span
+      title={`${r.kind}${r.head ? ", checked out" : ""}: ${r.name}`}
+      className={`max-w-[6rem] shrink-0 truncate rounded-sm border px-1 text-[10px] leading-[14px] ${tone}`}
+    >
+      {r.kind === "tag" ? `⌂ ${r.name}` : r.name}
+    </span>
   )
 }
