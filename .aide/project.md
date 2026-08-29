@@ -1,11 +1,21 @@
 ---
 # What has to pass before aide will write a commit here, in order. `CI=true` and
 # NO_COLOR are supplied, so these are written without the prefix CLAUDE.md shows.
+#
+# `unless:` names what a check has nothing to say about — it is skipped only when
+# EVERY changed path is under one of those paths. Stated as irrelevance rather
+# than coverage on purpose: a file nobody thought to list then makes a check run
+# when it need not have, which costs seconds, instead of silently not running,
+# which costs the gate. Kept coarse for the same reason — the finer this gets the
+# more of the gate rests on somebody's memory.
 verify:
   - pnpm typecheck
-  - pnpm smoke
-  - pnpm smoke:queue
-  - pnpm build
+  - run: pnpm smoke
+    unless: [packages/web, .aide, CLAUDE.md, README.md]
+  - run: pnpm smoke:queue
+    unless: [packages/web, .aide, CLAUDE.md, README.md]
+  - run: pnpm build
+    unless: [packages/daemon, .aide, CLAUDE.md, README.md]
 ---
 
 # aide

@@ -170,6 +170,8 @@ type Line =
   | { kind: "commit-message"; key: string; message: string; model: string }
   | { kind: "stale"; key: string; supervised: boolean }
   | VerifyLine
+  /** A declared check the diff could not break. Shown, so the gate reads whole. */
+  | { kind: "verify-skipped"; key: string; command: string; reason: string }
 
 /**
  * A run must always end with a visible line saying how it ended. Without one, a
@@ -328,6 +330,14 @@ function toLines(events: RunEvent[], live?: LiveText | null): Line[] {
         break
       case "commit.landed":
         lines.push({ kind: "commit-landed", key: rowKey(e), sha: e.sha, paths: e.paths })
+        break
+      case "verify.skipped":
+        lines.push({
+          kind: "verify-skipped",
+          key: rowKey(e),
+          command: e.command,
+          reason: e.reason,
+        })
         break
       case "verify.started": {
         const line: VerifyLine = {
@@ -844,6 +854,16 @@ function renderLine(
   if (line.kind === "commit-landed") return <CommitLandedRow key={line.key} line={line} />
   if (line.kind === "stale") return <StaleRow key={line.key} supervised={line.supervised} />
   if (line.kind === "verify") return <VerifyRow key={line.key} line={line} />
+  if (line.kind === "verify-skipped")
+    return (
+      // Dimmed whole, including the command, so it reads as a row that is not
+      // going to happen rather than one still waiting its turn.
+      <p key={line.key} className="flex min-w-0 items-baseline gap-2 px-1 text-fg-dim">
+        <span>–</span>
+        <span className="min-w-0 truncate">{line.command}</span>
+        <span className="shrink-0">skipped · {line.reason}</span>
+      </p>
+    )
   if (line.kind === "checkpoint") return <CheckpointRow key={line.key} line={line} />
   if (line.kind === "thinking")
     return (

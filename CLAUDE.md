@@ -83,6 +83,12 @@ They are independent (each smoke builds its own throwaway repo; only `build`
 writes into the tree), so that is one round trip and one wall clock rather than
 four of each. Measured: 36s together against 95s plus four round trips apart.
 
+The commit gate routes the same way, from `unless:` in `.aide/project.md`: a
+check is skipped when every path in the commit is under something it declares
+irrelevant. So a web-only commit runs `typecheck` and `build` and says on the
+transcript why it skipped the other two. Skipped checks are shown, not omitted —
+a gate that quietly shrinks is indistinguishable from one that broke.
+
 One command per Bash *call* — no pipes into another command, no `&&`, no `$( )`.
 That is not one call per message: independent calls belong in the same message.
 Use `pnpm --filter @aide/daemon <script>` rather than

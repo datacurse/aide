@@ -31,6 +31,7 @@ import { restartDecision, type Health } from "@aide/protocol"
 import { staleVerdict } from "./source.js"
 import { runCheck, runChecks } from "./verify.js"
 import { parseProjectDoc } from "@aide/protocol/node"
+import { planChecks } from "@aide/protocol"
 import {
   buildGraph,
   commitDetail,
@@ -642,8 +643,49 @@ console.log("\nthe checks a commit has to get past")
   check("a project that declares none has no gate", parseProjectDoc("# hi").verify.length === 0)
   check(
     "the commands come off the frontmatter in order",
-    parseProjectDoc("---\nverify:\n  - pnpm typecheck\n  - pnpm smoke\n---\nbody").verify.join("|") ===
-      "pnpm typecheck|pnpm smoke",
+    parseProjectDoc("---\nverify:\n  - pnpm typecheck\n  - pnpm smoke\n---\nbody")
+      .verify.map((v) => v.command)
+      .join("|") === "pnpm typecheck|pnpm smoke",
+  )
+  check(
+    "a bare command has no scope, so it always runs",
+    parseProjectDoc("---\nverify:\n  - pnpm typecheck\n---\n").verify[0]?.unless.length === 0,
+    "the old one-line form must keep meaning exactly what it meant",
+  )
+  {
+    const scoped = parseProjectDoc(
+      "---\nverify:\n  - run: pnpm smoke\n    unless: [packages/web, .aide/]\n---\n",
+    ).verify[0]
+    check("a scoped entry reads its command off `run:`", scoped?.command === "pnpm smoke")
+    check(
+      "and normalises the paths it is given",
+      scoped?.unless.join("|") === "packages/web|.aide",
+      "a trailing slash makes `packages/web/` and `packages/web` two different prefixes",
+    )
+  }
+  check(
+    "a scoped entry with no command throws",
+    (() => {
+      try {
+        parseProjectDoc("---\nverify:\n  - unless: [packages/web]\n---\n")
+        return false
+      } catch {
+        return true
+      }
+    })(),
+    "settings with nothing to run is a gate entry that quietly does nothing",
+  )
+  check(
+    "a path that could never match one throws",
+    (() => {
+      try {
+        parseProjectDoc("---\nverify:\n  - run: pnpm smoke\n    unless: [/etc]\n---\n")
+        return false
+      } catch {
+        return true
+      }
+    })(),
+    "an absolute path matches nothing, so the scope silently does nothing",
   )
   check(
     "the prose still reaches the agent",
@@ -662,6 +704,63 @@ console.log("\nthe checks a commit has to get past")
     })(),
     "a scalar where a list belongs would otherwise become an empty list, and every commit would sail through",
   )
+
+  // Which checks a given diff is worth running. Every assertion here is about
+  // the same property from a different angle: this may only ever skip a check
+  // the diff provably cannot break, because the alternative is a gate that
+  // silently stopped being one.
+  {
+    const gate = parseProjectDoc(
+      "---\nverify:\n" +
+        "  - pnpm typecheck\n" +
+        "  - run: pnpm smoke\n    unless: [packages/web, CLAUDE.md]\n" +
+        "  - run: pnpm build\n    unless: [packages/daemon]\n" +
+        "---\n",
+    ).verify
+    const ran = (paths: string[]) =>
+      planChecks(gate, paths).run.map((c) => c.command).join("|")
+
+    check(
+      "a web-only commit skips the git plumbing suite",
+      ran(["packages/web/src/App.tsx", "CLAUDE.md"]) === "pnpm typecheck|pnpm build",
+      "the whole point: twelve seconds not spent re-proving what nothing touched",
+    )
+    check(
+      "a daemon-only commit skips the bundle instead",
+      ran(["packages/daemon/src/chat.ts"]) === "pnpm typecheck|pnpm smoke",
+    )
+    check(
+      "ONE path outside the scope brings the check back",
+      ran(["packages/web/src/App.tsx", "packages/daemon/src/git.ts"]) ===
+        "pnpm typecheck|pnpm smoke|pnpm build",
+      "skipping needs every path covered, not most of them",
+    )
+    check(
+      "a path nobody anticipated counts as relevant",
+      ran(["packages/protocol/src/events.ts"]) === "pnpm typecheck|pnpm smoke|pnpm build",
+      "this is why `unless` names irrelevance: an unlisted file must not silence a check",
+    )
+    check(
+      "a prefix does not match a sibling that merely starts the same way",
+      ran(["packages/web-extras/thing.ts"]) === "pnpm typecheck|pnpm smoke|pnpm build",
+      "`packages/web` covering `packages/web-extras` would skip a check over a name collision",
+    )
+    check(
+      "an unscoped check is never skipped",
+      planChecks(gate, ["packages/web/src/App.tsx"]).run.some((c) => c.command === "pnpm typecheck"),
+    )
+    check(
+      "and a diff nobody could read runs everything",
+      ran([]) === "pnpm typecheck|pnpm smoke|pnpm build",
+      "\"we cannot tell what changed\" has to mean run them, or this becomes a way past the gate",
+    )
+    check(
+      "a skipped check says why, naming only the paths that did the covering",
+      planChecks(gate, ["packages/web/src/App.tsx"]).skipped[0]?.reason ===
+        "everything that changed is under packages/web",
+      "CLAUDE.md is in the scope but not in this diff; listing it would read as an explanation",
+    )
+  }
 
   const ok = await runCheck("git --version", root).done
   check("a passing check reports its exit code", ok.ok && ok.exitCode === 0, ok.output.slice(0, 40))

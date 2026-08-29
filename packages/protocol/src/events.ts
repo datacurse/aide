@@ -237,6 +237,16 @@ export type RunEventBody =
    */
   | { type: "verify.started"; command: string }
   /**
+   * A declared check this diff cannot break, and was not run.
+   *
+   * Logged rather than left out, and that is not politeness. The checks are the
+   * evidence half of a verified diff, so a transcript showing two green rows
+   * where the project declares four reads as a gate that has quietly shrunk —
+   * indistinguishable from one that broke. A skipped check says so, with the
+   * reason it was safe to skip, in the same list as the ones that ran.
+   */
+  | { type: "verify.skipped"; command: string; reason: string }
+  /**
    * One of the project's own checks, and what it did.
    *
    * The evidence half of "a verified diff". Until this existed, whether a change

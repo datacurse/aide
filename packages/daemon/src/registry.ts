@@ -49,9 +49,13 @@ const PROJECT_DOC = `---
 # the repo root. Uncomment and name this project's own. \`CI=true\` and NO_COLOR
 # are supplied for you, so write \`pnpm typecheck\`, not \`CI=true pnpm typecheck\`.
 #
+# A check can name paths it has nothing to say about, and is then skipped when
+# everything in the commit is under them — see the \`unless:\` line below.
+#
 # verify:
 #   - pnpm typecheck
-#   - pnpm test
+#   - run: pnpm test
+#     unless: [docs]
 ---
 
 # Project

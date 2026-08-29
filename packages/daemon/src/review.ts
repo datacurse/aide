@@ -1,4 +1,5 @@
-import type { ModelSpend, Project, RunDelta, RunEventBody } from "@aide/protocol"
+import type { ModelSpend, Project, RunDelta, RunEventBody, VerifyCheck } from "@aide/protocol"
+import { planChecks } from "@aide/protocol"
 import { commitRun, recentSubjects, treeChanges, withSessionTrailer } from "./changes.js"
 import { readCheckpoint } from "./checkpoint.js"
 import { CONFIG } from "./config.js"
@@ -78,7 +79,7 @@ export interface CommitWorkingTreeOptions {
   /** What the work was asked for, so the drafter can tell intent from incident. */
   request: string
   /** The project's own checks, from `.aide/project.md`. Empty means no gate. */
-  verify: readonly string[]
+  verify: readonly VerifyCheck[]
   /**
    * Commit even though the checks failed.
    *
@@ -147,7 +148,11 @@ export async function commitWorkingTree(
   // A tree that fails its own checks should cost the checks and nothing else —
   // and a message describing work that is about to be refused is a model call
   // spent on something nobody will read.
-  await verifyTree(opts)
+  //
+  // Handed the paths already read above, so which checks are worth running is
+  // decided from the same list the commit will stage. Reading the tree a second
+  // time to answer it would let the two disagree.
+  await verifyTree(opts, changes.paths)
 
   emit({ type: "commit.step", label: `writing the message · ${CONFIG.helperModel}` })
   const message = await draftCommitMessage({
@@ -201,12 +206,26 @@ export async function commitWorkingTree(
  * do not tell me", when what it means is "I have read this and I am landing it
  * anyway" — and the log of a forced commit should say exactly what was wrong
  * with it at the time.
+ *
+ * `force` does NOT widen the plan either. A check the diff cannot break is not
+ * evidence you are choosing to ignore; it is evidence that was never relevant.
  */
-async function verifyTree(opts: CommitWorkingTreeOptions): Promise<void> {
+async function verifyTree(
+  opts: CommitWorkingTreeOptions,
+  changed: readonly string[],
+): Promise<void> {
   const { emit } = opts
   if (opts.verify.length === 0) return
 
-  const { failed } = await runChecks(opts.verify, opts.project.root, {
+  const plan = planChecks(opts.verify, changed)
+  // Emitted before anything runs, so the list on screen is the whole declared
+  // gate from the first moment — four rows, some of them already answered.
+  for (const { command, reason } of plan.skipped) {
+    emit({ type: "verify.skipped", command, reason })
+  }
+  if (plan.run.length === 0) return
+
+  const { failed } = await runChecks(plan.run.map((c) => c.command), opts.project.root, {
     stopped: opts.stopped,
     // Both halves, so the transcript can draw the check while it runs rather
     // than only once it is over. A commit spends most of its wall clock in here.
