@@ -1185,6 +1185,29 @@ export function ConversationPane({
   }, [])
 
   /**
+   * Whether the last line is on screen — the other half of when the jump button
+   * is worth having, and the half that is true while nothing is running.
+   *
+   * A `scroll` listener and nothing else. Content growing under a view that is
+   * already at the end fires no scroll event, so this would go stale in exactly
+   * one case: a turn writing. That case is `busy`, which the button already
+   * asks about, so an observer here would buy nothing and re-open the door to
+   * the follower this pane deliberately does not have.
+   */
+  const [atEnd, setAtEnd] = useState(true)
+  useEffect(() => {
+    const el = scroller.current
+    if (!el) return
+    // A few pixels of slack: at fractional zoom the arithmetic lands half a
+    // pixel short of the end, and an exact test would leave the pill on screen
+    // for a view that is plainly already at the bottom.
+    const read = () => setAtEnd(el.scrollHeight - el.scrollTop - el.clientHeight < 24)
+    read()
+    el.addEventListener("scroll", read, { passive: true })
+    return () => el.removeEventListener("scroll", read)
+  }, [])
+
+  /**
    * The pane scrolls when you open it, and never again on its own.
    *
    * There used to be a follower: a ResizeObserver that pinned the view to the
@@ -1261,77 +1284,80 @@ export function ConversationPane({
         />
       )}
 
-      <div
-        ref={scroller}
-        className="relative flex-1 overflow-x-hidden overflow-y-auto px-3 py-2 font-mono text-xs leading-relaxed"
-      >
-        {openSessionId && view === null && !error ? (
-          <Empty>Reading…</Empty>
-        ) : events.length === 0 ? (
-          <Empty>
-            {projectId
-              ? "Say something. This runs in the project root and can edit it."
-              : "Select a project."}
-          </Empty>
-        ) : (
-          <>
-            {(truncating || view?.truncated) && (
-              <div className="mb-2 border-b border-line pb-2 text-center font-sans text-[11px] text-fg-dim">
-                {view?.truncated
-                  ? `showing the most recent of ${view.totalMessages} messages`
-                  : "earlier lines hidden"}
-                {truncating && (
-                  <button
-                    type="button"
-                    onClick={() => setShowAll(true)}
-                    className="ml-2 text-accent underline underline-offset-2"
-                  >
-                    show all
-                  </button>
-                )}
-              </div>
-            )}
-            <Transcript
-              events={events}
-              onPermission={busy ? answer : undefined}
-              live={typing}
-              tail={showAll ? undefined : VISIBLE_TAIL}
-              // So the question you are under can pin itself to the top edge of
-              // this box. It is the only thing in there that needs to know where
-              // the box's edge is.
-              scroller={scroller}
-            >
-              {busy && draftingCommit !== null && draft.text ? (
-                <CommitMessageDraft text={draft.text} model={draftingCommit} />
-              ) : null}
-            </Transcript>
-          </>
+      {/* The transcript and the button that jumps it to the end, in one
+          positioned box, because the button's whole job is to be in a corner of
+          THIS box. It used to hang off the pane instead, at `bottom-32` — a
+          guess at the height of the working bar plus the composer, and a guess
+          is wrong in both directions: short, and the pill parks on top of a
+          control, which is what it did to the working bar's right-hand end;
+          long, and it floats in the middle of the transcript. */}
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        <div
+          ref={scroller}
+          className="relative flex-1 overflow-x-hidden overflow-y-auto px-3 py-2 font-mono text-xs leading-relaxed"
+        >
+          {openSessionId && view === null && !error ? (
+            <Empty>Reading…</Empty>
+          ) : events.length === 0 ? (
+            <Empty>
+              {projectId
+                ? "Say something. This runs in the project root and can edit it."
+                : "Select a project."}
+            </Empty>
+          ) : (
+            <>
+              {(truncating || view?.truncated) && (
+                <div className="mb-2 border-b border-line pb-2 text-center font-sans text-[11px] text-fg-dim">
+                  {view?.truncated
+                    ? `showing the most recent of ${view.totalMessages} messages`
+                    : "earlier lines hidden"}
+                  {truncating && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAll(true)}
+                      className="ml-2 text-accent underline underline-offset-2"
+                    >
+                      show all
+                    </button>
+                  )}
+                </div>
+              )}
+              <Transcript
+                events={events}
+                onPermission={busy ? answer : undefined}
+                live={typing}
+                tail={showAll ? undefined : VISIBLE_TAIL}
+                // So the question you are under can pin itself to the top edge of
+                // this box. It is the only thing in there that needs to know where
+                // the box's edge is.
+                scroller={scroller}
+              >
+                {busy && draftingCommit !== null && draft.text ? (
+                  <CommitMessageDraft text={draft.text} model={draftingCommit} />
+                ) : null}
+              </Transcript>
+            </>
+          )}
+          {error && <p className="mt-2 font-sans text-[11px] text-err">{error}</p>}
+        </div>
+
+        {/* The only thing that moves the pane, and it moves it only when asked.
+            Shown while a turn is arriving, and whenever the end is off screen,
+            because this pane never scrolls itself: being scrolled up is a
+            resting state you can sit in for an hour, and gated on `busy` alone
+            the only way back to the end was dragging the scrollbar. */}
+        {(busy || !atEnd) && (
+          <button
+            type="button"
+            onClick={toBottom}
+            className="absolute right-4 bottom-3 z-10 rounded-full border border-line bg-chrome px-3 py-1 font-sans text-[11px] text-fg-muted shadow-lg hover:text-fg"
+          >
+            ↓ jump to latest
+          </button>
         )}
-        {error && <p className="mt-2 font-sans text-[11px] text-err">{error}</p>}
       </div>
 
-      {/* The only thing that moves the pane now, and only while there is
-          something arriving to move it to. */}
-      {busy && (
-        <button
-          type="button"
-          onClick={toBottom}
-          className="absolute right-6 bottom-32 z-10 rounded-full border border-line bg-chrome px-3 py-1 font-sans text-[11px] text-fg-muted shadow-lg hover:text-fg"
-        >
-          ↓ jump to latest
-        </button>
-      )}
-
-      {busy && (
-        <WorkingBar
-          events={turnEvents}
-          runId={runId}
-          outputTokens={draft.outputTokens}
-          onInterrupt={() => {
-            if (runId) void api.interruptChat(runId).catch(() => {})
-          }}
-        />
-      )}
+      {busy && <WorkingBar events={turnEvents} runId={runId} outputTokens={draft.outputTokens} />}
 
       {/* Between the transcript and the box, which is the order the decision is
           made in: you read what went wrong, then you decide whether to send it

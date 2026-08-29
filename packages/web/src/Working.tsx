@@ -77,18 +77,21 @@ function describeActivity(events: readonly RunEvent[], runId: string | null): st
  * Elapsed time, ticking. A second counter is the cheapest possible proof that
  * something is still happening, which is exactly what is missing during the
  * quiet stretch before the first token.
+ *
+ * No stop in here, deliberately. The composer directly below this row has one,
+ * where every other action in the pane is; a second one at the far right of this
+ * row asked the same question twice a few pixels away, and was also what the
+ * "jump to latest" pill was covering.
  */
 export function WorkingBar({
   events,
   runId,
   outputTokens,
-  onInterrupt,
 }: {
   events: readonly RunEvent[]
   runId: string | null
   /** Cumulative output tokens for the message in flight, straight off the stream. */
   outputTokens: number
-  onInterrupt: () => void
 }) {
   const [startedAt] = useState(() => Date.now())
   const [now, setNow] = useState(() => Date.now())
@@ -120,13 +123,6 @@ export function WorkingBar({
           {outputTokens.toLocaleString()} tokens
         </span>
       )}
-      <button
-        type="button"
-        onClick={onInterrupt}
-        className="ml-auto shrink-0 text-fg-dim underline-offset-2 hover:text-err hover:underline"
-      >
-        stop
-      </button>
     </div>
   )
 }
