@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react"
+import { useEffect, useMemo, useState, type ReactNode, type RefObject } from "react"
 import type { MessageImage, RunEvent, RunStatus } from "@aide/protocol"
 import { Markdown } from "../Markdown.js"
 import { Button, Empty, money } from "../ui.js"
@@ -510,18 +510,25 @@ function ToolRow({ line }: { line: ToolLine }) {
 /**
  * The question, in the place it was asked.
  *
- * It used to be `position: sticky`, pinned to the top of the pane so the answer
- * scrolled under it, and clipped to a few lines so a long one did not eat the
- * pane. Both are gone, and selection is why: a pinned block is an opaque overlay
- * sitting on top of the answer, so a drag that crossed it hit-tested into the
- * question and the highlight leapt to a line the reader could not see. A
- * transcript is text to be read and copied first, and a header second.
+ * Never the thing that gets pinned, even though it is what the pin shows. This
+ * row used to be `position: sticky` itself, and that is what was ripped out: a
+ * pinned block is an opaque overlay sitting on top of the answer, so a drag that
+ * crossed it hit-tested into the question and the highlight leapt to a line the
+ * reader could not see. A transcript is text to be read and copied first, and a
+ * header second — so the row stays in the flow, whole and selectable, and
+ * `StickyQuestion` draws a second clipped copy that answers no pointer at all.
+ *
+ * `data-question` is how that copy finds it: which question you are under is
+ * decided by where this row actually is on screen, not by counting events.
  */
 function UserRow({ line }: { line: UserLine }) {
   const [zoom, setZoom] = useState(false)
 
   return (
-    <div className="my-2 border-b-line border-l-syn-var border-b border-l-2 bg-chrome px-3 py-1.5">
+    <div
+      data-question=""
+      className="my-2 border-b-line border-l-syn-var border-b border-l-2 bg-chrome px-3 py-1.5"
+    >
       <div className="mb-0.5 font-sans text-[10px] tracking-wide text-syn-var uppercase">you</div>
       {line.images.length > 0 && (
         <div className="mb-1.5 flex flex-wrap gap-1.5">
@@ -545,6 +552,98 @@ function UserRow({ line }: { line: UserLine }) {
       <Markdown text={line.text} />
     </div>
   )
+}
+
+/**
+ * The question you are reading the answer to, pinned to the top of the pane.
+ *
+ * A second, clipped copy of the row rather than the row itself, and that is the
+ * whole of the design: taking no pointer events means a selection dragged across
+ * it lands in the answer underneath, which is where the reader was aiming,
+ * instead of jumping into a question whose remaining lines are not even on
+ * screen. The price is a bar you cannot select — the right price, because the
+ * question is still down there in the flow, and that is the copy worth copying.
+ */
+function StickyQuestion({ text }: { text: string }) {
+  return (
+    // Zero height, so a bar that comes and goes as you scroll never reflows the
+    // transcript under it. Full-bleed, because the pane's own padding would
+    // otherwise leave a gutter down each side for the transcript to slide
+    // through, and text moving beside a bar that is standing still reads as a
+    // rendering fault rather than as a header.
+    <div className="sticky top-0 z-10 -mx-3 h-0">
+      <div className="pointer-events-none absolute inset-x-0 top-0 border-b-line border-l-syn-var border-b border-l-2 bg-chrome px-3 py-1.5 shadow-md">
+        <div className="mb-0.5 font-sans text-[10px] tracking-wide text-syn-var uppercase">you</div>
+        {/* Clipped, and plain. A long question would otherwise eat the pane it
+            is meant to be a header for, and markdown with its middle cut off is
+            not the question either. Trimmed because three lines is a small
+            budget, and a message that opens with a blank line spends one. */}
+        <p className="line-clamp-3 break-words whitespace-pre-wrap text-fg-muted">{text.trim()}</p>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Which question the reader is under: the last one whose row has left the top of
+ * the pane completely.
+ *
+ * Measured off the rows themselves rather than carried as an offset, because a
+ * transcript's rows change height under you constantly — a tool row opens, the
+ * reply grows a paragraph, the pane is dragged narrower — and an offset worked
+ * out once is wrong a moment later.
+ *
+ * -1 for as long as the newest question is still on screen, and then nothing is
+ * drawn: the same question in two places at once is worse than no pin at all,
+ * and that is exactly what a copy would be the whole time you are reading the
+ * original.
+ */
+function useStuckQuestion(
+  root: HTMLElement | null,
+  scroller: RefObject<HTMLElement | null> | undefined,
+): number {
+  const [at, setAt] = useState(-1)
+
+  useEffect(() => {
+    const port = scroller?.current
+    if (!root || !port) return
+
+    let frame = 0
+    const measure = () => {
+      frame = 0
+      // The fold is the top edge of the scrollport, not the top of the
+      // transcript: the pane has a header above it and padding inside it, and
+      // measuring against either puts the handover a few pixels out — which is
+      // one flicker of the wrong question at every question.
+      const fold = port.getBoundingClientRect().top
+      const rows = Array.from(root.querySelectorAll<HTMLElement>("[data-question]"))
+      // The first row still showing something; everything before it is past the
+      // fold. findIndex stops there, so this reads one rectangle more than it
+      // has to and no more.
+      const showing = rows.findIndex((row) => row.getBoundingClientRect().bottom > fold)
+      setAt(showing === -1 ? rows.length - 1 : showing - 1)
+    }
+    // One measurement per frame. Scroll fires far faster than the screen
+    // redraws, and each measurement reads layout back out of the browser.
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(measure)
+    }
+
+    measure()
+    port.addEventListener("scroll", schedule, { passive: true })
+    // Not on scroll alone: a reply streaming in, a tool row opened above, or the
+    // window resized all move a question across the fold without one.
+    const resize = new ResizeObserver(schedule)
+    resize.observe(root)
+    resize.observe(port)
+    return () => {
+      if (frame) cancelAnimationFrame(frame)
+      port.removeEventListener("scroll", schedule)
+      resize.disconnect()
+    }
+  }, [root, scroller])
+
+  return at
 }
 
 /**
@@ -940,6 +1039,7 @@ export function Transcript({
   onPermission,
   live,
   tail,
+  scroller,
   children,
 }: {
   events: RunEvent[]
@@ -954,20 +1054,42 @@ export function Transcript({
    * that a block's key is decided by the whole log — see `blockKey`.
    */
   tail?: number
+  /**
+   * The element this transcript scrolls inside, when it scrolls in one.
+   *
+   * Only the pinned question needs it, and it is the one thing here that has to
+   * know where the fold is. A surface that leaves it out gets the same
+   * transcript without the pin, rather than a pin measured against the window.
+   */
+  scroller?: RefObject<HTMLElement | null>
   /** Anything that belongs after the last line: the commit message being written. */
   children?: ReactNode
 }) {
   const lines = useMemo(() => toLines(events, live), [events, live])
   const shown = tail !== undefined && lines.length > tail ? lines.slice(-tail) : lines
+  /**
+   * The transcript's own element, held as state rather than in a ref: it is not
+   * rendered at all while the log is empty, and an effect that found a null ref
+   * at mount would never learn that the rows had arrived.
+   */
+  const [root, setRoot] = useState<HTMLDivElement | null>(null)
+  // In the same order the rows are in the document, which is what lets the
+  // measured position of the Nth row name the Nth question.
+  const questions = shown.filter((l): l is UserLine => l.kind === "user")
+  const under = useStuckQuestion(root, scroller)
+  const pinned = questions[under]
 
   if (shown.length === 0) {
     if (!children) return <Empty>Nothing in this transcript.</Empty>
     return <div className="space-y-1">{children}</div>
   }
   return (
-    <div className="space-y-1">
-      {shown.map((line) => renderLine(line, onPermission))}
-      {children}
+    <div ref={setRoot}>
+      {pinned && <StickyQuestion text={pinned.text} />}
+      <div className="space-y-1">
+        {shown.map((line) => renderLine(line, onPermission))}
+        {children}
+      </div>
     </div>
   )
 }

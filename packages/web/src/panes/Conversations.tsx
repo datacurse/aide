@@ -1296,6 +1296,10 @@ export function ConversationPane({
               onPermission={busy ? answer : undefined}
               live={typing}
               tail={showAll ? undefined : VISIBLE_TAIL}
+              // So the question you are under can pin itself to the top edge of
+              // this box. It is the only thing in there that needs to know where
+              // the box's edge is.
+              scroller={scroller}
             >
               {busy && draftingCommit !== null && draft.text ? (
                 <CommitMessageDraft text={draft.text} model={draftingCommit} />
