@@ -582,6 +582,29 @@ app.post("/api/projects/:id/commit", async (req, reply) => {
           request: opening?.firstPrompt ?? "",
           verify: doc.verify,
           force,
+          // One go at whatever the checks refused, run as a turn in the
+          // conversation this commit is attributed to — which is where its
+          // reasoning and its diff have to be readable, and the only place there
+          // is to put them. A commit pressed with no chat open gets no attempt
+          // and refuses exactly as it always did.
+          //
+          // `run.runId` rather than a fresh one: it keeps the fix inside the run
+          // the browser is already watching, and inside the lock, so nothing can
+          // be admitted into the checkout between the failure and the retry.
+          //
+          // Effort is not read from anywhere. There is nowhere honest to read it
+          // from — it is a per-turn choice in the composer, not conversation
+          // state — and `high` is what that composer defaults to.
+          repair: sessionId
+            ? (request) =>
+                chat.turnUnderHold({
+                  runId: run.runId,
+                  project,
+                  sessionId,
+                  text: request,
+                  effort: "high",
+                })
+            : null,
           emit: run.emit,
           delta: run.delta,
           stopped: run.stopped,
@@ -629,7 +652,6 @@ app.post("/api/projects/:id/chat", async (req, reply) => {
     text?: string
     attachments?: Attachment[]
     mode?: string
-    autoAfterPlan?: boolean
     effort?: string
   }
   if (!body.text?.trim() && !body.attachments?.length) {
@@ -678,9 +700,15 @@ app.post("/api/projects/:id/chat", async (req, reply) => {
 
   // Validated rather than cast: these come from a form, and an unknown mode
   // would otherwise reach the SDK as an undefined permission mode.
+  //
+  // The fallback is the narrower of the two, and that is the point of having
+  // one. A page that has not reloaded since Manual was removed still sends it,
+  // and the human at that page believes they will be asked before anything
+  // happens — answering that with Auto would be the one surprise here that costs
+  // something. Plan surprises them with a plan.
   const mode = (CHAT_MODES as readonly string[]).includes(body.mode ?? "")
     ? (body.mode as ChatMode)
-    : "manual"
+    : "plan"
   const effort = (EFFORT_LEVELS as readonly string[]).includes(body.effort ?? "")
     ? (body.effort as EffortLevel)
     : "high"
@@ -692,12 +720,6 @@ app.post("/api/projects/:id/chat", async (req, reply) => {
       text: body.text?.trim() ?? "",
       attachments: body.attachments ?? [],
       mode,
-      // `=== true` rather than a cast: this comes off the wire, and anything
-      // truthy-but-not-true reaching the permission path should read as "no".
-      // Re-scoped to Plan here even though the composer already does it, because
-      // a browser that sends this alongside Manual is confused about something,
-      // and the answer to that is not to widen Manual.
-      autoAfterPlan: mode === "plan" && body.autoAfterPlan === true,
       effort,
     })
     return { runId }

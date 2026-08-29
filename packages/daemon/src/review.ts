@@ -2,9 +2,10 @@ import type { ModelSpend, Project, RunDelta, RunEventBody, VerifyCheck } from "@
 import { planChecks } from "@aide/protocol"
 import { commitRun, recentSubjects, treeChanges, withSessionTrailer } from "./changes.js"
 import { readCheckpoint } from "./checkpoint.js"
+import type { HeldTurnOutcome } from "./chat.js"
 import { CONFIG } from "./config.js"
 import { draftCommitMessage } from "./helper.js"
-import { runChecks } from "./verify.js"
+import { runChecks, type CheckOutcome } from "./verify.js"
 
 /**
  * The gate on the code: reading what is uncommitted, and committing it.
@@ -90,6 +91,23 @@ export interface CommitWorkingTreeOptions {
    * past it is a decision somebody made.
    */
   force: boolean
+  /**
+   * One automatic attempt at whatever the checks refused, or null for none.
+   *
+   * Null is a real case rather than a degraded one: there is nothing to make the
+   * attempt IN when the commit was pressed with no conversation open, and the
+   * refusal then reads exactly as it always did.
+   *
+   * Exactly one attempt, and that number is the whole design. A gate that keeps
+   * trying is a gate that spends your money in a loop over a failure it has
+   * already shown it cannot fix; a gate that never tries hands you back a
+   * typecheck error you were about to paste into the chat yourself. So: one go,
+   * then the tree, the failure and the decision are yours.
+   *
+   * Wired by `server.ts` to `ChatLane.turnUnderHold`, which runs it as a turn in
+   * the attributed conversation without giving up the project's lock.
+   */
+  repair: ((request: string) => Promise<HeldTurnOutcome>) | null
   /** Progress, straight onto the conversation's event stream. */
   emit: (body: RunEventBody) => void
   /** The message as the model types it. Live only — `commit.drafted` is the record. */
@@ -108,11 +126,42 @@ export interface CommitWorkingTreeOptions {
  */
 export class VerifyFailed extends Error {
   readonly command: string
-  constructor(command: string) {
-    super(`\`${command}\` failed — nothing was committed`)
+  constructor(command: string, repaired: boolean) {
+    super(
+      repaired
+        ? `\`${command}\` still failed after one attempt at fixing it — nothing was committed`
+        : `\`${command}\` failed — nothing was committed`,
+    )
     this.name = "VerifyFailed"
     this.command = command
   }
+}
+
+/**
+ * What the conversation is asked to do about a failing check.
+ *
+ * Written here rather than by the caller because the words are part of the gate:
+ * they say what is about to happen either way — the checks run again the moment
+ * the turn stops, and a second failure goes to the human — so the turn is not
+ * left guessing how much rope it has. The instruction to change as little as
+ * possible is the load-bearing one: what gets committed is the whole working
+ * tree, so anything this turn touches lands with it.
+ */
+function repairRequest(failed: CheckOutcome): string {
+  const ended =
+    failed.exitCode === null ? "was killed before it finished" : `exited ${failed.exitCode}`
+  return [
+    `The commit was refused: \`${failed.command}\` ${ended}.`,
+    "",
+    "Fix it. aide runs the checks again the moment you stop and commits if they pass;",
+    "if they still fail it stops and asks the human, so this is the one attempt.",
+    "Change as little as you can — the commit takes the whole working tree, so",
+    "anything else you touch lands with it.",
+    "",
+    "What it printed:",
+    "",
+    failed.output || "(nothing)",
+  ].join("\n")
 }
 
 /**
@@ -130,6 +179,14 @@ export class VerifyFailed extends Error {
  * second gate is untouched: a conversation is finished when a human says so, not
  * when it is committed.
  *
+ * A failing check gets ONE automatic attempt at being fixed before you are
+ * asked, and no more than one. What that replaces is a person watching a commit
+ * refuse itself over a typecheck error, reading it, and typing "typecheck
+ * failed, fix it" into the chat directly underneath — which is a step aide can
+ * take by itself, once, and then has nothing left to add. The tree the retry
+ * measures is re-read after the fix, so what is checked, what the message
+ * describes and what gets staged are all the repaired tree.
+ *
  * Returns what the drafting spent, because the caller is a run, and a run log
  * ends in an event saying what the run cost.
  */
@@ -137,11 +194,12 @@ export async function commitWorkingTree(
   opts: CommitWorkingTreeOptions,
 ): Promise<{ costUsd: number; modelUsage: Record<string, ModelSpend> }> {
   const { project, emit } = opts
+  const spent = { costUsd: 0, modelUsage: {} as Record<string, ModelSpend> }
 
   emit({ type: "commit.step", label: "reading what is uncommitted" })
   // One pass for the patch, the stat and the paths — `treeChanges` stages into a
   // scratch index to answer all three, and that staging is the expensive part.
-  const changes = await treeChanges(project.root)
+  let changes = await treeChanges(project.root)
   if (!changes.diff.trim()) throw new Error("there is nothing uncommitted in this project")
 
   // BEFORE the drafting, which is the only part of a commit that costs money.
@@ -152,9 +210,56 @@ export async function commitWorkingTree(
   // Handed the paths already read above, so which checks are worth running is
   // decided from the same list the commit will stage. Reading the tree a second
   // time to answer it would let the two disagree.
-  await verifyTree(opts, changes.paths)
+  let repaired = false
+  for (;;) {
+    const failed = await verifyTree(opts, changes.paths)
+    if (!failed) break
+    if (opts.force) {
+      emit({
+        type: "commit.step",
+        label: `committing anyway — \`${failed.command}\` failed and you asked for it`,
+      })
+      break
+    }
+    // The second failure is where this stops, and stopping is the point. What
+    // the human gets is a run that says what broke, what was tried, and what is
+    // still broken — and a button that will commit it anyway once they have read
+    // that. `force` never repairs: a deliberate second press means "land it as
+    // it is", not "have another go".
+    if (!opts.repair || repaired) throw new VerifyFailed(failed.command, repaired)
 
-  emit({ type: "commit.step", label: `writing the message · ${CONFIG.helperModel}` })
+    repaired = true
+    emit({ type: "commit.step", label: `\`${failed.command}\` failed — asking for a fix` })
+    const fix = await opts.repair(repairRequest(failed))
+    add(spent, fix)
+    // Said out loud, because the turn's own error events are deliberately not
+    // written into this log — see `TurnRecord.nested`. Without this a fix that
+    // died on an API error leaves the request in the transcript with nothing
+    // whatsoever after it, and the checks below reporting the same failure as if
+    // nothing had been tried.
+    if (fix.status !== "success") {
+      const why = fix.errors[0] ? ` — ${fix.errors[0]}` : ""
+      emit({
+        type: "commit.step",
+        label: `the fix ${fix.status === "cancelled" ? "was stopped" : "did not finish"}${why}`,
+      })
+    }
+    // Stopped during the fix. The agent has been interrupted, the tree is
+    // whatever it got to, and re-running a ten-minute build over it is the last
+    // thing anybody who just pressed stop wants.
+    if (opts.stopped()) return spent
+
+    // Re-read, because the fix rewrote the tree this was measured on. Skipping
+    // it would check the old paths, draft a message from the old diff, and stage
+    // a list that does not include the file the fix created.
+    emit({ type: "commit.step", label: "reading what is uncommitted, after the fix" })
+    changes = await treeChanges(project.root)
+    if (!changes.diff.trim()) {
+      throw new Error("the fix left nothing uncommitted — nothing was committed")
+    }
+  }
+
+  emit({ type: "commit.drafting", model: CONFIG.helperModel })
   const message = await draftCommitMessage({
     model: CONFIG.helperModel,
     title: opts.request,
@@ -165,7 +270,7 @@ export async function commitWorkingTree(
     // Streamed, so this step is watched rather than waited out.
     onText: (text) => opts.delta({ kind: "text", text }),
   })
-  const spend = { costUsd: message.costUsd, modelUsage: message.modelUsage }
+  add(spent, message)
 
   emit({
     type: "commit.drafted",
@@ -176,7 +281,7 @@ export async function commitWorkingTree(
   // Stop lands here or nowhere. Up to this line an interrupt costs the drafting
   // and nothing else; past it there is a commit, and stopping would mean undoing
   // history rather than declining to make it.
-  if (opts.stopped()) return spend
+  if (opts.stopped()) return spent
 
   emit({ type: "commit.step", label: "committing" })
   // The paths read at the top, NOT a second reading of the tree. The checks ran
@@ -190,32 +295,52 @@ export async function commitWorkingTree(
     message: message.text,
   })
   emit({ type: "commit.landed", sha, paths: changes.paths })
-  return spend
+  return spent
+}
+
+/** Fold one model call's spend into the run's total. Both are estimates. */
+function add(
+  into: { costUsd: number; modelUsage: Record<string, ModelSpend> },
+  one: { costUsd: number; modelUsage: Record<string, ModelSpend> },
+): void {
+  into.costUsd += one.costUsd
+  for (const [model, use] of Object.entries(one.modelUsage)) {
+    const before = into.modelUsage[model]
+    into.modelUsage[model] = before
+      ? {
+          inputTokens: before.inputTokens + use.inputTokens,
+          outputTokens: before.outputTokens + use.outputTokens,
+          cacheReadInputTokens: before.cacheReadInputTokens + use.cacheReadInputTokens,
+          cacheCreationInputTokens:
+            before.cacheCreationInputTokens + use.cacheCreationInputTokens,
+          costUSD: before.costUSD + use.costUSD,
+        }
+      : use
+  }
 }
 
 /**
- * Run the project's checks, narrate them, and refuse the commit if one fails.
+ * Run the project's checks, narrate them, and say which one said no.
  *
- * Split out so the ordering above reads as one line. Everything interesting is
- * in what it does on failure: it throws, so `commitWorkingTree` cannot go on to
- * write history, and the results are already in the log by then — the human
- * reads what the command printed in the transcript, not in a terminal somewhere
- * else.
+ * Split out so the ordering above reads as one list of steps. It returns the
+ * failure rather than throwing it, because the caller does not always refuse on
+ * one: a commit gets a single automatic attempt at fixing what broke, and a
+ * function that throws could only ever end the run.
  *
- * `force` still runs them. Skipping the checks would make the override mean "and
- * do not tell me", when what it means is "I have read this and I am landing it
- * anyway" — and the log of a forced commit should say exactly what was wrong
- * with it at the time.
+ * `force` still runs the checks — that decision lives with the caller, and this
+ * is called under it. Skipping them would make the override mean "and do not
+ * tell me", when what it means is "I have read this and I am landing it anyway",
+ * and the log of a forced commit should say exactly what was wrong with it.
  *
- * `force` does NOT widen the plan either. A check the diff cannot break is not
+ * `force` does not widen the plan either. A check the diff cannot break is not
  * evidence you are choosing to ignore; it is evidence that was never relevant.
  */
 async function verifyTree(
   opts: CommitWorkingTreeOptions,
   changed: readonly string[],
-): Promise<void> {
+): Promise<CheckOutcome | null> {
   const { emit } = opts
-  if (opts.verify.length === 0) return
+  if (opts.verify.length === 0) return null
 
   const plan = planChecks(opts.verify, changed)
   // Emitted before anything runs, so the list on screen is the whole declared
@@ -223,7 +348,7 @@ async function verifyTree(
   for (const { command, reason } of plan.skipped) {
     emit({ type: "verify.skipped", command, reason })
   }
-  if (plan.run.length === 0) return
+  if (plan.run.length === 0) return null
 
   const { failed } = await runChecks(plan.run.map((c) => c.command), opts.project.root, {
     stopped: opts.stopped,
@@ -234,18 +359,10 @@ async function verifyTree(
   })
 
   // A stop mid-check reads as a failed check, and must not be reported as a
-  // tree that failed its own gate. The run is ending either way; let the
-  // interrupt be the reason.
-  if (opts.stopped()) return
-  if (!failed) return
-  if (opts.force) {
-    emit({
-      type: "commit.step",
-      label: `committing anyway — \`${failed.command}\` failed and you asked for it`,
-    })
-    return
-  }
-  throw new VerifyFailed(failed.command)
+  // tree that failed its own gate — nor handed to an agent as something to go
+  // and fix. The run is ending either way; let the interrupt be the reason.
+  if (opts.stopped()) return null
+  return failed
 }
 
 export interface CommitTreeOptions {

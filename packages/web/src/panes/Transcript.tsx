@@ -320,6 +320,17 @@ function toLines(events: RunEvent[], live?: LiveText | null): Line[] {
       case "commit.step":
         lines.push({ kind: "commit-step", key: rowKey(e), label: e.label, done: false })
         break
+      // A step like any other to read. It is its own event because of what it
+      // says to the pane around this one — that what is streaming now is a
+      // commit message — and not because it deserves a row of its own shape.
+      case "commit.drafting":
+        lines.push({
+          kind: "commit-step",
+          key: rowKey(e),
+          label: `writing the message · ${e.model}`,
+          done: false,
+        })
+        break
       case "commit.drafted":
         lines.push({
           kind: "commit-message",

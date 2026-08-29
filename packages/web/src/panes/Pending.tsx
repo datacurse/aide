@@ -125,7 +125,8 @@ export function PendingRail({
   commitBlocked: string | null
   committing: boolean
   /**
-   * The last commit stopped because one of the project's checks failed.
+   * The last commit stopped because one of the project's checks failed, and the
+   * one automatic attempt at fixing it did not clear it either.
    *
    * Turns the button into a second, deliberate press rather than adding a
    * checkbox beside it: the failure is written out in the conversation next to
@@ -175,8 +176,8 @@ export function PendingRail({
                 starting another chat.
                 {verifyRefused && (
                   <div className="mt-2 text-warn">
-                    A check failed, so nothing was committed. It is written out beside this rail —
-                    read it, then press again to commit anyway.
+                    A check failed, so nothing was committed. What ran — and whatever aide tried
+                    about it — is beside this rail. Read that, then press again to commit anyway.
                   </div>
                 )}
                 <div className="mt-2">

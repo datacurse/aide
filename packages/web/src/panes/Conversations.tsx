@@ -1216,20 +1216,24 @@ export function ConversationPane({
   useDoneChime(busy, runId)
 
   /**
-   * The commit run's model, while it is still writing the message.
+   * The commit run's drafting model, while it is still writing the message.
    *
-   * A commit is the one run that streams text without being a chat turn: it has
-   * `commit.step` and never an assistant message, so what is arriving is the
-   * commit message and it belongs in the box the finished one lands in. Null
-   * once `commit.drafted` has landed, because that box is now the real one.
+   * A commit is the one run that streams text without being a chat turn, so the
+   * text arriving during it belongs in the box the finished message lands in
+   * rather than in the transcript. Null once `commit.drafted` has landed,
+   * because that box is now the real one.
+   *
+   * It reads `commit.drafting` and not "this run has emitted a `commit.step`",
+   * which is what it used to do and what a commit outgrew: a failing check now
+   * gets one agent turn inside the same run, and the fix's own words were drawn
+   * into the message box under the drafter's name.
    */
   const draftingCommit = useMemo<string | null>(() => {
     if (!runId) return null
     const mine = turnEvents.filter((e) => e.runId === runId)
-    if (!mine.some((e) => e.type === "commit.step")) return null
     if (mine.some((e) => e.type === "commit.drafted")) return null
-    const started = mine.find((e) => e.type === "run.started")
-    return started?.type === "run.started" ? started.model : ""
+    const drafting = mine.findLast((e) => e.type === "commit.drafting")
+    return drafting?.type === "commit.drafting" ? drafting.model : null
   }, [turnEvents, runId])
 
   /**
@@ -1417,7 +1421,6 @@ export function ConversationPane({
     text: string
     attachments: Attachment[]
     mode: ChatMode
-    autoAfterPlan: boolean
     effort: EffortLevel
   }): Promise<boolean> => {
     if (!projectId) return false

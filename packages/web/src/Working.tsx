@@ -60,6 +60,7 @@ function describeActivity(events: readonly RunEvent[], runId: string | null): st
   // The commit narrates itself, and its own words are better than anything
   // derivable from the shape of its log.
   if (last.type === "commit.step") return last.label
+  if (last.type === "commit.drafting") return `Writing the message · ${last.model}`
   // Between two checks, or just after the last one. Naming the check that just
   // finished would read as one still running.
   if (last.type === "verify.result") return "Checking"

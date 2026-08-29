@@ -20,19 +20,29 @@ export type ConversationKind = "chat" | "task"
  * `permissionMode`. The names are the ones the Claude Code UI uses, because a
  * mode picker that renames them would be a second vocabulary for one concept.
  *
- * `manual` is the only one that needs a human at the keyboard mid-turn: the SDK
- * routes an "ask" decision to `canUseTool`, which aide turns into a
- * `permission.request` event and waits on. The others resolve without a round
- * trip. `dontAsk` — what task runs use — is deliberately absent: a chat with a
- * human present should ask rather than fail closed.
+ * There were four. "Manual" (ask before every edit) and "Edit automatically"
+ * (ask before every command) are gone, and what they cost was not clicks: a turn
+ * that stops to ask needs somebody sitting in front of it, and not every turn
+ * has one. The commit gate now hands a failed check back to the conversation by
+ * itself — see `turnUnderHold` in the daemon's chat.ts — and under a mode that
+ * asks, that turn blocks on a question nobody typed and nobody is watching for,
+ * with the project's checkout held while it waits.
+ *
+ * So: two. Auto acts. Plan explores, asks once — for the plan — and then acts,
+ * which is the same one decision Manual took twenty times over.
+ *
+ * `dontAsk` — what headless task runs use — is deliberately absent, and so is
+ * `bypassPermissions`: neither is something a person should be able to pick from
+ * a menu beside their own checkout.
  */
-export const CHAT_MODES = ["manual", "acceptEdits", "plan", "auto"] as const
+export const CHAT_MODES = ["plan", "auto"] as const
 export type ChatMode = (typeof CHAT_MODES)[number]
 
 export const CHAT_MODE_LABEL: Record<ChatMode, { label: string; hint: string }> = {
-  manual: { label: "Manual", hint: "Claude will ask for approval before making each edit" },
-  acceptEdits: { label: "Edit automatically", hint: "Claude will edit files without asking" },
-  plan: { label: "Plan", hint: "Claude will explore and present a plan before editing" },
+  plan: {
+    label: "Plan",
+    hint: "Claude explores and presents a plan. Approving it is the only question — what it asked for then runs unasked",
+  },
   // The hint used to say "approves what passes a safety check". It no longer
   // does one: aide decides Auto's shell commands itself, because the check was a
   // model call in front of every command and cost seconds of every turn. See
@@ -43,45 +53,23 @@ export const CHAT_MODE_LABEL: Record<ChatMode, { label: string; hint: string }> 
 }
 
 /**
- * Plan's companion switch: what happens AFTER you approve the plan.
- *
- * Not a fifth mode, and deliberately not — the four above map 1:1 onto the SDK's
- * `permissionMode`, which is what lets `chatModeFromSdk` read a mode back out of
- * a session file without guessing. This rides alongside instead, and it means
- * nothing unless the mode is `plan`.
- *
- * What it is for: plan mode's whole shape is one decision — you read the plan
- * and you say yes — and then the SDK drops to `default` and asks again for every
- * single edit that carries the plan out. One approved plan in this repository's
- * own logs was followed by twelve Edits, seven Bash calls and a Write, each one
- * a click. Approving a plan and then approving its every consequence is the same
- * decision taken twenty times.
- */
-export const AUTO_AFTER_PLAN_LABEL = {
-  label: "Carry the plan out on Auto",
-  hint: "Approving the plan is the only question. What it asked for then runs unasked",
-}
-
-/**
  * An SDK permission mode back into aide's vocabulary.
  *
  * The session store is shared with the CLI and the VS Code extension, and every
  * user turn in it is stamped with the mode it was sent under. Reading that back
  * is what lets a conversation you had in VS Code on Auto stay on Auto when you
- * open it here, rather than silently reverting to Manual and asking permission
- * for the next command.
+ * open it here, rather than silently reverting and asking permission for the
+ * next command.
  *
- * Returns null for modes aide has no picker entry for — `dontAsk` (what task
- * runs use) and `bypassPermissions`. Null means "no opinion", not "manual": the
- * caller falls back to whatever the human last chose, which is never an
- * escalation.
+ * Returns null for every mode aide has no picker entry for, which is now most of
+ * them: `dontAsk` and `bypassPermissions` as before, and `default` and
+ * `acceptEdits` since the two modes that mapped to them were removed. Null means
+ * "no opinion", NOT a default — the caller keeps whatever the human last chose,
+ * so a conversation last driven from the CLI in Manual arrives here on your own
+ * setting rather than on a mode this product no longer has.
  */
 export function chatModeFromSdk(value: unknown): ChatMode | null {
   switch (value) {
-    case "default":
-      return "manual"
-    case "acceptEdits":
-      return "acceptEdits"
     case "plan":
       return "plan"
     case "auto":

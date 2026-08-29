@@ -115,15 +115,15 @@ export const CONFIG = {
    * and becomes a prompt.
    *
    * This list is short for a load-bearing reason the SDK warns about out loud:
-   * a bare name in `allowedTools` approves the whole tool BEFORE the callback is
-   * consulted. Leaving Edit and Write here made "Manual" a lie — the mode
-   * promises to ask before each edit, and the edit would have been auto-approved
-   * before the question could be asked. Only read-only tools belong here.
+   * a bare name in `allowedTools` approves the whole tool BEFORE the mode or the
+   * callback is consulted. Leaving Edit and Write here made a promise into a lie
+   * — Plan says Claude will describe the work before doing any of it, and the
+   * edit would have been approved before either could refuse it. Only read-only
+   * tools belong here.
    *
-   * Bash does not belong here either, however slow leaving it out looks — and it
-   * does look slow, because Auto classifies every command with a model call. The
-   * reason is that this list is not per-mode: adding Bash would hand Manual and
-   * Plan an unannounced shell as well. That cost is paid in `fastBashSettings`
+   * Bash does not belong here either, however slow leaving it out looks. The
+   * reason is that this list is not per-mode: adding Bash would hand Plan an
+   * unannounced shell as well. Auto's shell is granted in `fastBashSettings`
    * (agent.ts) instead, which is scoped to Auto alone.
    */
   chatAutoAllowTools: list("AIDE_CHAT_AUTO_ALLOW", ["Read", "Glob", "Grep", "TodoWrite"]),

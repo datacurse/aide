@@ -32,11 +32,11 @@ record. They are all rows in the same list, in that order of urgency.
 | Where the graph's lines go, and the SVG that draws them | `packages/web/src/graph.ts`, `packages/web/src/GitGraph.tsx` |
 | Branch, history and lanes, read off the repo | `packages/daemon/src/repo.ts` |
 | The folder dialog behind `add`, and why it is the daemon's | `packages/daemon/src/picker.ts` |
-| One agent per project, the lock, warm sessions | `packages/daemon/src/chat.ts` |
+| One agent per project, the lock, warm sessions, a turn run inside a commit | `packages/daemon/src/chat.ts` |
 | The SDK call, the system prompt, permissions | `packages/daemon/src/agent.ts` |
 | Snapshots and turn boundaries under `refs/aide/` | `packages/daemon/src/checkpoint.ts` |
 | What is uncommitted, what a conversation changed | `packages/daemon/src/changes.ts` |
-| The commit run: read the tree, write a message, commit | `packages/daemon/src/review.ts` |
+| The commit run: check, fix once, write a message, commit | `packages/daemon/src/review.ts` |
 | Which chats are ticked off (`~/.aide/board.json`) | `packages/daemon/src/board.ts` |
 | What is left of the plan, and when it resets | `packages/daemon/src/usage.ts` |
 | What a run's shell may and may not do | `packages/daemon/src/policy.ts` |
@@ -68,6 +68,15 @@ Decisions already taken, which are not gaps to fill:
   a shortcut around the review — it is what makes the rail's list, which blocks
   the next chat, a list you can always clear. Narrowing it back to one chat's
   paths re-opens the wedge in the brief.
+- **A failed check gets one automatic fix, and one only.** The commit hands the
+  failure to the conversation it is attributed to, waits for the turn, re-reads
+  the tree and checks again; a second failure stops and asks. That turn runs
+  INSIDE the commit's own run — `ChatLane.turnUnderHold` — so it appears in the
+  run you are watching and the project's lock is never let go between the
+  failure and the retry. A commit pressed with no chat open gets no attempt.
+- **Two modes: Plan and Auto.** Manual and Edit-automatically are gone. Nothing
+  aide runs may need a human mid-turn, because the fix above is a turn nobody
+  typed. Re-adding a mode that asks means re-opening that.
 - **The page does not hot-update while a turn is in flight.** A run in this repo
   rewrites the modules the page is running, and a module Fast Refresh cannot
   swap in reloads the browser out from under the turn you are watching — taking

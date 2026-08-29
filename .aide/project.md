@@ -54,6 +54,17 @@ to review the work without leaving.
   refused every new conversation with no button in aide that would clear it. A
   gate whose precondition and whose release read different objects can wedge, and
   the only way out of that one was a terminal.
+- **One automatic attempt, then a person.** A commit whose checks fail hands the
+  failure to the conversation, lets it try once, and runs the checks again over
+  what that left. A second failure stops and asks. The attempt is worth taking
+  because it is the step you would otherwise take by hand, from the transcript
+  right there — but a gate that keeps retrying is a gate spending your money in
+  a loop against a failure it has already shown it cannot fix, so the number is
+  one and it is not a setting.
+- **Two modes: Plan and Auto.** Both act; Plan asks once, for the plan. There is
+  no mode that stops for permission mid-turn, because aide sends turns nobody
+  typed — the fix above is one — and a prompt raised by one of those blocks the
+  run that is waiting on it, holding the checkout, with nobody to answer.
 - **Cost figures are estimates.** They come from a price table bundled into the
   SDK at build time. Fine for a dashboard, never for billing, and anything that
   displays one should say so.

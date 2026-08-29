@@ -273,6 +273,18 @@ export type RunEventBody =
       output: string
     }
   /**
+   * The helper model has started writing the commit message.
+   *
+   * Its own event rather than another `commit.step`, because it is the one thing
+   * that tells a reader — and the browser — that the text now streaming is a
+   * commit message rather than a reply. "This run has emitted a `commit.step`"
+   * used to answer that and cannot any more: a commit contains a whole agent
+   * turn when a failed check gets its one automatic attempt at a fix, and that
+   * turn's words were then drawn into the box reserved for the message, under
+   * the drafter's name.
+   */
+  | { type: "commit.drafting"; model: string }
+  /**
    * The message the helper model wrote.
    *
    * Shown rather than swallowed. Nobody typed this message, so the transcript is

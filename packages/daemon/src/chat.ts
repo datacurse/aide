@@ -9,6 +9,7 @@ import type {
   Project,
   RunDelta,
   RunEventBody,
+  RunStatus,
 } from "@aide/protocol"
 import type { FollowUpTurn, RunAgentOptions } from "./agent.js"
 import {
@@ -98,6 +99,31 @@ export interface ChatTurn {
 }
 
 /**
+ * How an agent turn run inside a held run ended. See `turnUnderHold`.
+ *
+ * It carries the spend because the run it happened inside is the one that has to
+ * report it: a commit that spent four minutes of Opus fixing a failing check and
+ * then billed itself for the commit message alone would under-report every
+ * profile that adds these up.
+ */
+export interface HeldTurnOutcome {
+  status: RunStatus
+  costUsd: number
+  modelUsage: Record<string, ModelSpend>
+  /** What went wrong, when something did. Empty on success. */
+  errors: string[]
+}
+
+/** The turn in flight inside a held run, and where its outcome is going. */
+interface NestedTurn {
+  settle: (outcome: HeldTurnOutcome) => void
+  costUsd: number
+  modelUsage: Record<string, ModelSpend>
+  status: RunStatus | null
+  errors: string[]
+}
+
+/**
  * `blocked` is omitted rather than stored: it is exactly `pending.size > 0`, and
  * a copy of it here would be a second source of truth to forget to update.
  */
@@ -136,6 +162,19 @@ interface TurnRecord extends Omit<ChatTurn, "blocked"> {
    * that has not been recorded yet. Null except during that window.
    */
   settling: Promise<void> | null
+  /**
+   * An agent turn running INSIDE this held run, or null for almost every turn.
+   *
+   * Set only by `turnUnderHold`. Its presence changes three things about how the
+   * worker's messages are handled, and each one is a way the held run would
+   * otherwise be destroyed by the turn it asked for: the SDK's `run.started` is
+   * not appended (this log already has one), `run.finished` is not appended
+   * either — the first terminal event SEALS a log, so everything the commit
+   * still has to say, its own outcome included, would be silently dropped — and
+   * `done` frees the worker without deleting the record, which is the thing
+   * holding the project.
+   */
+  nested: NestedTurn | null
 }
 
 /**
@@ -176,14 +215,6 @@ export interface SendOptions {
   text: string
   attachments: Attachment[]
   mode: ChatMode
-  /**
-   * Plan's companion switch. Means nothing unless `mode` is `plan`.
-   *
-   * Optional so that omitting it is the safe answer rather than a compile error
-   * someone silences with a guess — absent reads as "keep asking", which is what
-   * a caller that has not thought about permissions should get.
-   */
-  autoAfterPlan?: boolean
   effort: EffortLevel
 }
 
@@ -313,6 +344,7 @@ export class ChatLane {
       interrupted: false,
       pending: new Set(),
       settling: null,
+      nested: null,
       sourceIdAtStart: null,
     }
     this.#turns.set(runId, record)
@@ -385,13 +417,16 @@ export class ChatLane {
    * also what makes the project show as held while it runs, so the "new chat"
    * button does not offer to start a conversation on top of a commit in flight.
    *
-   * Everything the agent path needs and this does not is simply absent: no
-   * worker, no checkpoint (nothing here edits the tree except by committing it),
-   * no permissions. `work` gets an `emit` for progress, a `delta` for text still
-   * arriving, and a `stopped` it can check before it writes anything, and the
-   * terminal event is appended here so
-   * the invariant every reader depends on — a log ends in exactly one — cannot
-   * be broken by a caller that forgot.
+   * It starts with none of what the agent path has — no worker, no checkpoint
+   * (nothing here edits the tree except by committing it), no permissions. What
+   * `work` gets is an `emit` for progress, a `delta` for text still arriving,
+   * and a `stopped` it can check before it writes anything; the terminal event
+   * is appended here so the invariant every reader depends on — a log ends in
+   * exactly one — cannot be broken by a caller that forgot.
+   *
+   * It can acquire an agent part way through, though, and exactly once: see
+   * `turnUnderHold`, which is how a refused commit hands the failing check back
+   * to the conversation without giving up the checkout in between.
    */
   hold(opts: {
     project: Project
@@ -438,6 +473,7 @@ export class ChatLane {
       interrupted: false,
       pending: new Set(),
       settling: null,
+      nested: null,
       // A commit stages and writes history; it cannot edit the daemon's source,
       // so there is nothing for the end of it to compare against.
       sourceIdAtStart: null,
@@ -493,6 +529,11 @@ export class ChatLane {
           message: err instanceof Error ? err.message : String(err),
         })
       } finally {
+        // A turn still running inside this one is settled rather than orphaned.
+        // `work` awaits it, so reaching here with one outstanding means `work`
+        // threw around it — and the record is about to go, which would leave
+        // whoever asked for the turn holding a promise nothing can resolve.
+        this.#settleNested(record, { errors: ["the run it was inside ended"] })
         // Deleting the record is what releases the project. There is no snapshot
         // to wait for here — the tree after a commit is the tree the commit
         // made, and the conversation's checkpoint still points where it did.
@@ -503,6 +544,136 @@ export class ChatLane {
     void settle()
 
     return runId
+  }
+
+  /**
+   * Run one agent turn INSIDE a run that already holds this project.
+   *
+   * The commit is the only caller: when a project's own check refuses a commit,
+   * the gate hands that failure back to the conversation and waits for one
+   * attempt at fixing it, then checks again. See `commitWorkingTree`.
+   *
+   * Why not just send a normal turn. `send` would be refused by the lock, and
+   * rightly — the commit IS holding the checkout. Releasing it first and sending
+   * afterwards would open a window for another chat to be admitted into the tree
+   * halfway through a commit, and would need the retry to re-acquire a lock it
+   * had just given away. So the fix runs inside the hold, which is also what
+   * keeps the whole thing one run: one thing to watch, one thing to stop, one
+   * terminal event at the end of it.
+   *
+   * Everything the turn emits is logged under the HELD run's id, not one of its
+   * own. That is what makes it visible: the browser is already subscribed to the
+   * commit it pressed, and a fix streaming into a run id nobody is watching
+   * would only surface on the next reload.
+   *
+   * No checkpoint is taken. The conversation's own is the baseline its diff is
+   * measured against, and moving it to just before the fix would hide the work
+   * the fix was repairing.
+   */
+  async turnUnderHold(opts: {
+    /** The held run. Its record is what holds the project, and it survives this. */
+    runId: string
+    project: Project
+    /** The conversation to append the turn to. A hold with none cannot use this. */
+    sessionId: string
+    text: string
+    effort: EffortLevel
+  }): Promise<HeldTurnOutcome> {
+    const record = this.#turns.get(opts.runId)
+    if (!record) throw new Error("that run is not holding this project any more")
+    if (record.projectId !== opts.project.id) throw new Error("that run holds another project")
+    if (record.nested) throw new Error("that run already has a turn inside it")
+
+    const doc = await readProjectDoc(opts.project.root)
+
+    // Stopped while the brief was being read. Answered here rather than left to
+    // the worker, because `#coldStart` would file an interrupt as the HELD run's
+    // terminal event and take the commit's own outcome with it.
+    if (record.interrupted) {
+      return { status: "cancelled", costUsd: 0, modelUsage: {}, errors: [] }
+    }
+
+    // In the log before the worker exists, so the transcript shows what aide
+    // asked for in aide's own words. A fix that appeared with no request in
+    // front of it would read as the agent having done something unbidden.
+    this.log.append(opts.runId, { type: "user.message", text: opts.text })
+
+    const settled = new Promise<HeldTurnOutcome>((resolve) => {
+      record.nested = {
+        settle: resolve,
+        costUsd: 0,
+        modelUsage: {},
+        status: null,
+        errors: [],
+      }
+    })
+
+    const send: SendOptions = {
+      project: opts.project,
+      sessionId: opts.sessionId,
+      text: opts.text,
+      attachments: [],
+      // Auto, and not a choice anybody gets to make. Nobody typed this turn and
+      // nobody is promised a question by it, so a mode that asks would block it
+      // on a prompt with no one to answer — with the project's checkout held for
+      // as long as it waited.
+      mode: "auto",
+      effort: opts.effort,
+    }
+
+    // The warm session if there is one, and that is not only for the ~1.4s: a
+    // second SDK session opened over a conversation whose own is still live
+    // means two processes appending to one transcript file, and a human's next
+    // message landing in whichever of them `#reusable` happened to pick.
+    //
+    // It costs something, once, and the cost is worth naming. `fastBashSettings`
+    // is fixed at query creation, so a conversation that was being driven in
+    // Plan has no `Bash(*)` rule to inherit — this turn is Auto and acts, but
+    // each command is classified by the CLI at seconds apiece instead of being
+    // allowed outright. Slower, never blocked, and only for the fix that follows
+    // a Plan session.
+    const warm = this.#reusable(send, doc.body)
+    if (warm) {
+      this.#followUp(warm, record, send)
+    } else {
+      void this.#coldStart(record, send, doc.body).catch((err) => {
+        // The record belongs to the commit, so a worker that never started must
+        // settle this promise rather than leave the commit awaiting a turn that
+        // will never report.
+        this.#settleNested(record, {
+          status: "failed",
+          errors: [err instanceof Error ? err.message : String(err)],
+        })
+      })
+    }
+
+    return settled
+  }
+
+  /**
+   * The turn inside a held run is over. The run itself is not.
+   *
+   * Clearing `worker` matters as much as resolving: the held record keeps that
+   * reference only for the length of the nested turn, and an interrupt arriving
+   * afterwards would otherwise be delivered to a warm session that has moved on
+   * — stopping whatever the human sent it next.
+   */
+  #settleNested(
+    record: TurnRecord,
+    override: { status?: RunStatus; errors?: string[] } = {},
+  ): void {
+    const nested = record.nested
+    if (!nested) return
+    record.nested = null
+    record.worker = null
+    nested.settle({
+      // "failed" when the worker went away without reporting anything, which is
+      // the honest reading of a turn nothing said finished.
+      status: override.status ?? nested.status ?? "failed",
+      costUsd: nested.costUsd,
+      modelUsage: nested.modelUsage,
+      errors: override.errors ?? nested.errors,
+    })
   }
 
   /**
@@ -532,9 +703,6 @@ export class ChatLane {
       ...(opts.attachments.length ? { attachments: opts.attachments } : {}),
       ...(opts.mode !== worker.mode ? { mode: opts.mode } : {}),
       ...(opts.effort !== worker.effort ? { effort: opts.effort } : {}),
-      // Unconditional, unlike the two above: it buys no control request, and it
-      // is per-turn state rather than a session setting. See `FollowUpTurn`.
-      autoAfterPlan: opts.autoAfterPlan === true,
     }
     worker.mode = opts.mode
     worker.effort = opts.effort
@@ -590,6 +758,15 @@ export class ChatLane {
     const { runId } = record
     const cwd = project.root
 
+    // A turn inside a held run reports its own interrupt to the run that asked
+    // for it and to nobody else: the log is the COMMIT's, and a terminal event
+    // written into it here would seal it against the outcome the commit is still
+    // going to have.
+    if (record.interrupted && record.nested) {
+      this.#settleNested(record, { status: "cancelled" })
+      return
+    }
+
     // Stopped between admission and the fork. Give it a terminal event of its
     // own — every consumer of a log assumes it ends in exactly one — rather than
     // a log that just stops after the checkpoint.
@@ -620,15 +797,15 @@ export class ChatLane {
       cwd,
       model: CONFIG.taskModel,
       // Read-only tools only. Edit, Write and Bash deliberately fall through to
-      // canUseTool, because a bare name here auto-approves the tool before the
-      // callback runs — which would make "Manual" promise a prompt it never gave.
+      // the mode and to canUseTool, because a bare name here auto-approves the
+      // tool before either is consulted — which would let a Plan turn edit the
+      // tree it was told to describe.
       allowedTools: [...CONFIG.chatAutoAllowTools],
       allowedBash: [...CONFIG.allowedBash],
       deniedBash: [...CONFIG.deniedBash],
       env: CONFIG.runEnv,
       ...(CONFIG.chatMaxBudgetUsd ? { maxBudgetUsd: CONFIG.chatMaxBudgetUsd } : {}),
       chatMode: opts.mode,
-      autoAfterPlan: opts.autoAfterPlan === true,
       effort: opts.effort,
       attachments: opts.attachments,
       trackContext: true,
@@ -699,6 +876,29 @@ export class ChatLane {
         return
       }
       if (msg.type === "event") {
+        // A turn running inside a held run writes that run's middle and neither
+        // of its ends. See `TurnRecord.nested`: `run.started` is already in this
+        // log, and a terminal event would seal it against everything the commit
+        // has left to say — the failing check it is about to re-run, the message
+        // it writes, the sha it lands, its own outcome.
+        if (turn?.nested) {
+          if (msg.body.type === "run.started") return
+          if (msg.body.type === "run.finished") {
+            turn.nested.costUsd = msg.body.totalCostUsd
+            turn.nested.modelUsage = msg.body.modelUsage
+            turn.nested.status = turn.interrupted ? "cancelled" : msg.body.status
+            turn.nested.errors = msg.body.errors ?? []
+            return
+          }
+          if (msg.body.type === "run.error") {
+            turn.nested.status = "failed"
+            turn.nested.errors = [msg.body.message]
+            return
+          }
+          this.log.append(msg.runId, msg.body)
+          return
+        }
+
         // A new conversation learns its id from the SDK's init message; capture
         // it so the browser can switch from "new chat" to a real conversation
         // without waiting for the turn to finish. The worker needs it too, or a
@@ -777,6 +977,17 @@ export class ChatLane {
     // that already said the turn succeeded.
     if (worker.turn?.runId === runId) worker.turn = null
 
+    // A turn that ran inside a held run ends here and takes nothing with it. The
+    // record is the COMMIT's, and deleting it would release the project halfway
+    // through one — with the tree the fix just rewrote left uncommitted and a
+    // new chat free to start on top of it.
+    const record = this.#turns.get(runId)
+    if (record?.nested) {
+      this.#settleNested(record)
+      this.#armIdle(worker)
+      return
+    }
+
     const release = () => {
       this.#turns.delete(runId)
       this.#watchers.delete(runId)
@@ -784,7 +995,7 @@ export class ChatLane {
     }
     // The RECORD is what holds the project, so it waits. Nothing else can be let
     // into the checkout until this turn's boundary has been written from it.
-    const settling = this.#turns.get(runId)?.settling
+    const settling = record?.settling
     if (!settling) return release()
     void settling.then(release, release)
   }
@@ -882,6 +1093,18 @@ export class ChatLane {
 
     const turn = worker.turn
     worker.turn = null
+    // The held run outlives the worker that was carrying out its fix, so this
+    // reports the death to it rather than over it. Writing `run.error` into that
+    // log would seal it, and dropping the record would release a project the
+    // commit is still standing in.
+    if (turn?.nested) {
+      // The reason, but not a verdict: a worker that dies between reporting its
+      // outcome and being let go of has still done the work, and overriding a
+      // success here would have the commit narrate a fix that landed as one that
+      // never finished.
+      this.#settleNested(turn, { errors: [reason] })
+      return
+    }
     if (turn && this.#turns.delete(turn.runId)) {
       this.log.append(turn.runId, { type: "run.error", message: reason })
       this.#watchers.delete(turn.runId)
@@ -924,14 +1147,20 @@ export class ChatLane {
 
     // `?.` rather than a guard: a turn interrupted between admission and the
     // fork has no worker to tell, and `#coldStart` checks `interrupted` before
-    // it starts one. Neither has a held run, which never had a worker at all —
-    // the flag above is the whole of how it hears about this.
+    // it starts one. Nor does a held run, unless it is part way through the fix
+    // `turnUnderHold` gave it — in which case this is what stops the agent, and
+    // the flag above is what stops the commit that was waiting on it.
     record.worker?.child.send({ cmd: "interrupt" } satisfies ToWorker)
     return true
   }
 
   /** Ends every turn and every session. Called from the daemon's shutdown path. */
   shutdown(): void {
+    // Settled before the records go, or a commit waiting on a fix would sit on a
+    // promise nothing can resolve and keep the process from exiting.
+    for (const record of this.#turns.values()) {
+      this.#settleNested(record, { status: "cancelled", errors: ["aide is shutting down"] })
+    }
     for (const worker of this.#workers) {
       worker.closing = true
       if (worker.idle) clearTimeout(worker.idle)

@@ -90,7 +90,7 @@ const say = (sessionId: string | null, text: string) =>
     sessionId,
     text,
     attachments: [],
-    mode: "manual",
+    mode: "auto",
     effort: "medium",
   })
 
@@ -263,7 +263,7 @@ const e1 = await evicting.send({
   sessionId: null,
   text: "then silence",
   attachments: [],
-  mode: "manual",
+  mode: "auto",
   effort: "medium",
 })
 await wait(TURN_MS)
@@ -299,7 +299,7 @@ console.log("\nthe lock — one agent has the repo")
     sessionId: null,
     text: "off you go",
     attachments: [],
-    mode: "manual",
+    mode: "auto",
     effort: "medium",
   })
 
@@ -314,7 +314,7 @@ console.log("\nthe lock — one agent has the repo")
       sessionId: null,
       text: "me too",
       attachments: [],
-      mode: "manual",
+      mode: "auto",
       effort: "medium",
     })
   } catch (err) {
@@ -345,7 +345,7 @@ console.log("\nthe lock — one agent has the repo")
       sessionId: null,
       text: "first of two",
       attachments: [],
-      mode: "manual",
+      mode: "auto",
       effort: "medium",
     }),
     locked.send({
@@ -353,7 +353,7 @@ console.log("\nthe lock — one agent has the repo")
       sessionId: null,
       text: "second of two",
       attachments: [],
-      mode: "manual",
+      mode: "auto",
       effort: "medium",
     }),
   ])
@@ -406,7 +406,7 @@ console.log("\nthe lock — one agent has the repo")
     sessionId: smokeSession,
     text: "again",
     attachments: [],
-    mode: "manual",
+    mode: "auto",
     effort: "medium",
   })
   await wait(TURN_MS)
@@ -833,6 +833,106 @@ console.log("\ncommitting with no conversation to attribute it to")
     "and the project is free again",
     lane.holderFor(project.id) === null,
     "a sessionless record has no conversation to be found and cleared through",
+  )
+}
+
+// ---------------------------------------------------------------------------
+console.log("\na refused commit asks the conversation for a fix")
+// The one automatic attempt. It is an agent turn running INSIDE a commit, which
+// is the shape everything here is about: the commit keeps the project's lock
+// across it, and none of the turn's own bookkeeping — its `run.started`, its
+// outcome, the record deletion at the end of it — may leak into the run that
+// asked for it. Each of those is a way the commit destroys itself with its own
+// repair: a sealed log swallows the sha, a deleted record lets a chat into the
+// checkout half way through.
+{
+  const session = "cccccccc-dddd-4eee-8fff-000000000000"
+  let fixStatus = ""
+  let fixCost = -1
+  let sessions = -1
+
+  const held = lane.hold({
+    project,
+    sessionId: session,
+    text: "committing what is uncommitted",
+    model: "helper-model",
+    work: async (run) => {
+      run.emit({
+        type: "verify.result",
+        command: "pnpm typecheck",
+        ok: false,
+        exitCode: 1,
+        durationMs: 12,
+        output: "app.ts(1,1): error TS0000",
+      })
+      const fix = await lane.turnUnderHold({
+        runId: run.runId,
+        project,
+        sessionId: session,
+        text: "the checks did not pass. fix it",
+        effort: "medium",
+      })
+      fixStatus = fix.status
+      fixCost = fix.costUsd
+      sessions = lane.liveSessions()
+      run.emit({ type: "commit.landed", sha: "c".repeat(40), paths: ["app.ts"] })
+      return { costUsd: 0.03 + fix.costUsd, modelUsage: {} }
+    },
+  })
+
+  // Mid-fix: an agent is working and the commit is still what holds the repo.
+  await wait(150)
+  check(
+    "the commit keeps the lock while the fix runs",
+    lane.holderFor(project.id)?.runId === held,
+    lane.holderFor(project.id)?.runId ?? "(free)",
+  )
+  check(
+    "and it is one record, not two",
+    lane.turns().length === 1,
+    "a second record would show the project held by something nobody pressed",
+  )
+
+  await wait(TURN_MS + 400)
+
+  const events = log.read(held)
+  check("the fix reported back", fixStatus === "success", fixStatus || "(nothing)")
+  check(
+    "and its spend came with it",
+    fixCost > 0,
+    "a commit that billed itself for the message alone would under-report every profile",
+  )
+  check(
+    "the request aide sent is in the transcript",
+    events.some((e) => e.type === "user.message" && e.text.includes("did not pass")),
+    "a fix appearing with no request in front of it reads as an agent acting unbidden",
+  )
+  check(
+    "the turn's own run.started did not land in the commit's log",
+    events.filter((e) => e.type === "run.started").length === 1,
+    `${events.filter((e) => e.type === "run.started").length} of them`,
+  )
+  check(
+    "and the log still ends in exactly one terminal event",
+    events.at(-1)?.type === "run.finished" &&
+      events.filter((e) => e.type === "run.finished" || e.type === "run.error").length === 1,
+    events.at(-1)?.type,
+  )
+  check(
+    "the commit landed AFTER the fix",
+    events.findIndex((e) => e.type === "user.message") <
+      events.findIndex((e) => e.type === "commit.landed"),
+    "the retry has to measure the tree the fix left, not the one it was handed",
+  )
+  check(
+    "the session the fix opened is left warm",
+    sessions >= 1,
+    "the next message in this chat should not pay for a cold start",
+  )
+  check(
+    "and the project is free once the commit ends",
+    lane.holderFor(project.id) === null,
+    "a nested turn that took the record with it would hold the repo for good",
   )
 }
 

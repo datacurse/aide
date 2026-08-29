@@ -484,13 +484,18 @@ console.log("\ninherited chat mode")
   // The session store is shared with the CLI and the VS Code extension, and a
   // conversation carries the mode it was last driven at. Reading that back is
   // what stops a chat you were running on Auto elsewhere from quietly reverting
-  // to Manual here and asking permission for the next command.
-  check("default is what aide calls manual", chatModeFromSdk("default") === "manual")
-  check("acceptEdits round-trips", chatModeFromSdk("acceptEdits") === "acceptEdits")
+  // here and asking permission for the next command.
   check("plan round-trips", chatModeFromSdk("plan") === "plan")
   check("auto round-trips", chatModeFromSdk("auto") === "auto")
   // Null is the load-bearing case. It means "no opinion", and the browser keeps
-  // whatever the human last picked — so an unknown mode can never widen one.
+  // whatever the human last picked — so an unknown mode can never widen one, and
+  // a mode aide has retired can never narrow one either.
+  check(
+    "the mode Manual used to be is no longer inherited",
+    chatModeFromSdk("default") === null,
+    "a CLI chat on default arrives on your own setting, not on a mode aide dropped",
+  )
+  check("nor is the one Edit-automatically was", chatModeFromSdk("acceptEdits") === null)
   check("dontAsk has no picker entry", chatModeFromSdk("dontAsk") === null, "what task runs use")
   check("bypassPermissions is never inherited", chatModeFromSdk("bypassPermissions") === null)
   check("a future mode is not guessed at", chatModeFromSdk("somethingNew") === null)
