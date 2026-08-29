@@ -204,6 +204,8 @@ export function Composer({
   draftKey,
   inheritedMode,
   blocked,
+  autoSend,
+  onAutoSent,
   onSend,
   onInterrupt,
 }: {
@@ -235,13 +237,29 @@ export function Composer({
    * the box it applies to.
    */
   blocked: string | null
+  /**
+   * Send what is in the box the moment it appears, without being pressed.
+   *
+   * Set by the ▶ on a parked chat, which is one press for "open this and start
+   * it". The send lives here rather than in the row because everything a turn
+   * needs besides the text — the mode, the effort, the plan-then-Auto switch —
+   * is remembered in this component, and a second copy of that in the list
+   * would be the one that silently disagreed.
+   */
+  autoSend: boolean
+  /** The press has been acted on. Called whether or not the box could send. */
+  onAutoSent: () => void
+  /**
+   * Resolves false when the turn was refused, so the box can put back what it
+   * optimistically cleared.
+   */
   onSend: (msg: {
     text: string
     attachments: Attachment[]
     mode: ChatMode
     autoAfterPlan: boolean
     effort: EffortLevel
-  }) => void
+  }) => Promise<boolean>
   onInterrupt: () => void
 }) {
   /**
@@ -302,19 +320,58 @@ export function Composer({
 
   const send = () => {
     if (!canSend) return
+    const outgoing = { text: text.trim(), attachments }
     // Only ever true alongside Plan. Sending it with another mode would ask the
     // daemon to widen a mode that has its own promise about asking — the daemon
     // refuses that too, and neither end should be the only one that does.
-    onSend({
-      text: text.trim(),
-      attachments,
+    void onSend({
+      ...outgoing,
       mode,
       autoAfterPlan: mode === "plan" && autoAfterPlan,
       effort,
+    }).then((started) => {
+      // A refused turn must not also swallow what it refused. The daemon turns
+      // a chat away while another one has the repo, and with ▶ on a parked
+      // chat the thing being cleared is the whole of a parked idea — one press
+      // and it would be gone, with only a red line to say why.
+      //
+      // Skipped if anything has been typed since: the box is the newer of the
+      // two, and putting back a message the human has already moved on from is
+      // its own kind of loss.
+      if (started) return
+      const now = readDraft(draftKey)
+      if (now.text === "" && now.attachments.length === 0) saveDraft(draftKey, outgoing)
     })
     edit({ text: "", attachments: [] })
     setNote(null)
   }
+
+  /**
+   * The ▶ pressed on a parked chat, carried out.
+   *
+   * Consumed whether or not the box could send it: if this chat is held back —
+   * an empty one, or uncommitted work in the way — the flag must not sit here
+   * waiting to fire the moment the block clears, which would be a turn nobody
+   * asked for at a moment nobody was looking.
+   *
+   * The ref is not belt and braces: StrictMode mounts effects twice, and
+   * without it every ▶ would send the same message twice in development.
+   *
+   * No dependency array, deliberately. `send` closes over the box, the mode and
+   * the effort, so a list of dependencies would either be all of them — which is
+   * every render anyway — or a stale closure sending last render's message.
+   */
+  const acted = useRef(false)
+  useEffect(() => {
+    if (!autoSend) {
+      acted.current = false
+      return
+    }
+    if (acted.current) return
+    acted.current = true
+    onAutoSent()
+    send()
+  })
 
   const takeFiles = async (files: FileList | File[]) => {
     const images = [...files].filter((f) => f.type.startsWith("image/"))

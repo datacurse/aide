@@ -63,7 +63,7 @@ export interface ChatSpend {
 }
 
 /**
- * Chat-list order: what it costs to ignore, then how recent.
+ * Chat-list order: what it costs to ignore, then how old it is.
  *
  * `blocked` first because an agent is literally stopped on a click. `closed`
  * last because you have said you are finished with it — that is the "all
@@ -78,10 +78,23 @@ const CHAT_RANK: Record<string, number> = {
 const chatRank = (s: ChatStatus): number =>
   s.blocked && s.state !== "closed" ? 0 : (CHAT_RANK[s.state ?? "ordinary"] ?? 2)
 
-export function sortChats<T extends { status: ChatStatus; lastModified: number }>(
-  rows: readonly T[],
-): T[] {
-  return [...rows].sort(
-    (a, b) => chatRank(a.status) - chatRank(b.status) || b.lastModified - a.lastModified,
-  )
+/**
+ * When a row came into existence — the date the list is ordered by.
+ *
+ * `lastModified` used to be the key, and ordering by it meant the list
+ * rearranged itself every time you spoke: a chat from last week jumped over ten
+ * newer ones the moment you asked it one more thing, and the position you had
+ * learned for everything below it moved with it. Where a row sits is now a fact
+ * about the work rather than about which one you touched last.
+ *
+ * A null `createdAt` is a session whose first entry carried no timestamp, and
+ * the file's mtime is the only date it has.
+ */
+const born = (r: { createdAt: number | null; lastModified: number }): number =>
+  r.createdAt ?? r.lastModified
+
+export function sortChats<
+  T extends { status: ChatStatus; createdAt: number | null; lastModified: number },
+>(rows: readonly T[]): T[] {
+  return [...rows].sort((a, b) => chatRank(a.status) - chatRank(b.status) || born(b) - born(a))
 }

@@ -424,7 +424,8 @@ console.log("\ndone, and undone")
 console.log("\nchat list order")
 {
   const { sortChats } = await import("@aide/protocol")
-  const at = (n: number) => ({ lastModified: n })
+  /** Born at `n`, last spoken to at `spoke` — the two dates the order can pick from. */
+  const at = (n: number, spoke = n) => ({ createdAt: n, lastModified: spoke })
   const st = (state: ChatState | null, extra: Partial<ChatStatus> = {}): ChatStatus => ({
     state,
     blocked: false,
@@ -445,6 +446,23 @@ console.log("\nchat list order")
     sorted[3]?.id === "closed",
     "all finished pushed down",
   )
+
+  // The list is read by position, so speaking to a chat must not move it: a row
+  // that jumps to the top when you ask it one more thing drags every row below
+  // it along, and the place you had learned for all of them is gone.
+  const spoken = sortChats([
+    { id: "old", ...at(100, 900), status: st(null) },
+    { id: "new", ...at(200), status: st(null) },
+  ])
+  check("a new prompt on an old chat leaves it below a newer one", spoken[0]?.id === "new")
+
+  // A session whose first entry carried no timestamp still has to land
+  // somewhere, and its mtime is the only date it has.
+  const undated = sortChats([
+    { id: "dated", ...at(100), status: st(null) },
+    { id: "undated", createdAt: null, lastModified: 300, status: st(null) },
+  ])
+  check("an undated session falls back to its mtime", undated[0]?.id === "undated")
 }
 
 // ---------------------------------------------------------------------------

@@ -53,6 +53,15 @@ export function App() {
   const [commitRunId, setCommitRunId] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
   /**
+   * A parked chat that has had its ▶ pressed and has not gone out yet.
+   *
+   * One press has to do two things that live in different components — open the
+   * chat, which is a navigation, and send it, which only the composer can do
+   * because only it knows the mode and the effort. This is the half-beat between
+   * them, and the composer clears it the moment it has acted.
+   */
+  const [autoSend, setAutoSend] = useState<string | null>(null)
+  /**
    * Whether a folder dialog is open on the desktop.
    *
    * Worth a state of its own because the window can be behind the browser: with
@@ -128,6 +137,25 @@ export function App() {
 
   const project = projects.find((p) => p.id === projectId) ?? null
   const uncommitted = pending?.files.length ?? 0
+
+  /**
+   * Why pressing ▶ on a parked chat would be refused right now, or null.
+   *
+   * Both halves are the daemon's own rules, stated early. It turns a chat away
+   * while another one has the repo, and a chat started on top of somebody else's
+   * uncommitted edits takes them as its own baseline — which is why "new" is
+   * held back by the same thing.
+   *
+   * Stated BEFORE the press rather than after it, unlike the composer's own
+   * refusal, because sending clears the box: a ▶ that fails would take the
+   * parked idea with it and leave a red line where the work used to be.
+   */
+  const startBlocked =
+    uncommitted > 0
+      ? `${uncommitted} uncommitted file${uncommitted === 1 ? "" : "s"} — commit that work before starting another chat.`
+      : project?.holder
+        ? `"${project.holder.title}" has this checkout. Wait for it, or stop it.`
+        : null
 
   /**
    * Whether the commit we started is the thing currently holding the repo.
@@ -316,8 +344,16 @@ export function App() {
           projectId={projectId}
           selected={sessionId}
           selectedDraft={draftId}
+          startBlocked={startBlocked}
           onSelect={(id) => navigate({ sessionId: id })}
           onSelectDraft={(id) => navigate({ draftId: id })}
+          // Open it and send it, from the one press. The order matters only in
+          // that both land in the same batch, so the composer's first render for
+          // this chat is already the one that sends it.
+          onStartDraft={(id) => {
+            navigate({ draftId: id })
+            setAutoSend(id)
+          }}
           onChanged={() => setConversationsSeq((n) => n + 1)}
         />
       </aside>
@@ -328,6 +364,10 @@ export function App() {
         draftId={draftId}
         uncommitted={uncommitted}
         adoptRunId={commitRunId}
+        // Gated on the open chat being the one that was pressed, so a ▶ that
+        // somehow outlived its navigation cannot fire at whatever is open now.
+        autoSend={autoSend !== null && autoSend === draftId}
+        onAutoSent={() => setAutoSend(null)}
         onChanged={() => setConversationsSeq((n) => n + 1)}
         // A new chat has no id until its first turn starts. Put it in the
         // URL the moment it exists, so a reload mid-first-turn still lands

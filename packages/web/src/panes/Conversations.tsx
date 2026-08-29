@@ -90,20 +90,27 @@ const kindColor = (c: Kinded) => (c.kind === "task" ? "text-diff-add-fg" : "text
  *
  * Discardable because it is the one row nothing else will ever remove — a chat
  * that never gets a first message never gets a session, so it would otherwise
- * sit at the top of the list forever.
+ * sit in the list forever.
  */
 function UnstartedRow({
   draft,
   selected,
+  blocked,
   onOpen,
+  onStart,
   onDiscard,
 }: {
   draft: Draft
   selected: boolean
+  /** Why this cannot be started right now, or null. */
+  blocked: string | null
   onOpen: () => void
+  /** Open it AND send it, in one press. See the ▶ below. */
+  onStart: () => void
   onDiscard: () => void
 }) {
   const preview = draft.text.trim().split("\n", 1)[0] ?? ""
+  const written = draft.text.trim() !== "" || draft.attachments.length > 0
   return (
     <div
       className={`group flex w-full items-center gap-2 px-3 py-1.5 font-sans ${
@@ -136,6 +143,38 @@ function UnstartedRow({
       >
         ✕
       </button>
+      {/*
+        Start it, in one press.
+
+        This is the slot the ✓ sits in on a chat that has run, and it asks the
+        opposite question: a parked chat has nothing to tick off, it has
+        something to begin. Starting one used to cost two presses and a hunt for
+        the box — open the row, scroll to the composer, send — which is two too
+        many for the one thing a backlog is for.
+
+        Last in the row, so it takes the column a started chat puts its ✓ in —
+        the two are the same slot asked at two ages. And always drawn rather than
+        appearing on hover, unlike the ✕ beside it: starting the next piece of
+        work is what you came to the list to do, and discarding one is not.
+
+        Nothing to start on an empty row, so nothing is drawn there — a ▶ that
+        would do nothing is worse than a gap.
+      */}
+      {written && (
+        <button
+          type="button"
+          onClick={onStart}
+          disabled={blocked !== null}
+          title={blocked ?? "Start this chat — opens it and sends it"}
+          className={`shrink-0 rounded-sm border px-1 text-[10px] leading-4 ${
+            blocked
+              ? "cursor-not-allowed border-line text-fg-dim opacity-40"
+              : "border-line text-fg-dim hover:border-ok hover:text-ok"
+          }`}
+        >
+          ▶
+        </button>
+      )}
     </div>
   )
 }
@@ -154,7 +193,8 @@ function UnstartedRow({
  * do while something else is in front of you, and a box that took over the pane
  * left your idea sitting in a composer, one Enter away from being sent at a
  * conversation it had nothing to do with. The row in the list is the whole of
- * what this does — opening it is a click, and sending it is another.
+ * what this does — and the ▶ on that row is what starts it, without ever opening
+ * the box.
  */
 function CaptureBox({ projectId }: { projectId: string }) {
   const [text, setText] = useState("")
@@ -284,6 +324,26 @@ function DoneCheck({ done, onToggle }: { done: boolean; onToggle: () => void }) 
 }
 
 /**
+ * The line between what still wants something from you and what does not.
+ *
+ * Drawn only when there is something on both sides of it. With one side empty a
+ * heading is not telling two groups apart, it is a label on the only list there
+ * is — and a 320px column has no room for a word that says nothing.
+ */
+function GroupLabel({ label, count, ruled }: { label: string; count: number; ruled?: boolean }) {
+  return (
+    <div
+      className={`flex items-baseline gap-1.5 px-3 pt-2 pb-1 font-sans text-[10px] font-semibold tracking-wide text-fg-dim uppercase ${
+        ruled ? "mt-1 border-t border-line" : ""
+      }`}
+    >
+      <span>{label}</span>
+      <span className="font-normal normal-case tracking-normal tabular-nums">{count}</span>
+    </div>
+  )
+}
+
+/**
  * One conversation, as a row.
  *
  * Two lines: what it was about, and what it took. Nothing else fits in 320px
@@ -389,12 +449,42 @@ const USAGE_SHARE = (tokens: number) =>
   `${compact(tokens)} tokens, as a share of every token aide has spent on this machine. Not your plan's usage — that window counts every client at once.`
 
 /**
+ * How a parked chat looks to the ordering the started ones use.
+ *
+ * It has no status and no session, but it has a date, and a date is all the
+ * order needs — so it sorts AMONG the conversations rather than in a block above
+ * them. Two ideas parked either side of a chat you actually had keep the order
+ * you had them in, which is the whole point of ordering by when a thing came to
+ * exist.
+ *
+ * One object for every parked row, because none of them differ.
+ */
+const PARKED: ChatStatus = { state: null, blocked: false, done: false }
+
+/**
+ * A row in the list, whichever kind it is.
+ *
+ * Flattened to the three fields `sortChats` reads, so both kinds go through one
+ * ordering. Two sorts stitched together was the alternative, and it can only
+ * ever produce a list whose two halves disagree about what "first" means.
+ */
+type ListRow = { status: ChatStatus; createdAt: number | null; lastModified: number } & (
+  | { kind: "draft"; draft: Draft }
+  | { kind: "chat"; chat: ConversationRow }
+)
+
+/**
  * The list of a project's conversations, and the only list there is.
  *
  * Three kinds of row, in one column, because they are all the same thing at
  * different ages: a chat you have written and not sent, a chat that is running,
  * and a chat that is over. A separate backlog was the second copy of the first
  * of those.
+ *
+ * In two groups, though, and the split is the one that matters: what still wants
+ * something from you, and what is archived. A chat you have ticked off is a
+ * record — worth keeping, worth reading, and not worth scrolling past to reach
+ * the thing you were going to do next.
  *
  * A `chat` is a session whose cwd is the project root — including ones started
  * in the Claude Code CLI or the VS Code extension, since aide reads the same
@@ -406,8 +496,10 @@ export function ConversationList({
   selected,
   selectedDraft,
   reloadSeq,
+  startBlocked,
   onSelect,
   onSelectDraft,
+  onStartDraft,
   onChanged,
 }: {
   projectId: string | null
@@ -416,8 +508,17 @@ export function ConversationList({
   selectedDraft: string | null
   /** Bumped by the app to ask for a refetch — see App.tsx for why it is not a key. */
   reloadSeq: number
+  /**
+   * Why a parked chat cannot be started right now, or null. Computed by the app,
+   * which is the only place that knows both what is uncommitted and who holds
+   * the checkout — and the ▶ has to be dark BEFORE it is pressed, because the
+   * send it would fail at clears the box it was sending.
+   */
+  startBlocked: string | null
   onSelect: (sessionId: string) => void
   onSelectDraft: (draftId: string) => void
+  /** Open a parked chat and send it, from its ▶. */
+  onStartDraft: (draftId: string) => void
   /** Ticking a chat off changes the row the pane below is showing. */
   onChanged: () => void
 }) {
@@ -499,6 +600,72 @@ export function ConversationList({
       })
   }
 
+  /**
+   * Every row this project has, in one order.
+   *
+   * Memoized because `sortChats` copies, and this list is re-rendered on the
+   * app's poll: a fresh array every 1.5 seconds is a fresh identity for every
+   * row's props, which is enough to make a 200-chat list stutter while you
+   * scroll it.
+   */
+  const rows = useMemo<ListRow[]>(
+    () =>
+      sortChats([
+        ...unstarted.map(
+          (d): ListRow => ({
+            kind: "draft",
+            draft: d,
+            status: PARKED,
+            createdAt: d.createdAt,
+            // Only ever the fallback, and a parked chat always has a createdAt.
+            lastModified: d.updatedAt,
+          }),
+        ),
+        ...(items ?? []).map(
+          (c): ListRow => ({
+            kind: "chat",
+            chat: c,
+            status: c.status,
+            createdAt: c.createdAt,
+            lastModified: c.lastModified,
+          }),
+        ),
+      ]),
+    [unstarted, items],
+  )
+
+  /**
+   * The two groups, split on the tick — the one thing in this list a human sets
+   * and an agent cannot. "Open" is the daemon's own word for it: untick a chat
+   * and the route is called `reopen`. So archiving is the gesture it always was,
+   * and the row leaving the way clear is what the tick now buys you.
+   */
+  const stillOpen = rows.filter((r) => r.status.state !== "closed")
+  const archived = rows.filter((r) => r.status.state === "closed")
+  /** A heading earns its line only when there is something on both sides of it. */
+  const split = stillOpen.length > 0 && archived.length > 0
+
+  const render = (row: ListRow) =>
+    row.kind === "draft" ? (
+      <UnstartedRow
+        key={row.draft.key}
+        draft={row.draft}
+        selected={selectedDraft === idFromKey(row.draft.key)}
+        blocked={startBlocked}
+        onOpen={() => onSelectDraft(idFromKey(row.draft.key))}
+        onStart={() => onStartDraft(idFromKey(row.draft.key))}
+        onDiscard={() => discardDraft(row.draft.key)}
+      />
+    ) : (
+      <ChatRow
+        key={row.chat.sessionId}
+        chat={row.chat}
+        selected={row.chat.sessionId === selected}
+        onOpen={() => onSelect(row.chat.sessionId)}
+        onToggleDone={() => toggleDone(row.chat)}
+      />
+    )
+
   if (!projectId) return <Empty>Select a project.</Empty>
 
   return (
@@ -508,32 +675,17 @@ export function ConversationList({
         <p className="border-b border-line px-3 py-1.5 font-sans text-[11px] text-err">{error}</p>
       )}
       <div className="flex-1 overflow-auto py-1">
-        {unstarted.map((d) => (
-          <UnstartedRow
-            key={d.key}
-            draft={d}
-            selected={selectedDraft === idFromKey(d.key)}
-            onOpen={() => onSelectDraft(idFromKey(d.key))}
-            onDiscard={() => discardDraft(d.key)}
-          />
-        ))}
-        {items === null && <Empty>Reading the session store…</Empty>}
-        {items?.length === 0 && unstarted.length === 0 && (
+        {items === null && rows.length === 0 && <Empty>Reading the session store…</Empty>}
+        {items !== null && rows.length === 0 && (
           <Empty>
             Nothing here yet. Type what you want above, or press new. Chats from Claude Code and
             the VS Code extension appear here too.
           </Empty>
         )}
-        {items !== null &&
-          sortChats(items).map((c) => (
-            <ChatRow
-              key={c.sessionId}
-              chat={c}
-              selected={c.sessionId === selected}
-              onOpen={() => onSelect(c.sessionId)}
-              onToggleDone={() => toggleDone(c)}
-            />
-          ))}
+        {split && <GroupLabel label="open" count={stillOpen.length} />}
+        {stillOpen.map(render)}
+        {split && <GroupLabel label="archived" count={archived.length} ruled />}
+        {archived.map(render)}
       </div>
     </div>
   )
@@ -562,6 +714,8 @@ export function ConversationPane({
   draftId,
   uncommitted,
   adoptRunId,
+  autoSend,
+  onAutoSent,
   onStarted,
   onChanged,
 }: {
@@ -589,6 +743,15 @@ export function ConversationPane({
    * committed — so it streams here, where the work it is describing already is.
    */
   adoptRunId?: string | null
+  /**
+   * This chat was opened by a ▶ rather than by a click, so send it.
+   *
+   * Passed straight through to the composer, which is where the mode and the
+   * effort a turn goes out under are remembered.
+   */
+  autoSend: boolean
+  /** The ▶ has been acted on, whether or not the box could send. */
+  onAutoSent: () => void
   /** A new chat learns its session id mid-turn; the URL needs to know. */
   onStarted?: (sessionId: string) => void
   /** Something happened that the list is showing a stale copy of. */
@@ -859,20 +1022,30 @@ export function ConversationPane({
     toBottom()
   }, [sessionId, runId, view?.events.length, toBottom])
 
+  /**
+   * Answers whether the turn actually started.
+   *
+   * The composer clears the box the moment it hands the message over, which is
+   * right when the turn starts and wrong when the daemon refuses it — and it
+   * refuses whenever another chat has the repo. False is how the box knows to
+   * put back what it was carrying.
+   */
   const send = async (msg: {
     text: string
     attachments: Attachment[]
     mode: ChatMode
     autoAfterPlan: boolean
     effort: EffortLevel
-  }) => {
-    if (!projectId) return
+  }): Promise<boolean> => {
+    if (!projectId) return false
     setError(null)
     try {
       const { runId: id } = await api.chat(projectId, { sessionId, ...msg })
       setRunId(id)
+      return true
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
+      return false
     }
   }
 
@@ -977,7 +1150,9 @@ export function ConversationPane({
               ? null
               : `${uncommitted} uncommitted file${uncommitted === 1 ? "" : "s"} in this project. Open the chat that made them and press commit in the rail on the right.`
           }
-          onSend={(msg) => void send(msg)}
+          autoSend={autoSend}
+          onAutoSent={onAutoSent}
+          onSend={send}
           onInterrupt={() => {
             if (runId) void api.interruptChat(runId).catch(() => {})
           }}
