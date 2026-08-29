@@ -232,7 +232,7 @@ export function App() {
               onClick={() => setChiming(!chiming)}
               title={
                 chiming
-                  ? "A finished run rings. Click to silence."
+                  ? "A finished run rings every couple of seconds until you come back. Click to silence."
                   : "Finished runs are silent. Click to hear them."
               }
               className={`text-[11px] underline-offset-2 hover:underline ${

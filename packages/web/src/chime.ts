@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react"
+import { useEffect, useRef, useState } from "react"
 
 /**
  * The sound a finished turn makes.
@@ -64,8 +64,21 @@ export function chime(): void {
   }
 }
 
+/** How long the alarm waits between rings. */
+const ALARM_MS = 2000
+
 /**
- * Ring once when a turn this page watched go from running to stopped, stops.
+ * How far the pointer has to travel, in CSS pixels, before the alarm believes
+ * you are back. One mousemove is not evidence of anybody: a desk bump, a
+ * scrollbar under a still cursor, a window animation sliding the page — each
+ * produces one. An alarm you can silence by accident is one you stop trusting
+ * to fetch you, which is the only job it has.
+ */
+const ROUSED_PX = 80
+
+/**
+ * Ring until you come back, when a turn this page watched go from running to
+ * stopped, stops.
  *
  * Edge-triggered and keyed, both deliberately. Opening a conversation that
  * finished an hour ago replays its whole event log, terminal event included, so
@@ -73,17 +86,82 @@ export function chime(): void {
  * sound like work arriving. And `key` — the run id — is what keeps clicking from
  * a running task to a finished one silent: that is a different run ending, which
  * this page never saw start.
+ *
+ * Repeating rather than once, and unbounded: a single ping is over before you
+ * have finished the thought it interrupted, and a run that finishes while you
+ * are three windows away then went unnoticed for an hour. The alarm keeps its
+ * own promise instead — it stops when somebody is there, and not before.
  */
 export function useDoneChime(active: boolean, key: string | null): void {
   const watching = useRef<string | null>(null)
+  const [ringing, setRinging] = useState(false)
 
   useEffect(() => {
     if (active) {
       watching.current = key
+      // A turn starting is the least ambiguous acknowledgement there is: you
+      // are plainly here, and the thing the alarm was fetching you for is done.
+      setRinging(false)
       return
     }
     const was = watching.current
     watching.current = null
-    if (was !== null && was === key) chime()
+    if (was !== null && was === key) setRinging(true)
   }, [active, key])
+
+  useEffect(() => {
+    if (!ringing) return
+    if (!chimeEnabled()) {
+      setRinging(false)
+      return
+    }
+
+    chime()
+    const timer = window.setInterval(() => {
+      // Where turning the chime off mid-alarm lands: the header toggle writes
+      // localStorage and broadcasts nothing. In practice the click has already
+      // stopped the alarm through `roused` below, so this is the backstop for
+      // the other tab and for a hand-edited value.
+      if (!chimeEnabled()) {
+        setRinging(false)
+        return
+      }
+      chime()
+      // Chrome throttles a hidden page's timers to once a minute after five
+      // minutes — unless it has played audio in the last thirty seconds, which
+      // ringing every two keeps true. The alarm is what stops the alarm being
+      // throttled, so the first ring has to happen before the interval starts.
+    }, ALARM_MS)
+
+    // Acknowledgement is deliberately not "any mousemove". A mousemove fires
+    // while this window is in the background — the cursor only has to cross the
+    // page on its way somewhere else — so movement alone is no evidence anyone
+    // looked. What counts is the pointer covering real ground while this window
+    // holds focus, or a key or a click, neither of which happens without you.
+    let travelled = 0
+    let last: { x: number; y: number } | null = null
+    const onMove = (e: MouseEvent) => {
+      if (!document.hasFocus()) {
+        // Reset rather than merely ignore, so a cursor that crosses the page
+        // repeatedly on its way elsewhere never adds up to a person.
+        travelled = 0
+        last = null
+        return
+      }
+      if (last) travelled += Math.hypot(e.clientX - last.x, e.clientY - last.y)
+      last = { x: e.clientX, y: e.clientY }
+      if (travelled >= ROUSED_PX) setRinging(false)
+    }
+    const roused = () => setRinging(false)
+
+    window.addEventListener("mousemove", onMove, { passive: true })
+    window.addEventListener("keydown", roused)
+    window.addEventListener("pointerdown", roused)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener("mousemove", onMove)
+      window.removeEventListener("keydown", roused)
+      window.removeEventListener("pointerdown", roused)
+    }
+  }, [ringing])
 }
