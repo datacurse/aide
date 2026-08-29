@@ -23,7 +23,7 @@ import {
   useUnstartedChats,
   type Draft,
 } from "../drafts.js"
-import { Lock } from "../icons.js"
+import { ArrowDown, Check, Lock, Play, X } from "../icons.js"
 import { draftName, useAutoNames } from "../naming.js"
 import { ProfileOverlay } from "../Profile.js"
 import { WorkingBar } from "../Working.js"
@@ -202,9 +202,9 @@ function UnstartedRow({
         type="button"
         onClick={onDiscard}
         title="Discard this chat"
-        className="shrink-0 text-[11px] text-fg-dim opacity-0 group-hover:opacity-100 hover:text-err"
+        className="shrink-0 text-fg-dim opacity-0 group-hover:opacity-100 hover:text-err"
       >
-        ✕
+        <X className="size-3" />
       </button>
       {/*
         Start it, in one press.
@@ -243,7 +243,7 @@ function UnstartedRow({
               : "border-line text-fg-dim hover:border-ok hover:text-ok"
           }`}
         >
-          {blocked ? <Lock className="size-2.5" /> : "▶"}
+          {blocked ? <Lock className="size-2.5" /> : <Play className="size-2.5" />}
         </button>
       )}
     </div>
@@ -309,9 +309,10 @@ function CaptureBox({ projectId }: { projectId: string }) {
               type="button"
               onClick={() => setAttachments((prev) => prev.filter((x) => x.id !== a.id))}
               title="Remove this image"
-              className="rounded border border-line-soft px-1.5 py-0.5 font-sans text-[10px] text-fg-dim hover:border-err hover:text-err"
+              className="inline-flex items-center gap-1 rounded border border-line-soft px-1.5 py-0.5 font-sans text-[10px] text-fg-dim hover:border-err hover:text-err"
             >
-              image ✕
+              image
+              <X className="size-2.5" />
             </button>
           ))}
         </div>
@@ -414,13 +415,18 @@ function DoneCheck({ done, onToggle }: { done: boolean; onToggle: () => void }) 
       type="button"
       onClick={onToggle}
       title={done ? "Served its purpose. Click to reopen it." : "Mark this chat done"}
-      className={`mt-0.5 shrink-0 rounded-sm border px-1 text-[10px] leading-4 ${
+      // The same 4-high bordered box the ▶ on a parked chat wears, because the
+      // two are the same slot at two ages — see `UnstartedRow`.
+      className={`mt-0.5 flex h-4 shrink-0 items-center justify-center rounded-sm border px-1 ${
         done
           ? "border-ok/60 text-ok"
-          : "border-line text-transparent group-hover:text-fg-dim hover:border-fg-dim"
+          : // `text-transparent` rather than `invisible`: the tick is still
+            // there to be hovered, and `currentColor` on the icon means it
+            // vanishes with the text colour it inherits.
+            "border-line text-transparent group-hover:text-fg-dim hover:border-fg-dim"
       }`}
     >
-      ✓
+      <Check className="size-2.5" />
     </button>
   )
 }
@@ -1653,9 +1659,10 @@ export function ConversationPane({
           <button
             type="button"
             onClick={toBottom}
-            className="absolute right-4 bottom-3 z-10 rounded-full border border-line bg-chrome px-3 py-1 font-sans text-[11px] text-fg-muted shadow-lg hover:text-fg"
+            className="absolute right-4 bottom-3 z-10 flex items-center gap-1.5 rounded-full border border-line bg-chrome px-3 py-1 font-sans text-[11px] text-fg-muted shadow-lg hover:text-fg"
           >
-            ↓ jump to latest
+            <ArrowDown className="size-3" />
+            jump to latest
           </button>
         )}
       </div>

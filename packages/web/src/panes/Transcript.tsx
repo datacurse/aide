@@ -1,5 +1,15 @@
 import { useEffect, useMemo, useState, type ReactNode, type RefObject } from "react"
 import type { MessageImage, RunEvent, RunStatus } from "@aide/protocol"
+import {
+  ArrowClockwise,
+  CaretRight,
+  Check,
+  Circle,
+  GitCommit,
+  Minus,
+  Warning,
+  X,
+} from "../icons.js"
 import { Markdown } from "../Markdown.js"
 import { Button, Empty, money } from "../ui.js"
 
@@ -11,6 +21,24 @@ import { Button, Empty, money } from "../ui.js"
  * turn emits, so history and the message arriving right now render through one
  * component rather than two that drift.
  */
+
+/**
+ * A marker in the left-hand column of a row: a check, a cross, a caret.
+ *
+ * One class string, because that column only reads as a column if every icon in
+ * it is the same size and sits on the same line as the text beside it. See
+ * `icons.tsx` for why the nudge is there at all.
+ */
+const MARK = "size-3 shrink-0 translate-y-[0.15em]"
+
+/**
+ * The same marker, for a row that is a paragraph rather than a flex line.
+ *
+ * `inline` because Tailwind's preflight makes every `svg` a block — left at
+ * that, the icon takes a line of its own and the sentence it introduces starts
+ * underneath it.
+ */
+const INLINE_MARK = "mr-1 inline size-3 align-[-0.15em]"
 
 /** tool.start and tool.end arrive separately; pair them into one line per call. */
 interface ToolLine {
@@ -485,11 +513,11 @@ function describeInput(name: string, input: unknown): string {
 function ToolRow({ line }: { line: ToolLine }) {
   const mark =
     line.ok === null ? (
-      <span className="text-info">▸</span>
+      <CaretRight className={`${MARK} text-info`} />
     ) : line.ok ? (
-      <span className="text-ok">✓</span>
+      <Check className={`${MARK} text-ok`} />
     ) : (
-      <span className="text-err">✗</span>
+      <X className={`${MARK} text-err`} />
     )
   const [open, setOpen] = useState(false)
 
@@ -738,7 +766,7 @@ function CheckpointRow({ line }: { line: CheckpointLine }) {
         onClick={() => toggleUnlessSelecting(setOpen)}
         className="flex min-w-0 cursor-pointer items-baseline gap-2 rounded px-1 py-0.5 hover:bg-hover"
       >
-        <span className="text-ok">✓</span>
+        <Check className={`${MARK} text-ok`} />
         <span className="shrink-0 text-syn-keyword">
           {isTurn ? `after turn ${line.turn}` : "checkpoint"}
         </span>
@@ -829,7 +857,7 @@ export function CommitMessageDraft({ text, model }: { text: string; model: strin
 function StaleRow({ supervised }: { supervised: boolean }) {
   return (
     <p className="flex min-w-0 items-baseline gap-2 px-1 py-0.5">
-      <span className="shrink-0 text-warn">↻</span>
+      <ArrowClockwise className={`${MARK} text-warn`} />
       <span className="min-w-0 font-sans text-[11px] leading-relaxed text-fg-muted">
         {supervised
           ? "This turn changed the daemon, so it is restarting now that the turn is done. Give it a second and the change is live — you do not have to do anything."
@@ -889,11 +917,15 @@ function VerifyRow({ line }: { line: VerifyLine }) {
         onClick={() => toggleUnlessSelecting((flip) => setOverride(flip(open)))}
         className="flex min-w-0 cursor-pointer items-baseline gap-2 rounded px-1 py-0.5 hover:bg-hover"
       >
-        {/* `▸` while it runs, the same marker a commit step in flight uses, so
-            "this one is happening now" reads the same everywhere. */}
-        <span className={running ? "text-info" : line.ok ? "text-ok" : "text-err"}>
-          {running ? "▸" : line.ok ? "✓" : "✗"}
-        </span>
+        {/* A caret while it runs, the same marker a commit step in flight uses,
+            so "this one is happening now" reads the same everywhere. */}
+        {running ? (
+          <CaretRight className={`${MARK} text-info`} />
+        ) : line.ok ? (
+          <Check className={`${MARK} text-ok`} />
+        ) : (
+          <X className={`${MARK} text-err`} />
+        )}
         <span className="min-w-0 truncate text-syn-string">{line.command}</span>
         {running ? (
           line.startedAt > 0 && <RunningFor since={line.startedAt} />
@@ -926,7 +958,7 @@ function CommitLandedRow({ line }: { line: CommitLandedLine }) {
         onClick={() => toggleUnlessSelecting(setOpen)}
         className="flex min-w-0 cursor-pointer items-baseline gap-2 rounded px-1 py-0.5 hover:bg-hover"
       >
-        <span className="text-diff-add-fg">●</span>
+        <GitCommit className={`${MARK} text-diff-add-fg`} />
         <span className="shrink-0 text-diff-add-fg">committed {line.sha.slice(0, 7)}</span>
         <span className="shrink-0 text-fg-dim">
           {line.paths.length} file{line.paths.length === 1 ? "" : "s"}
@@ -949,7 +981,11 @@ function renderLine(
   if (line.kind === "commit-step")
     return (
       <p key={line.key} className="flex min-w-0 items-baseline gap-2 px-1">
-        <span className={line.done ? "text-ok" : "text-info"}>{line.done ? "✓" : "▸"}</span>
+        {line.done ? (
+          <Check className={`${MARK} text-ok`} />
+        ) : (
+          <CaretRight className={`${MARK} text-info`} />
+        )}
         <span className="min-w-0 text-fg-muted">{line.label}</span>
       </p>
     )
@@ -969,7 +1005,7 @@ function renderLine(
       // Dimmed whole, including the command, so it reads as a row that is not
       // going to happen rather than one still waiting its turn.
       <p key={line.key} className="flex min-w-0 items-baseline gap-2 px-1 text-fg-dim">
-        <span>–</span>
+        <Minus className={MARK} />
         <span className="min-w-0 truncate">{line.command}</span>
         <span className="shrink-0">skipped · {line.reason}</span>
       </p>
@@ -987,19 +1023,22 @@ function renderLine(
   if (line.kind === "denied")
     return (
       <p key={line.key} className="px-1 break-words text-warn">
-        ✗ denied {line.name} — {line.reason}
+        <X className={INLINE_MARK} />
+        denied {line.name} — {line.reason}
       </p>
     )
   if (line.kind === "retry")
     return (
       <p key={line.key} className="px-1 break-words text-warn">
-        ↻ {line.text}
+        <ArrowClockwise className={INLINE_MARK} />
+        {line.text}
       </p>
     )
   if (line.kind === "error")
     return (
       <p key={line.key} className="px-1 break-words text-err" title={line.text}>
-        ! {humanizeError(line.text)}
+        <Warning className={INLINE_MARK} />
+        {humanizeError(line.text)}
       </p>
     )
   if (line.kind === "outcome") {
@@ -1007,7 +1046,8 @@ function renderLine(
     return (
       <div key={line.key} className="mt-3 border-t border-line px-1 pt-2">
         <p title={`SDK result subtype: ${line.subtype}`} className={outcome.className}>
-          ● {outcome.label}
+          <Circle className={INLINE_MARK} />
+          {outcome.label}
           <span className="text-fg-dim">
             {" — "}
             {/* A commit run has no SDK steps to count, and "0 turns" on the end of

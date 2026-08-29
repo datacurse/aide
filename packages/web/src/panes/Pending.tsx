@@ -11,6 +11,7 @@ import type {
 } from "@aide/protocol"
 import { api, type GitHistory } from "../api.js"
 import { GraphCell, ROW_H, graphWidth } from "../GitGraph.js"
+import { ArrowDown, ArrowUp, Tag } from "../icons.js"
 import { Button, Empty, PaneHeader } from "../ui.js"
 import { useKeyed } from "../useKeyed.js"
 
@@ -397,8 +398,18 @@ function Upstream({ overview }: { overview: GitOverview }) {
     : `${where}, tracking nothing. Nothing here has been pushed anywhere.\n${overview.root}`
   return (
     <span className="ml-auto flex min-w-0 items-center gap-1.5 font-sans text-[11px]" title={title}>
-      {ahead > 0 && <span className="shrink-0 text-diff-add-fg">↑{ahead}</span>}
-      {behind > 0 && <span className="shrink-0 text-warn">↓{behind}</span>}
+      {ahead > 0 && (
+        <span className="flex shrink-0 items-center gap-0.5 text-diff-add-fg">
+          <ArrowUp className="size-3" />
+          {ahead}
+        </span>
+      )}
+      {behind > 0 && (
+        <span className="flex shrink-0 items-center gap-0.5 text-warn">
+          <ArrowDown className="size-3" />
+          {behind}
+        </span>
+      )}
       <span className="min-w-0 truncate text-fg-dim">{upstream ?? "no upstream"}</span>
     </span>
   )
@@ -513,7 +524,11 @@ function RefBadge({ gitRef: r }: { gitRef: GitRef }) {
       title={`${r.kind}${r.head ? ", checked out" : ""}: ${r.name}`}
       className={`max-w-[6rem] shrink-0 truncate rounded-sm border px-1 text-[10px] leading-[14px] ${tone}`}
     >
-      {r.kind === "tag" ? `⌂ ${r.name}` : r.name}
+      {/* Inline, and not a flex row: `truncate` is what keeps a long branch name
+          from widening the row it shares with the subject, and it only works on
+          text that is still text. */}
+      {r.kind === "tag" && <Tag className="mr-0.5 inline size-2.5 align-[-0.15em]" />}
+      {r.name}
     </span>
   )
 }

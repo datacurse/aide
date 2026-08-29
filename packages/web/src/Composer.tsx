@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import { MAX_ATTACHMENT_BYTES, readAsAttachment } from "./attachments.js"
 import { readDraft, saveDraft, useDraft } from "./drafts.js"
-import { Lock } from "./icons.js"
+import { Lightning, Lock, X } from "./icons.js"
 import { LOCKED } from "./ui.js"
 import { useAutoGrow } from "./useAutoGrow.js"
 import { useRemembered } from "./useRemembered.js"
@@ -88,7 +88,8 @@ function ModePicker({
         onClick={() => setOpen((v) => !v)}
         className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-fg-muted hover:bg-hover hover:text-fg"
       >
-        ⚡ {label}
+        <Lightning className="size-3 shrink-0" />
+        {label}
       </button>
       {open && (
         <div className="absolute bottom-7 left-0 z-20 w-[22rem] rounded border border-line bg-chrome py-1 shadow-lg">
@@ -358,7 +359,7 @@ export function Composer({
                 className="text-fg-dim hover:text-err"
                 title="Remove"
               >
-                ✕
+                <X className="size-3" />
               </button>
             </span>
           ))}
