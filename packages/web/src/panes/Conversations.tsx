@@ -23,6 +23,7 @@ import {
   useUnstartedChats,
   type Draft,
 } from "../drafts.js"
+import { draftName, useAutoNames } from "../naming.js"
 import { ProfileOverlay } from "../Profile.js"
 import { WorkingBar } from "../Working.js"
 import { Button, Empty, PaneHeader } from "../ui.js"
@@ -161,7 +162,11 @@ function UnstartedRow({
   onStart: () => void
   onDiscard: () => void
 }) {
-  const preview = draft.text.trim().split("\n", 1)[0] ?? ""
+  const firstLine = draft.text.trim().split("\n", 1)[0] ?? ""
+  // The name if it has one and it still describes what is in the box, and the
+  // first line otherwise — which is what this row showed before naming existed,
+  // and what it falls back to the moment a parked request is edited.
+  const preview = draftName(draft) ?? firstLine
   const written = draft.text.trim() !== "" || draft.attachments.length > 0
   return (
     <div
@@ -172,6 +177,10 @@ function UnstartedRow({
       <button
         type="button"
         onClick={onOpen}
+        // What was actually parked, in full. The line above is a name a model
+        // wrote once the request outgrew the column, so without this there is no
+        // way to check it against your own words short of opening the chat.
+        title={draft.text || undefined}
         className="flex min-w-0 flex-1 flex-col gap-0.5 text-left"
       >
         <span className="truncate text-[13px]">{preview || "New chat"}</span>
@@ -711,6 +720,16 @@ export function ConversationList({
    * `items` — until a first turn, these records are the entire conversation.
    */
   const unstarted = useUnstartedChats(projectId)
+  /**
+   * Anything parked and left gets a name, before it has ever run.
+   *
+   * Here rather than where a chat is parked, because the two ways one appears —
+   * the capture box above, and a "new" chat you typed into and walked away from
+   * — are the same fact seen twice, and it is a fact about the LIST: nobody is
+   * typing in this row. Which is also why the open chat is handed over; see
+   * `useAutoNames`.
+   */
+  useAutoNames(unstarted, selectedDraft)
 
   useEffect(() => {
     if (!projectId) return

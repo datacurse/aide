@@ -195,6 +195,17 @@ export const api = {
       body: JSON.stringify(body),
     }),
   /**
+   * A short name for something parked but not sent.
+   *
+   * A model call, and the only one the browser makes that is not a run — it
+   * takes no lock, so naming an idea works while an agent has the checkout.
+   * Deliberately not on any beat: see `naming.ts` for what decides that it
+   * happens once per thing you write.
+   */
+  nameChat: (text: string) =>
+    call<{ title: string }>("/api/chat-name", { method: "POST", body: JSON.stringify({ text }) }),
+
+  /**
    * Which conversation a run's first turn became, and whether it is over.
    *
    * The one thing a page that walked away cannot work out for itself: a session

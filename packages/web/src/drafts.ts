@@ -52,6 +52,26 @@ export interface Draft {
    * what lets the list ask the daemon what it missed.
    */
   startedRunId?: string
+  /**
+   * What this chat is called, for as long as it has not started.
+   *
+   * A few words a model wrote from `titledFrom`, so a parked row says what it is
+   * about rather than showing the first line of a paragraph. Absent until the
+   * name arrives, and absent forever on a request short enough to read whole —
+   * see `naming.ts`, which is the only thing that sets it.
+   */
+  title?: string
+  /**
+   * The exact text the name was written from.
+   *
+   * Both halves of the row's answer depend on this. It is how the namer knows it
+   * has already named this — without it, an answer landing writes a record,
+   * which is a change, which asks for a name again, forever. And it is how the
+   * row knows the name still describes what is in the box: rewrite a parked
+   * request and the old label is a lie about work you are about to send, so the
+   * row falls back to the first line until the new name lands.
+   */
+  titledFrom?: string
   /** epoch ms */
   createdAt: number
   updatedAt: number
@@ -226,6 +246,11 @@ export function saveDraft(key: string, content: { text: string; attachments: Att
     // recorded the run — and forgetting it here would lose the handoff in the
     // one case it exists for.
     startedRunId: prev?.startedRunId,
+    // Carried with the text it was written from, so that editing a parked chat
+    // takes the name down with it and leaving it alone keeps it. Dropping the
+    // pair here would ask for a new name on every keystroke.
+    title: prev?.title,
+    titledFrom: prev?.titledFrom,
     createdAt: prev?.createdAt ?? now,
     updatedAt: now,
   })
@@ -257,6 +282,23 @@ export function forgetDraftRun(key: string): void {
   const prev = cache.get(key)
   if (!prev?.startedRunId) return
   commit(key, { ...prev, startedRunId: undefined })
+}
+
+/**
+ * What this parked chat is called.
+ *
+ * `from` is the text the name was written about, and the write is dropped when
+ * the box no longer holds it: a name takes a second or two to come back, which
+ * is long enough to have kept typing, and a label written from a sentence that
+ * has since been rewritten is worse than no label at all.
+ */
+export function nameDraft(key: string, from: string, title: string): void {
+  const prev = cache.get(key)
+  if (!prev || prev.text !== from) return
+  // `updatedAt` deliberately not touched. It is when the human last typed, which
+  // is what the namer waits on before spending anything — moving it here would
+  // make every answer look like fresh typing.
+  commit(key, { ...prev, title, titledFrom: from })
 }
 
 /**
@@ -327,7 +369,18 @@ export function carryDraft(from: string, to: string): void {
     // Not the run it started under: what lands here is the box on a conversation
     // that now has a name, and a box still advertising a handoff would have the
     // list waiting on one that has already happened.
-    commit(to, { ...row, key: to, pinned: false, startedRunId: undefined })
+    //
+    // Nor the name, for the same reason twice over: the conversation has its own
+    // now, from the SDK, and what is left here is an unsent SECOND message that
+    // the old label does not describe.
+    commit(to, {
+      ...row,
+      key: to,
+      pinned: false,
+      startedRunId: undefined,
+      title: undefined,
+      titledFrom: undefined,
+    })
   }
 }
 

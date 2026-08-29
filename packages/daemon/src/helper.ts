@@ -27,6 +27,33 @@ const MAX_DIFF_CHARS = 200_000
 /** A commit message is a few hundred tokens. This only catches a runaway. */
 const HELPER_BUDGET_USD = 0.5
 
+/**
+ * How much of a parked chat the namer is shown.
+ *
+ * A name comes from what the request is about, and that is in its opening lines
+ * — a pasted stack trace after them changes nothing about the label and costs
+ * tokens on every park. The model is not told about this cut, unlike the diff
+ * above: a title written from the first 2000 characters of a longer request is
+ * the right title anyway.
+ */
+const MAX_NAME_INPUT_CHARS = 2_000
+
+/** Room for a few words in a 320px column, which is the whole of what this is for. */
+const MAX_NAME_CHARS = 48
+
+/** A title is a dozen tokens. This only catches a runaway. */
+const NAME_BUDGET_USD = 0.05
+
+const NAME_SYSTEM = [
+  "You name pieces of work. You are given something somebody wants done, and you",
+  "answer with a short label for it — the line they will scan a list for later.",
+  "",
+  "Output the label and nothing else: no preamble, no explanation, no quotes, no",
+  "markdown, no trailing period. At most six words and 48 characters. Name what",
+  "the work is about, in the requester's own vocabulary; do not invent detail",
+  "they did not give you, and do not restate the whole request.",
+].join("\n")
+
 const SYSTEM = [
   "You write git commit messages. Output the message and nothing else: no",
   "preamble, no explanation, no markdown code fences.",
@@ -212,4 +239,60 @@ export async function draftCommitMessage(opts: DraftCommitMessageOptions): Promi
 
   if (!drafted.text) throw new Error("the model returned an empty commit message")
   return drafted
+}
+
+/**
+ * A label out of whatever the model actually said.
+ *
+ * Everything here is a way the answer arrives right in substance and wrong in
+ * shape — a quoted phrase, a sentence with a full stop, six words that turn out
+ * to be sixty characters. None of them is worth a retry that costs another call,
+ * and a row that has to be scanned cannot afford any of them either.
+ */
+function tidyName(raw: string): string {
+  const line = raw.split("\n").map((s) => s.trim()).find(Boolean) ?? ""
+  const label = line.replace(/^["'`]+|["'`]+$/g, "").replace(/[.\s]+$/, "").trim()
+  if (label.length <= MAX_NAME_CHARS) return label
+  const cut = label.slice(0, MAX_NAME_CHARS)
+  const space = cut.lastIndexOf(" ")
+  return `${(space > MAX_NAME_CHARS / 2 ? cut.slice(0, space) : cut).trim()}…`
+}
+
+/**
+ * Name a chat that has not started, from what it says.
+ *
+ * The SDK names a session a second or two into its first turn, which is the
+ * wrong end of a backlog: a chat you parked and left is exactly the one you have
+ * to find again later, and until it runs the only thing the row can show is the
+ * first line of what you typed. This is that name, at the moment the request is
+ * written rather than at the moment it is spent.
+ *
+ * Its cost is not attributed to anything, unlike `draftCommitMessage`'s, and
+ * that is a real gap rather than an oversight: a parked chat is not a run, so
+ * there is no log for it to end in. It is a few hundred tokens on the helper
+ * model, once per parked request — the caller is what decides that "once", and
+ * `naming.ts` in the web package is where that decision lives.
+ */
+export async function nameChat(opts: { model: string; text: string }): Promise<string> {
+  const drafted = await drain(
+    query({
+      prompt: opts.text.slice(0, MAX_NAME_INPUT_CHARS),
+      options: {
+        model: opts.model,
+        systemPrompt: NAME_SYSTEM,
+        // Same isolation as the drafter above, for the same reasons: no tools to
+        // permit, and the project's CLAUDE.md is instructions to an agent, which
+        // this is not.
+        tools: [],
+        allowedTools: [],
+        settingSources: [],
+        maxTurns: 1,
+        maxBudgetUsd: NAME_BUDGET_USD,
+      },
+    }),
+  )
+
+  const name = tidyName(drafted.text)
+  if (!name) throw new Error("the model returned an empty name")
+  return name
 }

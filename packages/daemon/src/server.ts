@@ -26,6 +26,7 @@ import { currentBranch, runChanges } from "./changes.js"
 import { ChatLane } from "./chat.js"
 import { CONFIG } from "./config.js"
 import { EventLog } from "./eventlog.js"
+import { nameChat } from "./helper.js"
 import { addProject, getProject, listProjects, readProjectDoc, removeProject } from "./registry.js"
 import { pickFolder } from "./picker.js"
 import { conversationProfile } from "./profile.js"
@@ -725,6 +726,33 @@ app.post("/api/projects/:id/chat", async (req, reply) => {
     return { runId }
   } catch (err) {
     return reply.code(409).send({ message: err instanceof Error ? err.message : String(err) })
+  }
+})
+
+/**
+ * A short name for a chat that has not started.
+ *
+ * The SDK names a session on its first turn, which names the chats you have
+ * already spent money on and leaves the backlog — the rows you actually have to
+ * find again — showing the first line of whatever you typed. This names one at
+ * the moment it is written instead.
+ *
+ * Not a project's route and not a conversation's: there is no conversation yet
+ * and nothing here reads the repository. It is one prompt in, one line out, so
+ * it is also the one model call in aide that takes no lock and can happen while
+ * an agent has the checkout — parking an idea must never wait on a run.
+ *
+ * A failure is a 502 rather than a 500 because the failure is always the model
+ * call: the caller has nothing to fix, and the row it wanted a name for is fine
+ * without one.
+ */
+app.post("/api/chat-name", async (req, reply) => {
+  const { text } = (req.body ?? {}) as { text?: string }
+  if (!text?.trim()) return reply.code(400).send({ message: "nothing to name" })
+  try {
+    return { title: await nameChat({ model: CONFIG.helperModel, text: text.trim() }) }
+  } catch (err) {
+    return reply.code(502).send({ message: err instanceof Error ? err.message : String(err) })
   }
 })
 

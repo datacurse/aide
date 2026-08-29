@@ -27,6 +27,7 @@ record. They are all rows in the same list, in that order of urgency.
 | The four panes and the polling loop | `packages/web/src/App.tsx` |
 | The chat list, the capture box, the done tick | `packages/web/src/panes/Conversations.tsx` |
 | Unstarted chats, drafts, pasted images (IndexedDB) | `packages/web/src/drafts.ts` |
+| What a parked chat is called before it has run | `packages/web/src/naming.ts` |
 | An event log rendered as a conversation | `packages/web/src/panes/Transcript.tsx` |
 | What is left to commit, and the history under it | `packages/web/src/panes/Pending.tsx` |
 | Where the graph's lines go, and the SVG that draws them | `packages/web/src/graph.ts`, `packages/web/src/GitGraph.tsx` |
@@ -63,6 +64,16 @@ Decisions already taken, which are not gaps to fill:
   refuses to do is in `.aide/project.md`.
 - **No backlog file.** `.aide/todos.md` is gone too — an unsent chat IS the row,
   held in the browser, because nothing about it has happened yet.
+- **A parked chat is named when it is parked, not when it runs.** The SDK names
+  a session a second or two into its first turn, so everything aide has spent
+  money on has a name and the backlog — the rows you actually have to find again
+  — showed the first line of whatever you typed. `naming.ts` asks the daemon
+  (`POST /api/chat-name`: one helper-model call, no tools, no lock, so parking an
+  idea never waits on a run) for a few words, and the row shows them for exactly
+  as long as the text they were written from is still what is in the box. The
+  chat you have OPEN is never named: a chat you are typing into is one you are
+  about to send, and the SDK will name that one for free. That exemption is the
+  whole cost control — without it this is a model call per composing pause.
 - **A commit takes the working tree, not a conversation's diff.** `POST
   /api/projects/:id/commit`; a session id on it is attribution only. This is not
   a shortcut around the review — it is what makes the rail's list, which blocks
