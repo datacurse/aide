@@ -1,3 +1,4 @@
+import { dirname } from "node:path"
 import fastifyWebsocket from "@fastify/websocket"
 import Fastify, { type FastifyReply } from "fastify"
 import type {
@@ -6,6 +7,7 @@ import type {
   ChatStatus,
   ClientMessage,
   EffortLevel,
+  FolderPick,
   Health,
   PlanUsage,
   Project,
@@ -24,6 +26,7 @@ import { ChatLane } from "./chat.js"
 import { CONFIG } from "./config.js"
 import { EventLog } from "./eventlog.js"
 import { addProject, getProject, listProjects, readProjectDoc, removeProject } from "./registry.js"
+import { pickFolder } from "./picker.js"
 import { conversationReceipt } from "./receipt.js"
 import { commitConversation, conversationBaseline } from "./review.js"
 import * as repo from "./repo.js"
@@ -220,6 +223,33 @@ app.post("/api/projects", async (req, reply) => {
     return await addProject(path)
   } catch (err) {
     return reply.code(400).send({ message: err instanceof Error ? err.message : String(err) })
+  }
+})
+
+/**
+ * Point aide at a repository by opening the machine's own folder dialog.
+ *
+ * Separate from the POST above rather than folded into it, because the two fail
+ * in ways that need different words: cancelling is not an error and must leave
+ * the screen alone, and "no dialog on this machine" is answered by typing a path
+ * instead — see `picker.ts` for why the browser cannot produce one itself.
+ *
+ * This stays in flight for as long as the window is open, so it shows up in
+ * `busy.writes` and holds off an automatic restart. That is the behaviour we
+ * want and not a cost of it: a restart kills the process tree, and this tree
+ * ends in a window somebody is looking at.
+ */
+app.post("/api/projects/browse", async (): Promise<FolderPick> => {
+  // Beside the last project rather than at the home directory. Repositories are
+  // kept together, so the one being added is usually a sibling of one already
+  // here — and `pickFolder` falls back to home if that path has since gone.
+  const last = (await listProjects()).at(-1)
+  try {
+    return await pickFolder(last ? dirname(last.root) : undefined)
+  } catch (err) {
+    // Never a 500. Whatever went wrong, the useful next move is the same one the
+    // caller already has for a machine with no dialog: type the path.
+    return { path: null, unavailable: err instanceof Error ? err.message : String(err) }
   }
 })
 

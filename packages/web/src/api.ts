@@ -5,6 +5,7 @@ import type {
   ChatMode,
   ConversationSummary,
   EffortLevel,
+  FolderPick,
   GitPending,
   Health,
   PlanUsage,
@@ -12,7 +13,7 @@ import type {
   RunEvent,
 } from "@aide/protocol"
 
-export type { ConversationSummary, GitPending, Health, PlanUsage }
+export type { ConversationSummary, FolderPick, GitPending, Health, PlanUsage }
 
 /**
  * A conversation, plus the two things aide knows about it that the session file
@@ -111,6 +112,13 @@ export const api = {
     daemonCall("/restart", { method: "POST" }) as Promise<{ message: string } | null>,
 
   projects: () => call<ProjectView[]>("/api/projects"),
+  /**
+   * Open a folder dialog on the machine and answer with what was chosen.
+   *
+   * Does not resolve until the human closes the dialog, which may be minutes —
+   * so it belongs to a button press and never to the poll.
+   */
+  browseForFolder: () => call<FolderPick>("/api/projects/browse", { method: "POST" }),
   addProject: (path: string) =>
     call<Project>("/api/projects", { method: "POST", body: JSON.stringify({ path }) }),
   removeProject: (id: string) => call<void>(`/api/projects/${id}`, { method: "DELETE" }),

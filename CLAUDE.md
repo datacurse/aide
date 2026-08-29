@@ -28,6 +28,7 @@ record. They are all rows in the same list, in that order of urgency.
 | The chat list, the capture box, the done tick | `packages/web/src/panes/Conversations.tsx` |
 | Unstarted chats, drafts, pasted images (IndexedDB) | `packages/web/src/drafts.ts` |
 | An event log rendered as a conversation | `packages/web/src/panes/Transcript.tsx` |
+| The folder dialog behind `add`, and why it is the daemon's | `packages/daemon/src/picker.ts` |
 | One agent per project, the lock, warm sessions | `packages/daemon/src/chat.ts` |
 | The SDK call, the system prompt, permissions | `packages/daemon/src/agent.ts` |
 | Snapshots and turn boundaries under `refs/aide/` | `packages/daemon/src/checkpoint.ts` |

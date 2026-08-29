@@ -53,6 +53,15 @@ export function App() {
   const [commitRunId, setCommitRunId] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
   /**
+   * Whether a folder dialog is open on the desktop.
+   *
+   * Worth a state of its own because the window can be behind the browser: with
+   * nothing on screen changing, the only reading of a dead `add` button is that
+   * the press did not land, and the second press then waits on the same dialog
+   * for no reason.
+   */
+  const [picking, setPicking] = useState(false)
+  /**
    * Whether a finished run makes a sound. Remembered rather than a session
    * toggle: a chime you have to silence again after every reload is worse than
    * no chime, because you stop trusting the reload.
@@ -157,8 +166,33 @@ export function App() {
     }
   }
 
+  /**
+   * Add a project by pointing at it.
+   *
+   * The dialog is the daemon's, because a page cannot learn where a folder is on
+   * disk — deliberately, and there is no way around it; see `daemon/picker.ts`.
+   * Typing a path is still here, but only for a machine that has no dialog to
+   * open, and the reason it could not open one is put in front of the box rather
+   * than swallowed.
+   */
   const addProject = async () => {
-    const path = window.prompt("Absolute path to a git repository")
+    setError(null)
+    setPicking(true)
+    let path: string | null
+    try {
+      const picked = await api.browseForFolder()
+      // Cancelled. Not an error, and not a reason to ask for the path in text
+      // instead — being made to type one after saying no is the worst of both.
+      if (!picked.path && !picked.unavailable) return
+      path =
+        picked.path ?? window.prompt(`${picked.unavailable}\n\nAbsolute path to a git repository`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      return
+    } finally {
+      setPicking(false)
+    }
+
     if (!path?.trim()) return
     try {
       const added = await api.addProject(path.trim())
@@ -178,7 +212,13 @@ export function App() {
       {/* Projects */}
       <aside className="flex w-64 shrink-0 flex-col border-r border-line bg-chrome">
         <PaneHeader title="projects">
-          <Button onClick={addProject}>add</Button>
+          <Button
+            onClick={addProject}
+            disabled={picking}
+            title={picking ? "Choosing a folder — the dialog may be behind this window" : undefined}
+          >
+            {picking ? "choosing…" : "add"}
+          </Button>
         </PaneHeader>
         <div className="flex-1 overflow-auto py-1">
           {projects.length === 0 ? (

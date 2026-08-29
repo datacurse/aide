@@ -22,6 +22,20 @@ export interface Project {
 }
 
 /**
+ * What the machine's own folder dialog came back with.
+ *
+ * Three outcomes in two fields, and a caller that collapses any two of them gets
+ * it wrong. A path is a pick. Both null is a cancel, which is not an error and
+ * must put nothing on screen. `unavailable` is "there was no dialog to open
+ * here" — the only case where falling back to typing a path is the right answer,
+ * and the reason it is a sentence rather than a boolean.
+ */
+export interface FolderPick {
+  path: string | null
+  unavailable: string | null
+}
+
+/**
  * Frontmatter keys aide used to act on and no longer does.
  *
  * `bootstrap` ran a project's setup command in each fresh worktree, because
