@@ -163,6 +163,14 @@ export interface SendOptions {
   text: string
   attachments: Attachment[]
   mode: ChatMode
+  /**
+   * Plan's companion switch. Means nothing unless `mode` is `plan`.
+   *
+   * Optional so that omitting it is the safe answer rather than a compile error
+   * someone silences with a guess — absent reads as "keep asking", which is what
+   * a caller that has not thought about permissions should get.
+   */
+  autoAfterPlan?: boolean
   effort: EffortLevel
 }
 
@@ -489,6 +497,9 @@ export class ChatLane {
       ...(opts.attachments.length ? { attachments: opts.attachments } : {}),
       ...(opts.mode !== worker.mode ? { mode: opts.mode } : {}),
       ...(opts.effort !== worker.effort ? { effort: opts.effort } : {}),
+      // Unconditional, unlike the two above: it buys no control request, and it
+      // is per-turn state rather than a session setting. See `FollowUpTurn`.
+      autoAfterPlan: opts.autoAfterPlan === true,
     }
     worker.mode = opts.mode
     worker.effort = opts.effort
@@ -582,6 +593,7 @@ export class ChatLane {
       env: CONFIG.runEnv,
       ...(CONFIG.chatMaxBudgetUsd ? { maxBudgetUsd: CONFIG.chatMaxBudgetUsd } : {}),
       chatMode: opts.mode,
+      autoAfterPlan: opts.autoAfterPlan === true,
       effort: opts.effort,
       attachments: opts.attachments,
       trackContext: true,

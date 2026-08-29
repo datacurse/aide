@@ -19,6 +19,11 @@
  * when it contains no shell metacharacters and its leading words match an
  * allowed prefix and no denied prefix.
  *
+ * A null allowlist drops the middle clause and keeps the other two — everything
+ * runs except what is denied. That is what a chat carrying out a plan it has
+ * already had approved gets; see `canUseTool` in agent.ts for why that decision
+ * is made here rather than handed to the SDK.
+ *
  * That is deliberately blunter than a shell parser. The cost is honest — the
  * agent occasionally gets refused for a pipe it could have had — and it is the
  * right trade, because the failure mode of a subtly wrong shell parser is a
@@ -32,6 +37,21 @@
  * prefix carry an arbitrary payload.
  */
 const SHELL_METACHARACTERS = /[`$|;&<>\n\r]/
+
+/**
+ * Commands no chat may run, on either of the paths where nobody is asked — the
+ * `Bash(*)` layer Auto gets, and an approved plan being carried out.
+ *
+ * `deniedBash` in CONFIG already carries the ways a run ends badly: the servers
+ * that never exit, the script that spends money, the fetch-and-execute. These
+ * two are a different category — they are the ways a run ends the REVIEW. The
+ * product is that you read the diff and you commit it, so a run that commits its
+ * own work has removed the gate rather than passed it.
+ *
+ * Here rather than in agent.ts because it now has two consumers, and because
+ * `pnpm smoke` can assert it without loading the SDK.
+ */
+export const HUMAN_ONLY_COMMANDS = ["git commit", "git push"]
 
 export interface BashVerdict {
   allow: boolean
@@ -47,7 +67,8 @@ function hasPrefix(command: string, prefix: string): boolean {
 
 export function checkBashCommand(
   rawCommand: unknown,
-  allowed: readonly string[],
+  /** Prefixes that may run, or null for "anything that is not denied". */
+  allowed: readonly string[] | null,
   denied: readonly string[],
 ): BashVerdict {
   if (typeof rawCommand !== "string" || !rawCommand.trim()) {
@@ -80,7 +101,7 @@ export function checkBashCommand(
     }
   }
 
-  if (!allowed.some((a) => hasPrefix(command, a))) {
+  if (allowed && !allowed.some((a) => hasPrefix(command, a))) {
     return {
       allow: false,
       reason: `not in this run's allowlist — permitted commands start with: ${allowed.join(", ")}`,

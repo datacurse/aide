@@ -149,6 +149,8 @@ export const api = {
       text: string
       attachments: Attachment[]
       mode: ChatMode
+      /** Plan's companion switch. Ignored by the daemon for any other mode. */
+      autoAfterPlan: boolean
       effort: EffortLevel
     },
   ) =>

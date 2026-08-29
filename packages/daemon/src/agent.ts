@@ -22,7 +22,7 @@ import type {
   RunEventBody,
   RunStatus,
 } from "@aide/protocol"
-import { checkBashCommand } from "./policy.js"
+import { HUMAN_ONLY_COMMANDS, checkBashCommand } from "./policy.js"
 
 export interface RunAgentOptions {
   runId: string
@@ -67,6 +67,13 @@ export interface RunAgentOptions {
   resume?: string
   /** Omitted for task runs, which stay on the fail-closed `dontAsk`. */
   chatMode?: ChatMode
+  /**
+   * Plan's companion switch: once the human has approved a plan, stop asking.
+   *
+   * Meaningless unless `chatMode` is `plan`, and enforced in `canUseTool` rather
+   * than by handing the session to the SDK's own auto mode. See there for why.
+   */
+  autoAfterPlan?: boolean
   effort?: EffortLevel
   /** Images pasted into the composer, sent as content blocks alongside the text. */
   attachments?: Attachment[]
@@ -131,6 +138,13 @@ export interface FollowUpTurn {
   mode?: ChatMode
   effort?: EffortLevel
   model?: string
+  /**
+   * Sent on EVERY turn, unlike the three above. It is not a control request, so
+   * there is nothing to save by sending only what changed — and it has to be
+   * restated anyway, because each turn re-enters plan mode and the approval that
+   * unlocked the last one does not carry.
+   */
+  autoAfterPlan?: boolean
 }
 
 const truncate = (s: string, n = 300) => (s.length > n ? `${s.slice(0, n)}...` : s)
@@ -172,15 +186,14 @@ function summarizeToolResult(content: unknown): string {
 }
 
 /**
- * Commands a chat may not run even on the fast path below.
+ * The tool a model calls to hand a finished plan back for approval.
  *
- * `deniedBash` already carries the ways a run ends badly — the servers that
- * never exit, the script that spends money, the fetch-and-execute. These two are
- * a different category: they are the ways a run ends the REVIEW. The product is
- * that you read the diff and you commit it, so a run that commits its own work
- * has removed the gate rather than passed it.
+ * Named rather than inlined because the whole of Plan-then-Auto turns on
+ * recognising it: if a future release renames it, aide keeps asking about every
+ * edit instead of carrying the plan out. That is the safe direction to fail in,
+ * and this is where someone would come looking when it does.
  */
-const HUMAN_ONLY_COMMANDS = ["git commit", "git push"]
+const PLAN_HANDOFF_TOOL = "ExitPlanMode"
 
 /**
  * What a chat in Auto mode may do with a shell, decided by aide instead of by a
@@ -525,9 +538,18 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
       // Applied BEFORE the message goes in, or the turn runs under the previous
       // turn's settings â switching to Plan and sending would have planned
       // nothing and edited everything.
-      if (turn.mode) await q.setPermissionMode(CHAT_TO_SDK_MODE[turn.mode])
+      if (turn.mode) {
+        await q.setPermissionMode(CHAT_TO_SDK_MODE[turn.mode])
+        turnMode = turn.mode
+      }
       if (turn.model) await q.setModel(turn.model)
       if (turn.effort) await q.applyFlagSettings({ effortLevel: turn.effort })
+      // Both per turn. The mode above has just put the session back into plan
+      // mode, so carrying the approval over would hand the next message a
+      // session that never asks and never planned — the switch would quietly
+      // become a fifth mode that outlives the plan it was granted for.
+      carryOutPlan = turn.autoAfterPlan === true
+      planApproved = false
       // A fresh turn has not produced a result yet, so a throw during it is its
       // own to report. Without this reset the first turn's result suppresses the
       // error for every turn after it, and the one that actually died ends with
@@ -546,6 +568,20 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
   // query() throws AFTER yielding an error result, so without this the same
   // failure gets logged twice: once as the real outcome, once as a bare error.
   let finished = false
+  /**
+   * Whether THIS turn was sent under Plan with its companion switch on.
+   *
+   * The mode is tracked alongside because a follow-up only carries `mode` when
+   * it CHANGED, so `turn.mode` alone cannot answer "what is this session in".
+   * Re-checking it here is belt and braces — the browser and the daemon both
+   * scope the switch to Plan already — but this is the last place before the
+   * permission decision, and a flag that widens one should not have to trust
+   * that two callers upstream got it right.
+   */
+  let turnMode = opts.chatMode
+  let carryOutPlan = opts.autoAfterPlan === true
+  /** Whether the human has said yes to a plan in this turn. See `canUseTool`. */
+  let planApproved = false
   /** Latest context reading of the turn; emitted once, just before the result. */
   let lastUsage: { totalTokens: number; maxTokens: number; percentage: number } | null = null
 
@@ -618,7 +654,10 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
       //
       // See `fastBashSettings` for the measurement and for what is given up.
       // Deliberately scoped to `auto` alone: Manual promises to ask, Plan
-      // promises not to act, and both would be lies if this reached them.
+      // promises not to act, and both would be lies if this reached them. This
+      // is fixed for the life of the query, which is exactly why a plan being
+      // carried out on Auto is decided in `canUseTool` rather than here — the
+      // rule cannot be granted late, and granting it early breaks the plan.
       ...(opts.chatMode === "auto" ? { settings: fastBashSettings(opts.deniedBash) } : {}),
       ...(opts.effort ? { effort: opts.effort } : {}),
       // Append rather than fork: a chat keeps one stable session id, the way it
@@ -725,8 +764,46 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
         // question rather than a refusal. The turn blocks here until the answer
         // comes back through the browser.
         if (opts.onPermission) {
+          // Plan's companion switch. Everything after an approved plan runs
+          // unasked, which is the whole point of it — the plan WAS the question.
+          //
+          // Answered here rather than by putting the session into the SDK's own
+          // auto mode, for two reasons that both come back to `settings`. Auto
+          // is only fast because `fastBashSettings` hands the CLI a `Bash(*)`
+          // allow rule, and `settings` is fixed at query creation — so a chat
+          // that might end up on Auto would have carried that rule through the
+          // planning turn as well, where an explicit allow rule outranks plan
+          // mode's refusal and "Claude will not act" becomes false. And without
+          // it, Auto falls back to classifying every command with a model call,
+          // at seconds each. Deciding here costs an IPC round trip.
+          if (turnMode === "plan" && carryOutPlan && planApproved) {
+            // The shell is still aide's own decision, and the same one the two
+            // lists describe everywhere else: run anything that is not denied.
+            // Blunter than the CLI's parser — a pipe is refused rather than
+            // split and examined — but the refusal says what to do instead, and
+            // a refusal an agent can act on beats a rule engine we cannot read.
+            const verdict =
+              name === "Bash"
+                ? checkBashCommand((toolInput as { command?: unknown })?.command, null, [
+                    ...opts.deniedBash,
+                    ...HUMAN_ONLY_COMMANDS,
+                  ])
+                : { allow: true, reason: "" }
+            if (verdict.allow) return { behavior: "allow", updatedInput: toolInput }
+            // Logged, because nobody watched this one happen. A run that is
+            // carrying out a plan unattended must still leave the refusal in the
+            // transcript, or the reader is left with a gap where a tool call was.
+            pending.push({ type: "tool.denied", name, input: toolInput, reason: verdict.reason })
+            return { behavior: "deny", message: verdict.reason }
+          }
+
           const requestId = randomUUID()
           const allowed = await opts.onPermission({ requestId, name, input: toolInput })
+          // The one question the switch never skips: approving the plan is the
+          // gate it opens, so it cannot be the thing it opens the gate for.
+          if (allowed && turnMode === "plan" && carryOutPlan && name === PLAN_HANDOFF_TOOL) {
+            planApproved = true
+          }
           if (allowed) return { behavior: "allow", updatedInput: toolInput }
           return { behavior: "deny", message: "You declined this." }
         }

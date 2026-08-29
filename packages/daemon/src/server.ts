@@ -559,6 +559,7 @@ app.post("/api/projects/:id/chat", async (req, reply) => {
     text?: string
     attachments?: Attachment[]
     mode?: string
+    autoAfterPlan?: boolean
     effort?: string
   }
   if (!body.text?.trim() && !body.attachments?.length) {
@@ -615,6 +616,12 @@ app.post("/api/projects/:id/chat", async (req, reply) => {
       text: body.text?.trim() ?? "",
       attachments: body.attachments ?? [],
       mode,
+      // `=== true` rather than a cast: this comes off the wire, and anything
+      // truthy-but-not-true reaching the permission path should read as "no".
+      // Re-scoped to Plan here even though the composer already does it, because
+      // a browser that sends this alongside Manual is confused about something,
+      // and the answer to that is not to widen Manual.
+      autoAfterPlan: mode === "plan" && body.autoAfterPlan === true,
       effort,
     })
     return { runId }

@@ -26,7 +26,7 @@ import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 import { chatModeFromSdk } from "@aide/protocol"
-import { checkBashCommand } from "./policy.js"
+import { HUMAN_ONLY_COMMANDS, checkBashCommand } from "./policy.js"
 import { restartDecision, type Health } from "@aide/protocol"
 import {
   buildGraph,
@@ -439,6 +439,30 @@ console.log("\nbash policy")
   check("denies a newline", !verdict("pnpm ls\nrm -rf /").allow)
   check("denies a non-string", !verdict(undefined).allow)
   check("denial says what to do instead", verdict("cd x && pnpm t").reason.includes("--filter"))
+}
+
+console.log("\ncarrying out an approved plan")
+{
+  // A null allowlist is the shape a chat gets once the human has approved a
+  // plan and asked for it to be carried out without further questions. Nobody
+  // is watching, so what still has to hold is that the two refusals hold: the
+  // ways a run ends badly, and the two that end the REVIEW.
+  const deny = [...["pnpm dev", "pnpm probe", "npx"], ...HUMAN_ONLY_COMMANDS]
+  const verdict = (cmd: unknown) => checkBashCommand(cmd, null, deny)
+
+  check("runs a command no allowlist mentions", verdict("rg --files").allow, "this is the point")
+  check("runs node", verdict("node scripts/one-off.mjs").allow)
+  check("still denies pnpm dev", !verdict("pnpm dev").allow, "it never exits")
+  check("still denies npx", !verdict("npx cowsay").allow)
+  check("denies git commit", !verdict("git commit -m x").allow, "the human commits, not the run")
+  check("denies git push", !verdict("git push").allow)
+  check("git status is not git push", verdict("git status").allow, "prefix must end at a word")
+  // The blunt half of the rule survives the allowlist going away, and it has to:
+  // an unattended run is exactly where `pnpm ls; git push` must not resolve to
+  // an allowed leading word.
+  check("denies chaining past a denied command", !verdict("pnpm ls; git push").allow)
+  check("denies substitution", !verdict("echo $(git push)").allow)
+  check("an empty command is still nothing", !verdict("   ").allow)
 }
 
 console.log("\ninherited chat mode")

@@ -820,6 +820,7 @@ export function ConversationPane({
     text: string
     attachments: Attachment[]
     mode: ChatMode
+    autoAfterPlan: boolean
     effort: EffortLevel
   }) => {
     if (!projectId) return

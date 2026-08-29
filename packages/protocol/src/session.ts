@@ -43,6 +43,26 @@ export const CHAT_MODE_LABEL: Record<ChatMode, { label: string; hint: string }> 
 }
 
 /**
+ * Plan's companion switch: what happens AFTER you approve the plan.
+ *
+ * Not a fifth mode, and deliberately not — the four above map 1:1 onto the SDK's
+ * `permissionMode`, which is what lets `chatModeFromSdk` read a mode back out of
+ * a session file without guessing. This rides alongside instead, and it means
+ * nothing unless the mode is `plan`.
+ *
+ * What it is for: plan mode's whole shape is one decision — you read the plan
+ * and you say yes — and then the SDK drops to `default` and asks again for every
+ * single edit that carries the plan out. One approved plan in this repository's
+ * own logs was followed by twelve Edits, seven Bash calls and a Write, each one
+ * a click. Approving a plan and then approving its every consequence is the same
+ * decision taken twenty times.
+ */
+export const AUTO_AFTER_PLAN_LABEL = {
+  label: "Carry the plan out on Auto",
+  hint: "Approving the plan is the only question. What it asked for then runs unasked",
+}
+
+/**
  * An SDK permission mode back into aide's vocabulary.
  *
  * The session store is shared with the CLI and the VS Code extension, and every

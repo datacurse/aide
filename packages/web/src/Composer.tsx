@@ -3,6 +3,7 @@ import { readDraft, saveDraft, useDraft } from "./drafts.js"
 import { useAutoGrow } from "./useAutoGrow.js"
 import { useRemembered } from "./useRemembered.js"
 import {
+  AUTO_AFTER_PLAN_LABEL,
   CHAT_MODES,
   CHAT_MODE_LABEL,
   EFFORT_LEVELS,
@@ -27,6 +28,7 @@ const isChatMode = (v: unknown): v is ChatMode =>
   typeof v === "string" && (CHAT_MODES as readonly string[]).includes(v)
 const isEffort = (v: unknown): v is EffortLevel =>
   typeof v === "string" && (EFFORT_LEVELS as readonly string[]).includes(v)
+const isBoolean = (v: unknown): v is boolean => typeof v === "boolean"
 
 let attachmentSeq = 0
 
@@ -86,13 +88,17 @@ function ContextMeter({ usage }: { usage: ContextUsage | null }) {
 
 function ModePicker({
   mode,
+  autoAfterPlan,
   effort,
   onMode,
+  onAutoAfterPlan,
   onEffort,
 }: {
   mode: ChatMode
+  autoAfterPlan: boolean
   effort: EffortLevel
   onMode: (m: ChatMode) => void
+  onAutoAfterPlan: (v: boolean) => void
   onEffort: (e: EffortLevel) => void
 }) {
   const [open, setOpen] = useState(false)
@@ -107,6 +113,11 @@ function ModePicker({
     return () => document.removeEventListener("mousedown", away)
   }, [open])
 
+  // The arrow rides on the CLOSED button on purpose. This switch widens what a
+  // turn may do without asking, so it has to be legible from the bar rather than
+  // only from inside the menu that set it.
+  const label = `${CHAT_MODE_LABEL[mode].label}${mode === "plan" && autoAfterPlan ? " → Auto" : ""}`
+
   return (
     <div ref={box} className="relative">
       <button
@@ -114,7 +125,7 @@ function ModePicker({
         onClick={() => setOpen((v) => !v)}
         className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-fg-muted hover:bg-hover hover:text-fg"
       >
-        ⚡ {CHAT_MODE_LABEL[mode].label}
+        ⚡ {label}
       </button>
       {open && (
         <div className="absolute bottom-7 left-0 z-20 w-[22rem] rounded border border-line bg-chrome py-1 shadow-lg">
@@ -139,6 +150,25 @@ function ModePicker({
               </span>
             </button>
           ))}
+          {/* Only under Plan, because it only means anything there. A checkbox
+              that is greyed out under the other three would be a control whose
+              whole job is to tell you it is not for you. */}
+          {mode === "plan" && (
+            <label className="mt-1 flex cursor-pointer items-start gap-2 border-t border-line px-3 py-2 hover:bg-hover">
+              <input
+                type="checkbox"
+                checked={autoAfterPlan}
+                onChange={(e) => onAutoAfterPlan(e.target.checked)}
+                className="mt-0.5 accent-accent"
+              />
+              <span className="flex flex-col gap-0.5">
+                <span className="font-sans text-[12px]">{AUTO_AFTER_PLAN_LABEL.label}</span>
+                <span className="font-sans text-[11px] text-fg-dim">
+                  {AUTO_AFTER_PLAN_LABEL.hint}
+                </span>
+              </span>
+            </label>
+          )}
           <div className="mt-1 flex items-center gap-2 border-t border-line px-3 py-2">
             <span className="font-sans text-[11px] text-fg-muted">Effort</span>
             <input
@@ -209,6 +239,7 @@ export function Composer({
     text: string
     attachments: Attachment[]
     mode: ChatMode
+    autoAfterPlan: boolean
     effort: EffortLevel
   }) => void
   onInterrupt: () => void
@@ -230,6 +261,14 @@ export function Composer({
   // while you are certain you already told it not to.
   const [preferred, setPreferred] = useRemembered<ChatMode>("aide.chat.mode", "manual", isChatMode)
   const [effort, setEffort] = useRemembered<EffortLevel>("aide.chat.effort", "high", isEffort)
+  // Remembered like the rest, and not inherited: there is nowhere to inherit it
+  // FROM. A session file records the SDK's permission mode, and this is not one
+  // — a plan-then-Auto turn is stored as `plan`, same as any other.
+  const [autoAfterPlan, setAutoAfterPlan] = useRemembered<boolean>(
+    "aide.chat.autoAfterPlan",
+    false,
+    isBoolean,
+  )
   /**
    * The mode this particular conversation was last driven at, which beats the
    * remembered preference while it is open — a chat you were running on Auto in
@@ -263,7 +302,16 @@ export function Composer({
 
   const send = () => {
     if (!canSend) return
-    onSend({ text: text.trim(), attachments, mode, effort })
+    // Only ever true alongside Plan. Sending it with another mode would ask the
+    // daemon to widen a mode that has its own promise about asking — the daemon
+    // refuses that too, and neither end should be the only one that does.
+    onSend({
+      text: text.trim(),
+      attachments,
+      mode,
+      autoAfterPlan: mode === "plan" && autoAfterPlan,
+      effort,
+    })
     edit({ text: "", attachments: [] })
     setNote(null)
   }
@@ -355,7 +403,14 @@ export function Composer({
       {note && <p className="mt-1 font-sans text-[11px] text-warn">{note}</p>}
 
       <div className="mt-1.5 flex items-center gap-3">
-        <ModePicker mode={mode} effort={effort} onMode={chooseMode} onEffort={setEffort} />
+        <ModePicker
+          mode={mode}
+          autoAfterPlan={autoAfterPlan}
+          effort={effort}
+          onMode={chooseMode}
+          onAutoAfterPlan={setAutoAfterPlan}
+          onEffort={setEffort}
+        />
         <ContextMeter usage={usage} />
         <div className="ml-auto flex items-center gap-2">
           {busy ? (
