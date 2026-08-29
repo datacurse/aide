@@ -76,8 +76,17 @@ never exit, so the run burns its entire budget waiting. **Never run `pnpm probe`
 — it spends real money on a model call. All four are refused by the shell policy
 anyway; this is so you do not waste a turn finding out.
 
-One command per Bash call. No pipes, no `&&`, no `$( )`. Use
-`pnpm --filter @aide/daemon <script>` rather than `cd packages/daemon && pnpm <script>`.
+Run only the checks the change can break — `typecheck` for anything, `smoke` for
+git plumbing, `smoke:queue` for the chat lane or the receipt, `build` for web —
+and when you do want all four, **send them as four Bash calls in one message**.
+They are independent (each smoke builds its own throwaway repo; only `build`
+writes into the tree), so that is one round trip and one wall clock rather than
+four of each. Measured: 36s together against 95s plus four round trips apart.
+
+One command per Bash *call* — no pipes into another command, no `&&`, no `$( )`.
+That is not one call per message: independent calls belong in the same message.
+Use `pnpm --filter @aide/daemon <script>` rather than
+`cd packages/daemon && pnpm <script>`.
 
 ## Conventions
 

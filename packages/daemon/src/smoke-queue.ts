@@ -567,8 +567,18 @@ console.log("\nthe receipt")
     // Two calls in ONE assistant message, so they share both stamps.
     at(1200, { type: "tool.start", toolUseId: "a", name: "Bash", input: { command: "one" }, parentToolUseId: null }),
     at(1200, { type: "tool.start", toolUseId: "b", name: "Bash", input: { command: "two" }, parentToolUseId: null }),
+    // A third call in the same message, refused. Same stamps as the pair above,
+    // so the merged tool interval is unchanged and the assertions below still
+    // measure what they were written to measure.
+    at(1200, { type: "tool.start", toolUseId: "d", name: "Bash", input: { command: "rm -rf /" }, parentToolUseId: null }),
     at(4200, { type: "tool.end", toolUseId: "a", ok: true, summary: "" }),
     at(4200, { type: "tool.end", toolUseId: "b", ok: false, summary: "boom" }),
+    at(4200, {
+      type: "tool.end",
+      toolUseId: "d",
+      ok: false,
+      summary: "Permission to use Bash with command rm -rf / has been denied.",
+    }),
     at(4300, { type: "assistant.start" }),
     at(5300, { type: "permission.request", requestId: "p", name: "Bash", input: {} }),
     at(9300, { type: "permission.resolved", requestId: "p", allowed: true, reason: "" }),
@@ -582,7 +592,14 @@ console.log("\nthe receipt")
       modelUsage: {},
       numTurns: 3,
       durationMs: 10_000,
-      permissionDenials: [],
+      // The shape aide actually observed: the SDK resolved this one itself, so
+      // it is in the audit list with no message — and it is ALSO the failed
+      // `Bash` above, because a refusal reaches the model as an error result.
+      // The second has no failed call to explain it and must survive.
+      permissionDenials: [
+        { tool: "Bash", reason: "" },
+        { tool: "Read", reason: "reading /etc/shadow was refused" },
+      ],
     }),
   ]
 
@@ -602,8 +619,40 @@ console.log("\nthe receipt")
     s.generatingMs === 2000,
     `${s.generatingMs}ms`,
   )
-  check("the failed call is the one that failed", s.calls.filter((c) => c.ok === false).length === 1)
+  check(
+    "the failed calls are the ones that failed",
+    s.calls.filter((c) => c.ok === false).length === 2,
+    "one blew up, one was refused",
+  )
   check("and it kept what the tool said", s.calls[1]?.summary === "boom", s.calls[1]?.summary ?? "")
+  check(
+    "both denials are still recorded",
+    s.denials.length === 2,
+    "the de-duplication below is about what is PRINTED; the log must keep everything",
+  )
+
+  // One refused call reaches the document twice — as a failed call, because the
+  // SDK answers a denial with an error result, and again in the run's own
+  // denial list. Printing both put the same denied `Bash` in "What went wrong"
+  // as two bullets, the second reading "no reason recorded", so the section
+  // that exists to say what went wrong doubled its own count.
+  {
+    const { unexplainedDenials } = await import("./receipt.js")
+    const left = unexplainedDenials(
+      s.calls.filter((c) => c.ok === false),
+      s.denials,
+    )
+    check(
+      "a denial the failed list already shows is not printed twice",
+      !left.some((d) => d.tool === "Bash"),
+      left.map((d) => d.tool).join(",") || "(none left)",
+    )
+    check(
+      "but one with a reason nothing explains survives",
+      left.length === 1 && left[0]?.reason === "reading /etc/shadow was refused",
+      "dropping a stated reason on the strength of an unrelated failure loses the only readable part",
+    )
+  }
 
   // The same events with the anchors removed. A task run has no partial stream,
   // so it has no anchors, and the honest answer is one bucket rather than a

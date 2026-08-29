@@ -105,6 +105,49 @@ export function mergedMs(spans: Array<[number, number]>): number {
   return openFrom === null ? total : total + (openTo - openFrom)
 }
 
+/**
+ * The denials that the failed-call list does not already account for.
+ *
+ * A refused call is ONE event that reaches this file twice. The SDK answers a
+ * denial by handing the model an error tool_result, so the call closes with
+ * `ok: false` and lands in `failed`; the same refusal is also listed in the
+ * result's `permissionDenials`, which is where the count is authoritative.
+ * Printing both put one denied `Bash` into "What went wrong" as two bullets —
+ * the real one carrying the policy's message, and a second reading "no reason
+ * recorded". A section whose whole job is to say what went wrong must not
+ * inflate its own count.
+ *
+ * Matched by name and message rather than by id, because neither event carries
+ * a `toolUseId` — `permissionDenials` is a summary the SDK writes at the end of
+ * the run, not a pointer back into it.
+ *
+ * The empty-reason case is the one this exists for and the one where matching
+ * on name alone is safe: a denial with no message came from the SDK's own audit
+ * list, which means the SDK resolved it, which means there IS a failed call for
+ * it. A denial that DOES carry a reason is only absorbed by a call whose output
+ * repeats it — otherwise it survives, because dropping a stated reason on the
+ * strength of an unrelated failure of the same tool would lose the one thing
+ * worth reading.
+ */
+export function unexplainedDenials(
+  failed: readonly ToolCall[],
+  denials: ReadonlyArray<{ tool: string; reason: string }>,
+): Array<{ tool: string; reason: string }> {
+  const claimed = new Set<ToolCall>()
+  return denials.filter((d) => {
+    const reason = d.reason.trim()
+    const hit = failed.find(
+      (c) =>
+        !claimed.has(c) &&
+        c.name === d.tool &&
+        (reason === "" || c.summary.includes(reason)),
+    )
+    if (!hit) return true
+    claimed.add(hit)
+    return false
+  })
+}
+
 /** One line of a tool's arguments — enough to know what it touched. */
 function describeInput(input: unknown): string {
   const args = (input ?? {}) as Record<string, unknown>
@@ -353,7 +396,7 @@ function render(opts: { project: Project; sessionId: string; runs: RunSummary[] 
   const cost = runs.reduce((n, r) => n + r.costUsd, 0)
   const calls = runs.flatMap((r) => r.calls)
   const failed = calls.filter((c) => c.ok === false)
-  const denials = runs.flatMap((r) => r.denials)
+  const denials = unexplainedDenials(failed, runs.flatMap((r) => r.denials))
   const retries = runs.reduce((n, r) => n + r.retries, 0)
   const asks = runs.reduce((n, r) => n + r.asks, 0)
 
@@ -420,8 +463,10 @@ function render(opts: { project: Project; sessionId: string; runs: RunSummary[] 
       )
     }
   }
-  // The reason can be blank: the SDK's own denial list carries a message for the
-  // ones aide refused and nothing for the ones it resolved itself.
+  // Only the ones the failed list above does not already show — see
+  // `unexplainedDenials`. The reason can still be blank here: the SDK's own
+  // denial list carries a message for the ones aide refused and nothing for the
+  // ones it resolved itself.
   for (const d of denials) {
     wrong.push(`- **\`${d.tool}\` denied** — ${d.reason.trim() || "no reason recorded"}`)
   }
