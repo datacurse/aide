@@ -1,5 +1,105 @@
-import ReactMarkdown from "react-markdown"
+import { memo } from "react"
+import ReactMarkdown, { type Components } from "react-markdown"
 import remarkGfm from "remark-gfm"
+
+/**
+ * How every markdown element is rendered — and why this object is out here.
+ *
+ * It must never move back inside the component, and the reason is worth the
+ * paragraph because the failure looks nothing like its cause. `react-markdown`
+ * hands each value in this map straight through as the JSX element **type** for
+ * the tag it names (`hast-util-to-jsx-runtime`: `state.components[name]`), and
+ * React only reuses a DOM node when `elementType` matches by REFERENCE. Built
+ * inline, these arrows are new function objects on every render, so every `<p>`,
+ * `<code>`, `<strong>` and `<li>` in the transcript was a different type than it
+ * had been a moment ago, and React deleted and rebuilt the lot.
+ *
+ * Nothing looked wrong: the words were identical each time. What broke was
+ * selecting them. The DOM under a drag was destroyed roughly every 1.5 seconds —
+ * the poll in App.tsx re-renders the tree — so the anchor fell back to the
+ * nearest surviving ancestor and the highlight swallowed the whole message. It
+ * cost three wrong fixes elsewhere before anyone looked here.
+ *
+ * Styled inline rather than through a typography plugin so it maps onto the
+ * palette in index.css, which is the one file that documents where each colour
+ * came from.
+ */
+const COMPONENTS: Components = {
+  h1: ({ children }) => (
+    <h1 className="mt-4 mb-2 text-base font-semibold text-fg first:mt-0">{children}</h1>
+  ),
+  h2: ({ children }) => (
+    <h2 className="mt-4 mb-2 text-[15px] font-semibold text-fg first:mt-0">{children}</h2>
+  ),
+  h3: ({ children }) => (
+    <h3 className="mt-3 mb-1.5 text-[13px] font-semibold text-fg first:mt-0">{children}</h3>
+  ),
+  h4: ({ children }) => (
+    <h4 className="mt-3 mb-1.5 text-[13px] font-semibold text-fg-muted first:mt-0">{children}</h4>
+  ),
+  p: ({ children }) => <p className="my-2 first:mt-0 last:mb-0">{children}</p>,
+  strong: ({ children }) => <strong className="font-semibold text-fg">{children}</strong>,
+  em: ({ children }) => <em className="italic">{children}</em>,
+  a: ({ href, children }) => (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className="text-accent underline underline-offset-2"
+    >
+      {children}
+    </a>
+  ),
+  ul: ({ children }) => (
+    <ul className="my-2 list-disc space-y-1 pl-5 first:mt-0 last:mb-0">{children}</ul>
+  ),
+  ol: ({ children }) => (
+    <ol className="my-2 list-decimal space-y-1 pl-5 first:mt-0 last:mb-0">{children}</ol>
+  ),
+  li: ({ children }) => <li className="pl-0.5">{children}</li>,
+  blockquote: ({ children }) => (
+    <blockquote className="my-2 border-l-2 border-line-soft pl-3 text-fg-muted">
+      {children}
+    </blockquote>
+  ),
+  hr: () => <hr className="my-3 border-line" />,
+  // react-markdown gives `code` for both inline spans and fenced blocks;
+  // a fenced one arrives wrapped in <pre>, so `pre` owns the scroll box
+  // and this only has to style the text.
+  code: ({ className, children }) => {
+    const fenced = /language-/.test(className ?? "")
+    if (fenced) {
+      return <code className="font-mono text-xs text-fg">{children}</code>
+    }
+    return (
+      // `break-all` rather than `break-words`: inline code is usually a
+      // path or an identifier with no spaces to break at, and the point
+      // is that it must never be the thing that widens the pane.
+      <code className="rounded-sm bg-input px-1 py-0.5 font-mono text-[12px] break-all text-syn-string">
+        {children}
+      </code>
+    )
+  },
+  pre: ({ children }) => (
+    <pre className="my-2 max-w-full overflow-x-auto rounded border border-line bg-chrome p-2.5 leading-relaxed">
+      {children}
+    </pre>
+  ),
+  table: ({ children }) => (
+    // Wide tables scroll inside their own box rather than widening the
+    // pane, which would push the whole transcript sideways.
+    <div className="my-2 overflow-x-auto">
+      <table className="w-full border-collapse text-[12px]">{children}</table>
+    </div>
+  ),
+  th: ({ children }) => (
+    <th className="border border-line bg-chrome px-2 py-1 text-left font-semibold">{children}</th>
+  ),
+  td: ({ children }) => <td className="border border-line px-2 py-1 align-top">{children}</td>,
+}
+
+/** Hoisted for the same reason, though this one only costs a re-parse. */
+const PLUGINS = [remarkGfm]
 
 /**
  * Assistant output rendered as markdown, not as monospace source.
@@ -15,11 +115,11 @@ import remarkGfm from "remark-gfm"
  * because there is no HTML path at all — raw HTML in the markdown renders as
  * text, which is the correct outcome for a code-review tool.
  *
- * Styled inline rather than through a typography plugin so it maps onto the
- * palette in index.css, which is the one file that documents where each colour
- * came from.
+ * `memo` because a transcript is hundreds of these and the app polls every 1.5
+ * seconds: without it, every message on screen is re-parsed by remark on every
+ * tick, forever, to produce the identical tree it produced last time.
  */
-export function Markdown({ text }: { text: string }) {
+export const Markdown = memo(function Markdown({ text }: { text: string }) {
   return (
     // `min-w-0` and `break-words` together are what keep a transcript inside its
     // pane. A long unbroken token — a Windows path, a flag, a URL — has no break
@@ -27,88 +127,9 @@ export function Markdown({ text }: { text: string }) {
     // and the whole conversation gains a horizontal scrollbar because of one
     // line buried in it.
     <div className="min-w-0 font-sans text-[13px] leading-relaxed break-words text-fg">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          h1: ({ children }) => (
-            <h1 className="mt-4 mb-2 text-base font-semibold text-fg first:mt-0">{children}</h1>
-          ),
-          h2: ({ children }) => (
-            <h2 className="mt-4 mb-2 text-[15px] font-semibold text-fg first:mt-0">{children}</h2>
-          ),
-          h3: ({ children }) => (
-            <h3 className="mt-3 mb-1.5 text-[13px] font-semibold text-fg first:mt-0">{children}</h3>
-          ),
-          h4: ({ children }) => (
-            <h4 className="mt-3 mb-1.5 text-[13px] font-semibold text-fg-muted first:mt-0">
-              {children}
-            </h4>
-          ),
-          p: ({ children }) => <p className="my-2 first:mt-0 last:mb-0">{children}</p>,
-          strong: ({ children }) => <strong className="font-semibold text-fg">{children}</strong>,
-          em: ({ children }) => <em className="italic">{children}</em>,
-          a: ({ href, children }) => (
-            <a
-              href={href}
-              target="_blank"
-              rel="noreferrer"
-              className="text-accent underline underline-offset-2"
-            >
-              {children}
-            </a>
-          ),
-          ul: ({ children }) => (
-            <ul className="my-2 list-disc space-y-1 pl-5 first:mt-0 last:mb-0">{children}</ul>
-          ),
-          ol: ({ children }) => (
-            <ol className="my-2 list-decimal space-y-1 pl-5 first:mt-0 last:mb-0">{children}</ol>
-          ),
-          li: ({ children }) => <li className="pl-0.5">{children}</li>,
-          blockquote: ({ children }) => (
-            <blockquote className="my-2 border-l-2 border-line-soft pl-3 text-fg-muted">
-              {children}
-            </blockquote>
-          ),
-          hr: () => <hr className="my-3 border-line" />,
-          // react-markdown gives `code` for both inline spans and fenced blocks;
-          // a fenced one arrives wrapped in <pre>, so `pre` owns the scroll box
-          // and this only has to style the text.
-          code: ({ className, children }) => {
-            const fenced = /language-/.test(className ?? "")
-            if (fenced) {
-              return <code className="font-mono text-xs text-fg">{children}</code>
-            }
-            return (
-              // `break-all` rather than `break-words`: inline code is usually a
-              // path or an identifier with no spaces to break at, and the point
-              // is that it must never be the thing that widens the pane.
-              <code className="rounded-sm bg-input px-1 py-0.5 font-mono text-[12px] break-all text-syn-string">
-                {children}
-              </code>
-            )
-          },
-          pre: ({ children }) => (
-            <pre className="my-2 max-w-full overflow-x-auto rounded border border-line bg-chrome p-2.5 leading-relaxed">
-              {children}
-            </pre>
-          ),
-          table: ({ children }) => (
-            // Wide tables scroll inside their own box rather than widening the
-            // pane, which would push the whole transcript sideways.
-            <div className="my-2 overflow-x-auto">
-              <table className="w-full border-collapse text-[12px]">{children}</table>
-            </div>
-          ),
-          th: ({ children }) => (
-            <th className="border border-line bg-chrome px-2 py-1 text-left font-semibold">
-              {children}
-            </th>
-          ),
-          td: ({ children }) => <td className="border border-line px-2 py-1 align-top">{children}</td>,
-        }}
-      >
+      <ReactMarkdown remarkPlugins={PLUGINS} components={COMPONENTS}>
         {text}
       </ReactMarkdown>
     </div>
   )
-}
+})

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type {
   Attachment,
   ChatMode,
@@ -19,13 +19,11 @@ import {
   useUnstartedChats,
   type Draft,
 } from "../drafts.js"
-import { Markdown } from "../Markdown.js"
 import { WorkingBar } from "../Working.js"
 import { Empty, PaneHeader } from "../ui.js"
 import { useRunStream } from "../useRunStream.js"
 import { useAutoGrow } from "../useAutoGrow.js"
-import { useStickToBottom } from "../useStickToBottom.js"
-import { CommitMessageDraft, Transcript } from "./Transcript.js"
+import { CommitMessageDraft, Transcript, type LiveText } from "./Transcript.js"
 
 /**
  * How many events to render without being asked.
@@ -684,10 +682,36 @@ export function ConversationPane({
     }
   }, [live, liveSessionId, onStarted, openSessionId])
 
-  const turnEvents = useMemo(
-    () => [...sent.values()].sort((a, b) => (a.runId === b.runId ? a.seq - b.seq : 0)),
-    [sent],
-  )
+  /**
+   * Everything this sitting has produced — the accumulator, plus whatever the
+   * socket has delivered that the effect above has not folded in yet.
+   *
+   * Merged here rather than waiting for the fold, because the fold lands a
+   * render late and the draft does not: the socket clears the streamed text in
+   * the same batch that delivers the finished `assistant.text`, so for one
+   * commit the reply existed in neither place and React tore its DOM down. That
+   * cost a frame of flicker at every tool call, and it destroyed any selection
+   * the reader had inside the message.
+   *
+   * Keyed by runId+seq, same as the accumulator, so an event present in both is
+   * one entry and keeps the position it was first folded at.
+   *
+   * Runs are ordered by when the first of their events arrived, and events by
+   * seq within their run. The obvious `a.runId === b.runId ? a.seq - b.seq : 0`
+   * is not a total order — it calls every cross-run pair equal — and a sort given
+   * one is not obliged to return the same arrangement when the input grows by an
+   * entry. Reordering keyed rows makes React move live DOM, which collapses a
+   * selection that spans what moved.
+   */
+  const turnEvents = useMemo(() => {
+    const merged = new Map(sent)
+    for (const e of live) merged.set(`${e.runId}:${e.seq}`, e)
+    const runs = new Map<string, number>()
+    for (const e of merged.values()) if (!runs.has(e.runId)) runs.set(e.runId, runs.size)
+    return [...merged.values()].sort(
+      (a, b) => runs.get(a.runId)! - runs.get(b.runId)! || a.seq - b.seq,
+    )
+  }, [sent, live])
 
   // The turn is over when its log has a terminal event — the same invariant the
   // run pane relies on.
@@ -753,18 +777,44 @@ export function ConversationPane({
   }, [view?.events, turnEvents])
 
   const [showAll, setShowAll] = useState(false)
-  const hidden = showAll ? 0 : Math.max(0, events.length - VISIBLE_TAIL)
-  const shown = hidden > 0 ? events.slice(hidden) : events
+  const truncating = !showAll && events.length > VISIBLE_TAIL
 
-  // Follow the tail while the reader is at the tail, and leave them alone the
-  // moment they scroll up. See useStickToBottom for why this watches the content
-  // rather than a dependency array.
-  const { scroller, content, toBottom, onScroll, following } = useStickToBottom()
+  /**
+   * The reply being typed, handed to the transcript rather than rendered after
+   * it, so that the finished copy of it lands in the same element. See
+   * `LiveText`. A commit run is the exception: it streams a commit message, not
+   * a reply, and that has its own box below.
+   */
+  const typing = useMemo<LiveText | null>(
+    () =>
+      busy && runId && draftingCommit === null && (draft.text || draft.thinking)
+        ? { runId, thinking: draft.thinking, text: draft.text }
+        : null,
+    [busy, runId, draftingCommit, draft.text, draft.thinking],
+  )
 
-  // A newly opened conversation starts at the end, where the recent messages are.
+  const scroller = useRef<HTMLDivElement>(null)
+  const toBottom = useCallback(() => {
+    const el = scroller.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [])
+
+  /**
+   * The pane scrolls when you open it, and never again on its own.
+   *
+   * There used to be a follower: a ResizeObserver that pinned the view to the
+   * bottom while a reply streamed. It is gone because reading is what this pane
+   * is for, and a transcript that moves while you are dragging a cursor across
+   * it cannot be read — the text goes out from under the pointer and the
+   * highlight lands somewhere else. The button below is the whole of what
+   * replaced it, and it only moves the pane when you ask it to.
+   *
+   * A turn starting counts as asking: you pressed send, or pressed commit, and
+   * the thing you pressed it for is about to appear at the end.
+   */
   useEffect(() => {
     toBottom()
-  }, [sessionId, view?.events.length, toBottom])
+  }, [sessionId, runId, view?.events.length, toBottom])
 
   const send = async (msg: {
     text: string
@@ -797,10 +847,8 @@ export function ConversationPane({
 
       <div
         ref={scroller}
-        onScroll={onScroll}
         className="relative flex-1 overflow-x-hidden overflow-y-auto px-3 py-2 font-mono text-xs leading-relaxed"
       >
-        <div ref={content}>
         {openSessionId && view === null && !error ? (
           <Empty>Reading…</Empty>
         ) : events.length === 0 ? (
@@ -811,12 +859,12 @@ export function ConversationPane({
           </Empty>
         ) : (
           <>
-            {(hidden > 0 || view?.truncated) && (
+            {(truncating || view?.truncated) && (
               <div className="mb-2 border-b border-line pb-2 text-center font-sans text-[11px] text-fg-dim">
                 {view?.truncated
                   ? `showing the most recent of ${view.totalMessages} messages`
-                  : `${hidden} earlier events hidden`}
-                {hidden > 0 && (
+                  : "earlier lines hidden"}
+                {truncating && (
                   <button
                     type="button"
                     onClick={() => setShowAll(true)}
@@ -827,32 +875,24 @@ export function ConversationPane({
                 )}
               </div>
             )}
-            <Transcript events={shown} onPermission={busy ? answer : undefined}>
-              {busy && (draft.thinking || draft.text) ? (
-                <>
-                  {draft.thinking && (
-                    <p className="px-1 text-syn-comment italic">{draft.thinking}</p>
-                  )}
-                  {draft.text &&
-                    (draftingCommit !== null ? (
-                      <CommitMessageDraft text={draft.text} model={draftingCommit} />
-                    ) : (
-                      <div className="px-1">
-                        <Markdown text={draft.text} />
-                      </div>
-                    ))}
-                </>
+            <Transcript
+              events={events}
+              onPermission={busy ? answer : undefined}
+              live={typing}
+              tail={showAll ? undefined : VISIBLE_TAIL}
+            >
+              {busy && draftingCommit !== null && draft.text ? (
+                <CommitMessageDraft text={draft.text} model={draftingCommit} />
               ) : null}
             </Transcript>
           </>
         )}
         {error && <p className="mt-2 font-sans text-[11px] text-err">{error}</p>}
-        </div>
       </div>
 
-      {/* Only while something is arriving: a button offering to jump to content
-          that is not moving would be noise. */}
-      {!following && busy && (
+      {/* The only thing that moves the pane now, and only while there is
+          something arriving to move it to. */}
+      {busy && (
         <button
           type="button"
           onClick={toBottom}

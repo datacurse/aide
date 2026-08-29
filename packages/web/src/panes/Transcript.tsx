@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { useMemo, useState, type ReactNode } from "react"
 import type { MessageImage, RunEvent, RunStatus } from "@aide/protocol"
 import { Markdown } from "../Markdown.js"
 import { Button, Empty, money } from "../ui.js"
@@ -15,7 +15,7 @@ import { Button, Empty, money } from "../ui.js"
 /** tool.start and tool.end arrive separately; pair them into one line per call. */
 interface ToolLine {
   kind: "tool"
-  seq: number
+  key: string
   toolUseId: string
   name: string
   input: unknown
@@ -34,7 +34,7 @@ interface ToolLine {
  */
 interface CheckpointLine {
   kind: "checkpoint"
-  seq: number
+  key: string
   ref: string
   sha: string
   restore: string
@@ -49,7 +49,7 @@ interface CheckpointLine {
 /** A tool call a chat turn is blocked on, paired with its answer if it has one. */
 interface PermissionLine {
   kind: "permission"
-  seq: number
+  key: string
   requestId: string
   name: string
   input: unknown
@@ -60,7 +60,7 @@ interface PermissionLine {
 /** What the human said, and whatever they pasted with it. */
 interface UserLine {
   kind: "user"
-  seq: number
+  key: string
   text: string
   images: MessageImage[]
 }
@@ -74,40 +74,70 @@ interface UserLine {
  */
 interface CommitStepLine {
   kind: "commit-step"
-  seq: number
+  key: string
   label: string
   done: boolean
 }
 /** What was committed, and what it took. */
 interface CommitLandedLine {
   kind: "commit-landed"
-  seq: number
+  key: string
   sha: string
   paths: string[]
 }
 interface OutcomeLine {
   kind: "outcome"
-  seq: number
+  key: string
   status: RunStatus
   subtype: string
   turns: number
   ms: number
   cost: number
 }
+/**
+ * A block of prose, from either copy of it.
+ *
+ * Keyed by its position within its run — the third thing the model said on run X
+ * — rather than by the event's seq like every other row. That is the whole trick
+ * behind `LiveText` below: the copy being typed has no seq yet, so a block's
+ * ordinal is the only name both copies can agree on.
+ */
+interface BlockLine {
+  kind: "text" | "thinking"
+  key: string
+  text: string
+  nested: boolean
+}
+
+/**
+ * The reply as it is being typed, before it is an event.
+ *
+ * Rendered as an ordinary block line rather than tacked on after the list, and
+ * that is the point: the finished `assistant.text` is the same block of the same
+ * run, so it arrives with the same key in the same place and React updates the
+ * node it is already in. Two different nodes was the bug — the streamed copy was
+ * torn down and a byte-identical one built beside it, and a selection anchored
+ * in the old one snapped back to the start of the reply. It happened at every
+ * tool call, because every tool call ends a block.
+ */
+export interface LiveText {
+  runId: string
+  thinking: string
+  text: string
+}
 type Line =
   | ToolLine
   | OutcomeLine
-  | { kind: "text"; seq: number; text: string; nested: boolean }
-  | { kind: "thinking"; seq: number; text: string }
+  | BlockLine
   | UserLine
   | CheckpointLine
-  | { kind: "denied"; seq: number; name: string; reason: string }
+  | { kind: "denied"; key: string; name: string; reason: string }
   | PermissionLine
-  | { kind: "retry"; seq: number; text: string }
-  | { kind: "error"; seq: number; text: string }
+  | { kind: "retry"; key: string; text: string }
+  | { kind: "error"; key: string; text: string }
   | CommitStepLine
   | CommitLandedLine
-  | { kind: "commit-message"; seq: number; message: string; model: string }
+  | { kind: "commit-message"; key: string; message: string; model: string }
 
 /**
  * A run must always end with a visible line saying how it ended. Without one, a
@@ -136,26 +166,55 @@ function humanizeError(message: string): string {
   return message
 }
 
-function toLines(events: RunEvent[]): Line[] {
+function toLines(events: RunEvent[], live?: LiveText | null): Line[] {
   const lines: Line[] = []
   const byToolId = new Map<string, ToolLine>()
   const byRequestId = new Map<string, PermissionLine>()
 
+  // The run has to be in the key, not just the seq. History is numbered from 1
+  // for the whole session and a run's own log is numbered from 1 for that run,
+  // and this list is the two concatenated — so `seq: 3` names two different rows
+  // the moment a turn has been sent in this sitting. Duplicate keys among
+  // siblings let React map a fiber onto the wrong row and rebuild DOM that did
+  // not change, which is the same way a selection dies.
+  const rowKey = (e: RunEvent): string => `${e.runId}:${e.seq}`
+
+  // Counted over every event, not over the slice that ends up on screen: an
+  // ordinal that shifts when the head of a long transcript is trimmed would
+  // re-key — and so remount — every block below it on each new event.
+  const blocks = new Map<string, number>()
+  const blockKey = (runId: string, kind: string): string => {
+    const at = `${runId}:${kind}`
+    const n = blocks.get(at) ?? 0
+    blocks.set(at, n + 1)
+    return `${at}:${n}`
+  }
+
   for (const e of events) {
     switch (e.type) {
       case "user.message":
-        lines.push({ kind: "user", seq: e.seq, text: e.text, images: e.images ?? [] })
+        lines.push({ kind: "user", key: rowKey(e), text: e.text, images: e.images ?? [] })
         break
       case "assistant.text":
-        lines.push({ kind: "text", seq: e.seq, text: e.text, nested: !!e.parentToolUseId })
+        lines.push({
+          kind: "text",
+          key: blockKey(e.runId, "text"),
+          text: e.text,
+          nested: !!e.parentToolUseId,
+        })
         break
       case "assistant.thinking":
-        lines.push({ kind: "thinking", seq: e.seq, text: e.text })
+        lines.push({
+          kind: "thinking",
+          key: blockKey(e.runId, "thinking"),
+          text: e.text,
+          nested: false,
+        })
         break
       case "tool.start": {
         const line: ToolLine = {
           kind: "tool",
-          seq: e.seq,
+          key: rowKey(e),
           toolUseId: e.toolUseId,
           name: e.name,
           input: e.input,
@@ -178,7 +237,7 @@ function toLines(events: RunEvent[]): Line[] {
       case "checkpoint.taken":
         lines.push({
           kind: "checkpoint",
-          seq: e.seq,
+          key: rowKey(e),
           ref: e.ref,
           sha: e.sha,
           dirtyCount: e.dirtyCount,
@@ -188,7 +247,7 @@ function toLines(events: RunEvent[]): Line[] {
       case "turn.checkpoint":
         lines.push({
           kind: "checkpoint",
-          seq: e.seq,
+          key: rowKey(e),
           ref: e.ref,
           sha: e.sha,
           turn: e.n,
@@ -198,7 +257,7 @@ function toLines(events: RunEvent[]): Line[] {
       case "permission.request": {
         const line: PermissionLine = {
           kind: "permission",
-          seq: e.seq,
+          key: rowKey(e),
           requestId: e.requestId,
           name: e.name,
           input: e.input,
@@ -221,36 +280,36 @@ function toLines(events: RunEvent[]): Line[] {
         // Consumed by the composer's meter, not drawn in the transcript.
         break
       case "commit.step":
-        lines.push({ kind: "commit-step", seq: e.seq, label: e.label, done: false })
+        lines.push({ kind: "commit-step", key: rowKey(e), label: e.label, done: false })
         break
       case "commit.drafted":
         lines.push({
           kind: "commit-message",
-          seq: e.seq,
+          key: rowKey(e),
           message: e.message,
           model: e.model,
         })
         break
       case "commit.landed":
-        lines.push({ kind: "commit-landed", seq: e.seq, sha: e.sha, paths: e.paths })
+        lines.push({ kind: "commit-landed", key: rowKey(e), sha: e.sha, paths: e.paths })
         break
       case "tool.denied":
-        lines.push({ kind: "denied", seq: e.seq, name: e.name, reason: e.reason })
+        lines.push({ kind: "denied", key: rowKey(e), name: e.name, reason: e.reason })
         break
       case "run.retry":
         lines.push({
           kind: "retry",
-          seq: e.seq,
+          key: rowKey(e),
           text: `retry ${e.attempt}/${e.maxRetries} in ${e.retryDelayMs}ms — ${e.error}`,
         })
         break
       case "run.error":
-        lines.push({ kind: "error", seq: e.seq, text: e.message })
+        lines.push({ kind: "error", key: rowKey(e), text: e.message })
         break
       case "run.finished":
         lines.push({
           kind: "outcome",
-          seq: e.seq,
+          key: rowKey(e),
           status: e.status,
           subtype: e.subtype,
           turns: e.numTurns,
@@ -272,9 +331,44 @@ function toLines(events: RunEvent[]): Line[] {
   // Runs logged before duplicate-suppression landed carry a redundant run.error
   // after their result. Drop it here so old transcripts read like new ones.
   const outcomeAt = lines.findIndex((l) => l.kind === "outcome")
-  return outcomeAt === -1
-    ? lines
-    : lines.filter((l, i) => !(l.kind === "error" && i > outcomeAt))
+  const settled =
+    outcomeAt === -1 ? lines : lines.filter((l, i) => !(l.kind === "error" && i > outcomeAt))
+
+  // Appended last, and after both passes above, so the two blocks still being
+  // typed cannot be mistaken for a step that something came after.
+  if (live?.thinking) {
+    settled.push({
+      kind: "thinking",
+      key: blockKey(live.runId, "thinking"),
+      text: live.thinking,
+      nested: false,
+    })
+  }
+  if (live?.text) {
+    settled.push({
+      kind: "text",
+      key: blockKey(live.runId, "text"),
+      text: live.text,
+      nested: false,
+    })
+  }
+  return settled
+}
+
+/**
+ * A row you can both read and click.
+ *
+ * Every collapsible row here used to be a `<button>` wrapping its own text, and
+ * a browser will not start a selection inside a button — so the one line naming
+ * the file a run touched was the one line you could not drag your cursor across.
+ * A plain div gets the text back; this is the other half of the trade, because
+ * releasing a drag inside it also fires a click, and expanding a row you were
+ * only trying to copy is exactly as annoying as the thing it replaced.
+ */
+function toggleUnlessSelecting(setOpen: (f: (v: boolean) => boolean) => void) {
+  const sel = window.getSelection()
+  if (sel && !sel.isCollapsed) return
+  setOpen((v) => !v)
 }
 
 /** One-line preview of a tool's arguments — enough to know what it touched. */
@@ -302,10 +396,9 @@ function ToolRow({ line }: { line: ToolLine }) {
 
   return (
     <div className={line.nested ? "ml-4 border-l border-line pl-3" : ""}>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full min-w-0 items-baseline gap-2 rounded px-1 py-0.5 text-left hover:bg-hover"
+      <div
+        onClick={() => toggleUnlessSelecting(setOpen)}
+        className="flex min-w-0 cursor-pointer items-baseline gap-2 rounded px-1 py-0.5 hover:bg-hover"
       >
         {mark}
         <span className="shrink-0 text-syn-func">{line.name}</span>
@@ -315,7 +408,7 @@ function ToolRow({ line }: { line: ToolLine }) {
         <span className="min-w-0 truncate text-syn-string">
           {describeInput(line.name, line.input)}
         </span>
-      </button>
+      </div>
       {open && (
         <pre className="mt-1 mb-2 max-h-64 overflow-auto rounded-sm bg-chrome p-2 text-[11px] leading-relaxed whitespace-pre-wrap text-fg-muted">
           {JSON.stringify(line.input, null, 2)}
@@ -327,70 +420,41 @@ function ToolRow({ line }: { line: ToolLine }) {
 }
 
 /**
- * The question, pinned.
+ * The question, in the place it was asked.
  *
- * `position: sticky` rather than a copy rendered into a header bar: there is one
- * element, so it cannot disagree with itself, and the browser hands off from one
- * question to the next for free — the next one paints over this one as it
- * arrives, because a later sibling with the same z-index wins. The z-index is
- * needed for the other half of that: without it every ordinary line AFTER this
- * block paints over the pinned copy, and the answer scrolls through it rather
- * than under it.
- *
- * Clipped when collapsed for a reason worth naming: a question is usually a
- * sentence, but sometimes it is thirty lines of pasted log, and pinning all of
- * that leaves no pane left to read the answer in.
+ * It used to be `position: sticky`, pinned to the top of the pane so the answer
+ * scrolled under it, and clipped to a few lines so a long one did not eat the
+ * pane. Both are gone, and selection is why: a pinned block is an opaque overlay
+ * sitting on top of the answer, so a drag that crossed it hit-tested into the
+ * question and the highlight leapt to a line the reader could not see. A
+ * transcript is text to be read and copied first, and a header second.
  */
 function UserRow({ line }: { line: UserLine }) {
-  const [open, setOpen] = useState(false)
-  const [clipped, setClipped] = useState(false)
-  const body = useRef<HTMLDivElement>(null)
-
-  // Measured, not guessed from the length of the text: whether it overflows
-  // depends on how wide the pane is and on whether a screenshot came with it,
-  // and a "more" button that reveals nothing is worse than no button.
-  useLayoutEffect(() => {
-    const el = body.current
-    if (!el || open) return
-    setClipped(el.scrollHeight > el.clientHeight + 1)
-  }, [line.text, line.images.length, open])
+  const [zoom, setZoom] = useState(false)
 
   return (
-    <div className="sticky top-0 z-10 my-2 border-b-line border-l-syn-var border-b border-l-2 bg-chrome px-3 py-1.5">
-      <div className="mb-0.5 flex items-baseline gap-2">
-        <span className="font-sans text-[10px] tracking-wide text-syn-var uppercase">you</span>
-        {(clipped || line.images.length > 0) && (
-          <button
-            type="button"
-            onClick={() => setOpen((v) => !v)}
-            className="ml-auto shrink-0 font-sans text-[11px] text-fg-dim hover:text-fg"
-          >
-            {open ? "collapse" : "expand"}
-          </button>
-        )}
-      </div>
-      <div ref={body} className={open ? "" : "max-h-24 overflow-hidden"}>
-        {line.images.length > 0 && (
-          <div className="mb-1.5 flex flex-wrap gap-1.5">
-            {line.images.map((img, i) => (
-              <button
-                key={i}
-                type="button"
-                onClick={() => setOpen((v) => !v)}
-                title={open ? "Shrink it" : "Show it full size"}
-                className={open ? "cursor-zoom-out" : "cursor-zoom-in"}
-              >
-                <img
-                  src={`data:${img.mediaType};base64,${img.data}`}
-                  alt="pasted screenshot"
-                  className={`w-auto rounded-sm border border-line ${open ? "max-h-80" : "h-12"}`}
-                />
-              </button>
-            ))}
-          </div>
-        )}
-        <Markdown text={line.text} />
-      </div>
+    <div className="my-2 border-b-line border-l-syn-var border-b border-l-2 bg-chrome px-3 py-1.5">
+      <div className="mb-0.5 font-sans text-[10px] tracking-wide text-syn-var uppercase">you</div>
+      {line.images.length > 0 && (
+        <div className="mb-1.5 flex flex-wrap gap-1.5">
+          {line.images.map((img, i) => (
+            <button
+              key={i}
+              type="button"
+              onClick={() => setZoom((v) => !v)}
+              title={zoom ? "Shrink it" : "Show it full size"}
+              className={zoom ? "cursor-zoom-out" : "cursor-zoom-in"}
+            >
+              <img
+                src={`data:${img.mediaType};base64,${img.data}`}
+                alt="pasted screenshot"
+                className={`w-auto rounded-sm border border-line ${zoom ? "max-h-80" : "h-12"}`}
+              />
+            </button>
+          ))}
+        </div>
+      )}
+      <Markdown text={line.text} />
     </div>
   )
 }
@@ -472,10 +536,9 @@ function CheckpointRow({ line }: { line: CheckpointLine }) {
   const isTurn = line.turn !== undefined
   return (
     <div>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full min-w-0 items-baseline gap-2 rounded px-1 py-0.5 text-left hover:bg-hover"
+      <div
+        onClick={() => toggleUnlessSelecting(setOpen)}
+        className="flex min-w-0 cursor-pointer items-baseline gap-2 rounded px-1 py-0.5 hover:bg-hover"
       >
         <span className="text-ok">✓</span>
         <span className="shrink-0 text-syn-keyword">
@@ -489,7 +552,7 @@ function CheckpointRow({ line }: { line: CheckpointLine }) {
             {line.dirtyCount} file{line.dirtyCount === 1 ? "" : "s"} already changed
           </span>
         )}
-      </button>
+      </div>
       {open && (
         <div className="mt-1 mb-2 rounded-sm bg-chrome p-2">
           <pre className="overflow-auto text-[11px] leading-relaxed whitespace-pre-wrap text-fg-muted">
@@ -557,17 +620,16 @@ function CommitLandedRow({ line }: { line: CommitLandedLine }) {
   const [open, setOpen] = useState(false)
   return (
     <div>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full min-w-0 items-baseline gap-2 rounded px-1 py-0.5 text-left hover:bg-hover"
+      <div
+        onClick={() => toggleUnlessSelecting(setOpen)}
+        className="flex min-w-0 cursor-pointer items-baseline gap-2 rounded px-1 py-0.5 hover:bg-hover"
       >
         <span className="text-diff-add-fg">●</span>
         <span className="shrink-0 text-diff-add-fg">committed {line.sha.slice(0, 7)}</span>
         <span className="shrink-0 text-fg-dim">
           {line.paths.length} file{line.paths.length === 1 ? "" : "s"}
         </span>
-      </button>
+      </div>
       {open && (
         <pre className="mt-1 mb-2 max-h-64 overflow-auto rounded-sm bg-chrome p-2 text-[11px] leading-relaxed whitespace-pre-wrap text-fg-muted">
           {line.paths.join("\n")}
@@ -581,10 +643,10 @@ function renderLine(
   line: Line,
   onPermission?: (requestId: string, allowed: boolean) => void,
 ): ReactNode {
-  if (line.kind === "tool") return <ToolRow key={line.seq} line={line} />
+  if (line.kind === "tool") return <ToolRow key={line.key} line={line} />
   if (line.kind === "commit-step")
     return (
-      <p key={line.seq} className="flex min-w-0 items-baseline gap-2 px-1">
+      <p key={line.key} className="flex min-w-0 items-baseline gap-2 px-1">
         <span className={line.done ? "text-ok" : "text-info"}>{line.done ? "✓" : "▸"}</span>
         <span className="min-w-0 text-fg-muted">{line.label}</span>
       </p>
@@ -592,37 +654,37 @@ function renderLine(
   if (line.kind === "commit-message")
     return (
       <CommitMessageRow
-        key={line.seq}
+        key={line.key}
         message={line.message}
         model={line.model}
       />
     )
-  if (line.kind === "commit-landed") return <CommitLandedRow key={line.seq} line={line} />
-  if (line.kind === "checkpoint") return <CheckpointRow key={line.seq} line={line} />
+  if (line.kind === "commit-landed") return <CommitLandedRow key={line.key} line={line} />
+  if (line.kind === "checkpoint") return <CheckpointRow key={line.key} line={line} />
   if (line.kind === "thinking")
     return (
-      <p key={line.seq} className="px-1 break-words whitespace-pre-wrap text-syn-comment italic">
+      <p key={line.key} className="px-1 break-words whitespace-pre-wrap text-syn-comment italic">
         {line.text}
       </p>
     )
-  if (line.kind === "user") return <UserRow key={line.seq} line={line} />
+  if (line.kind === "user") return <UserRow key={line.key} line={line} />
   if (line.kind === "permission")
-    return <PermissionRow key={line.seq} line={line} onAnswer={onPermission} />
+    return <PermissionRow key={line.key} line={line} onAnswer={onPermission} />
   if (line.kind === "denied")
     return (
-      <p key={line.seq} className="px-1 break-words text-warn">
+      <p key={line.key} className="px-1 break-words text-warn">
         ✗ denied {line.name} — {line.reason}
       </p>
     )
   if (line.kind === "retry")
     return (
-      <p key={line.seq} className="px-1 break-words text-warn">
+      <p key={line.key} className="px-1 break-words text-warn">
         ↻ {line.text}
       </p>
     )
   if (line.kind === "error")
     return (
-      <p key={line.seq} className="px-1 break-words text-err" title={line.text}>
+      <p key={line.key} className="px-1 break-words text-err" title={line.text}>
         ! {humanizeError(line.text)}
       </p>
     )
@@ -630,7 +692,7 @@ function renderLine(
     const outcome = describeOutcome(line)
     return (
       <p
-        key={line.seq}
+        key={line.key}
         title={`SDK result subtype: ${line.subtype}`}
         className={`mt-3 border-t border-line px-1 pt-2 ${outcome.className}`}
       >
@@ -647,40 +709,12 @@ function renderLine(
   }
   return (
     <div
-      key={line.seq}
+      key={line.key}
       className={`px-1 ${line.nested ? "ml-4 border-l border-line pl-3" : ""}`}
     >
       <Markdown text={line.text} />
     </div>
   )
-}
-
-/**
- * The lines, cut into one box per question.
- *
- * This is what makes the pinned question hand over cleanly, and it is not
- * cosmetic: a sticky element sticks inside its own parent and nowhere else. In
- * one flat list every question would stay pinned for the rest of the
- * conversation, stacked behind the newest one — and since the boxes are
- * different heights, a taller old question would leave a strip of itself showing
- * under the new one. A box per exchange means each question is pushed out by the
- * next, which is the behaviour you already know from an editor.
- *
- * Anything before the first question — the checkpoint row, say — is its own
- * leading box, so it is never adopted by a question it came before.
- */
-function groupByQuestion(lines: Line[]): Line[][] {
-  const groups: Line[][] = []
-  let current: Line[] | null = null
-  for (const line of lines) {
-    if (line.kind === "user" || current === null) {
-      current = [line]
-      groups.push(current)
-    } else {
-      current.push(line)
-    }
-  }
-  return groups
 }
 
 /**
@@ -694,35 +728,36 @@ function groupByQuestion(lines: Line[]): Line[][] {
 export function Transcript({
   events,
   onPermission,
+  live,
+  tail,
   children,
 }: {
   events: RunEvent[]
   /** Present only for a live chat turn; a replayed transcript cannot be answered. */
   onPermission?: (requestId: string, allowed: boolean) => void
+  /** The reply being typed right now, if there is one. See `LiveText`. */
+  live?: LiveText | null
   /**
-   * The reply still streaming in, which has no event of its own yet.
+   * Render at most this many lines, counting back from the end.
    *
-   * Taken as children rather than rendered after this component so it lands
-   * inside the LAST question's box. Outside it, scrolling into the streaming
-   * reply released the pinned question — precisely when the answer is arriving
-   * and you most want to see what it is answering.
+   * Cut here rather than by the caller, and on lines rather than on events, so
+   * that a block's key is decided by the whole log — see `blockKey`.
    */
+  tail?: number
+  /** Anything that belongs after the last line: the commit message being written. */
   children?: ReactNode
 }) {
-  const groups = useMemo(() => groupByQuestion(toLines(events)), [events])
+  const lines = useMemo(() => toLines(events, live), [events, live])
+  const shown = tail !== undefined && lines.length > tail ? lines.slice(-tail) : lines
 
-  if (groups.length === 0) {
+  if (shown.length === 0) {
     if (!children) return <Empty>Nothing in this transcript.</Empty>
     return <div className="space-y-1">{children}</div>
   }
   return (
     <div className="space-y-1">
-      {groups.map((group, i) => (
-        <section key={group[0]?.seq ?? i} className="space-y-1">
-          {group.map((line) => renderLine(line, onPermission))}
-          {i === groups.length - 1 && children}
-        </section>
-      ))}
+      {shown.map((line) => renderLine(line, onPermission))}
+      {children}
     </div>
   )
 }
