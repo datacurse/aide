@@ -27,7 +27,7 @@ import { fileURLToPath } from "node:url"
 // `@aide/protocol` to raw `.ts` sources whose own `.js` imports it cannot follow
 // — `pnpm build` dies before it starts, on a file the bundle never includes.
 import { restartDecision, type Health } from "../protocol/src/health.js"
-import type { Plugin } from "vite"
+import type { Plugin, ViteDevServer } from "vite"
 import { reclaimPort } from "./vite-port.js"
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -57,6 +57,13 @@ const QUIET_MS = 1500
  * would cost a TCP connect per request rather than per quarter-second.
  */
 const GATE_PROBE_MS = 250
+
+/**
+ * The message that hands a held reload to the page. Matched in `src/reload.ts`,
+ * by string rather than by import: this file is loaded by Node through Vite's
+ * config loader, and reaching into `src/` would pull React in with it.
+ */
+const RELOAD_HELD = "aide:reload-held"
 
 export type DaemonState = "stopped" | "starting" | "running" | "adopted"
 
@@ -118,6 +125,12 @@ export function daemonControl(port: number, webPort: number): Plugin {
   let refreshing = false
   /** The on-disk fingerprint seen last tick — see the settling check below. */
   let lastSeenSourceId: string | null = null
+  /** Chat turns mid-answer as of the last poll, and whether that cost the page
+   *  an update. See the hotUpdate hook. */
+  let turnsInFlight = 0
+  let reloadHeld = false
+  /** The running dev server, for sending the held reload on. */
+  let dev: ViteDevServer | null = null
   const log: string[] = []
 
   const record = (text: string) => {
@@ -322,6 +335,23 @@ export function daemonControl(port: number, webPort: number): Plugin {
   }
 
   /**
+   * Hand the page the reload we took off it, once nothing is answering.
+   *
+   * A custom message rather than Vite's own `full-reload`, because "nothing is
+   * running" is not yet "you are here". A turn ending is exactly when the tab
+   * starts ringing for you, and a reload landing on that alarm would take the
+   * sound and the title with it — and the run they were about is over, so
+   * nothing would ring a second time. The page holds the reload until somebody
+   * answers; see `src/reload.ts`.
+   */
+  const releaseHeldReload = (): void => {
+    if (!reloadHeld || turnsInFlight > 0 || dev === null) return
+    reloadHeld = false
+    dev.config.logger.info("  aide: page updates released — reloading when you are back")
+    dev.hot.send({ type: "custom", event: RELOAD_HELD })
+  }
+
+  /**
    * Restart the daemon when its source has changed, and only when that is free.
    *
    * This is the root fix for a skew that is otherwise guaranteed here: the
@@ -351,13 +381,24 @@ export function daemonControl(port: number, webPort: number): Plugin {
       if (!res.ok) return
       health = (await res.json()) as Health
     } catch {
-      // Booting, or wedged. Either way the next tick asks again.
+      // Booting, or wedged. Either way the next tick asks again — but a daemon
+      // that is not answering has no turn worth protecting a page from, and
+      // leaving the last count standing would hold the page's updates for as
+      // long as the daemon stayed down.
+      turnsInFlight = 0
+      releaseHeldReload()
       return
     }
     // A daemon too old to report the field cannot be reasoned about, and
     // `undefined` must not read as "not stale" — this is the one skew that
     // would disable the fix for skew.
     if (typeof health.stale !== "boolean" || health.busy === undefined) return
+
+    // Read here rather than fetched from the hook that needs it: a `git merge`
+    // rewriting forty files would otherwise be forty health requests inside a
+    // second, to answer a question that changes about once a minute.
+    turnsInFlight = health.busy.chats
+    releaseHeldReload()
 
     // Ours, or a predecessor's. Anything else belongs to whoever started it.
     const owned = child !== null && child.exitCode === null
@@ -390,7 +431,41 @@ export function daemonControl(port: number, webPort: number): Plugin {
     name: "aide:daemon-control",
     apply: "serve",
 
+    /**
+     * Do not touch the page while a turn is in flight.
+     *
+     * The milestone is developing aide inside aide, so an agent rewriting
+     * `packages/web/src` is the normal case, not an edge one — and when Fast
+     * Refresh cannot swap a module in, Vite reloads the browser. That reload
+     * lands under the very turn you are watching: the transcript you were
+     * reading goes, and the document that comes back has never been touched, so
+     * the browser will not let the finish make a sound. The alarm then rings
+     * silently, and the mouse you move on your way back to the window is what
+     * stops it.
+     *
+     * So: nothing is applied while `busy.chats` is above zero, and the page is
+     * told afterwards. Returning an empty module list is how a plugin says
+     * "there is nothing to update here", which is a no-op rather than a reload.
+     *
+     * It does not cover everything, and cannot: changing `vite.config.ts` or
+     * anything it imports — this file included — restarts the dev server, and
+     * the browser reloads on its own when the socket comes back. The trade is
+     * that the page shows the code it loaded with until the turn is over.
+     */
+    hotUpdate() {
+      if (turnsInFlight === 0) return
+      if (!reloadHeld) {
+        reloadHeld = true
+        dev?.config.logger.info(
+          `  aide: holding page updates — ${turnsInFlight} chat turn${turnsInFlight > 1 ? "s" : ""} in flight`,
+        )
+      }
+      return []
+    },
+
     async configureServer(server) {
+      dev = server
+
       // Before Vite binds. A stale dev server from a previous session would
       // otherwise push this one to the next port, where the daemon's origin
       // guard rejects its POSTs — see vite-port.ts.

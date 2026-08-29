@@ -68,6 +68,16 @@ Decisions already taken, which are not gaps to fill:
   a shortcut around the review — it is what makes the rail's list, which blocks
   the next chat, a list you can always clear. Narrowing it back to one chat's
   paths re-opens the wedge in the brief.
+- **The page does not hot-update while a turn is in flight.** A run in this repo
+  rewrites the modules the page is running, and a module Fast Refresh cannot
+  swap in reloads the browser out from under the turn you are watching — taking
+  the transcript with it, and landing in a document nobody has touched, where
+  the browser will not let the finish make a sound. So `hotUpdate` in
+  `packages/web/vite-daemon.ts` applies nothing while `busy.chats` is above
+  zero, and hands the reload to `packages/web/src/reload.ts`, which takes it
+  once the window has focus and the done alarm has been answered. Looking at the
+  code you loaded with until the turn is over is the price, and it is the cheap
+  half of the trade.
 
 ## Commands
 

@@ -113,6 +113,19 @@ export function chime(): void {
 const ALARM_MS = 2000
 
 /**
+ * Whether the alarm is going right now.
+ *
+ * Read by the held-reload check in `reload.ts`, which must not take the page
+ * out from under a ring: the run it is about has already finished, so a reload
+ * would leave nothing to ring again and no title to notice.
+ *
+ * A module-level flag rather than something threaded through React, because
+ * there is one alarm — there is one open conversation.
+ */
+let ringingNow = false
+export const alarmRinging = (): boolean => ringingNow
+
+/**
  * How far the pointer has to travel, in CSS pixels, before the alarm believes
  * you are back. One mousemove is not evidence of anybody: a desk bump, a
  * scrollbar under a still cursor, a window animation sliding the page — each
@@ -175,6 +188,7 @@ export function useDoneChime(active: boolean, key: string | null): void {
     // saying nothing for half of every two minutes.
     const title = document.title
     document.title = `● done · ${title}`
+    ringingNow = true
 
     chime()
     const timer = window.setInterval(() => {
@@ -220,6 +234,7 @@ export function useDoneChime(active: boolean, key: string | null): void {
     return () => {
       window.clearInterval(timer)
       document.title = title
+      ringingNow = false
       window.removeEventListener("mousemove", onMove)
       window.removeEventListener("keydown", roused)
       window.removeEventListener("pointerdown", roused)
