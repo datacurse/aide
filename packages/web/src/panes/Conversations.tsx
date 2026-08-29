@@ -10,7 +10,8 @@ import type {
 import { sortChats } from "@aide/protocol"
 import { api, type ConversationRow, type ConversationView } from "../api.js"
 import { useDoneChime } from "../chime.js"
-import { Composer, MAX_ATTACHMENT_BYTES, readAsAttachment } from "../Composer.js"
+import { MAX_ATTACHMENT_BYTES, readAsAttachment } from "../attachments.js"
+import { Composer } from "../Composer.js"
 import {
   addBacklogChat,
   discardDraft,

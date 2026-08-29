@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react"
+import { MAX_ATTACHMENT_BYTES, readAsAttachment } from "./attachments.js"
 import { readDraft, saveDraft, useDraft } from "./drafts.js"
 import { useAutoGrow } from "./useAutoGrow.js"
 import { useRemembered } from "./useRemembered.js"
@@ -13,14 +14,6 @@ import {
   type EffortLevel,
 } from "@aide/protocol"
 
-/**
- * Pasted images are held in memory as base64 and sent with the turn. A 10MB
- * screenshot is already past what is useful to a model and would make the
- * request body enormous, so it is refused with a reason rather than silently
- * dropped.
- */
-export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
-
 const kb = (bytes: number) =>
   bytes > 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.round(bytes / 1024)} KB`
 
@@ -29,8 +22,6 @@ const isChatMode = (v: unknown): v is ChatMode =>
 const isEffort = (v: unknown): v is EffortLevel =>
   typeof v === "string" && (EFFORT_LEVELS as readonly string[]).includes(v)
 const isBoolean = (v: unknown): v is boolean => typeof v === "boolean"
-
-let attachmentSeq = 0
 
 /**
  * The one message typed often enough to be worth a button of its own.
@@ -43,36 +34,6 @@ const PROCEED = "proceed"
 
 /** One array for every empty box, so the identity is stable across renders. */
 const NOTHING_ATTACHED: Attachment[] = []
-
-/** Strip the `data:image/png;base64,` prefix — the API wants the payload alone. */
-function splitDataUrl(dataUrl: string): { mediaType: string; data: string } | null {
-  const match = /^data:([^;]+);base64,(.*)$/s.exec(dataUrl)
-  if (!match?.[1] || !match[2]) return null
-  return { mediaType: match[1], data: match[2] }
-}
-
-/**
- * Exported because the capture box in the chat list takes screenshots too, and
- * an idea you park is worth the same picture as one you send straight away.
- */
-export function readAsAttachment(file: File): Promise<Attachment | null> {
-  return new Promise((resolve) => {
-    const reader = new FileReader()
-    reader.onload = () => {
-      const parsed = typeof reader.result === "string" ? splitDataUrl(reader.result) : null
-      if (!parsed) return resolve(null)
-      attachmentSeq += 1
-      resolve({
-        id: `a${attachmentSeq}`,
-        mediaType: parsed.mediaType,
-        data: parsed.data,
-        bytes: file.size,
-      })
-    }
-    reader.onerror = () => resolve(null)
-    reader.readAsDataURL(file)
-  })
-}
 
 /** The context meter. Counts DOWN, because what matters is the room left. */
 function ContextMeter({ usage }: { usage: ContextUsage | null }) {

@@ -10,8 +10,14 @@ import type { RunEvent } from "@aide/protocol"
  * message and nothing happened" is the same picture as "it is working".
  */
 
-/** Derived from the tail of the stream, so it needs no extra state on the wire. */
-export function describeActivity(events: readonly RunEvent[], runId: string | null): string {
+/**
+ * Derived from the tail of the stream, so it needs no extra state on the wire.
+ *
+ * Not exported, though it reads like it wants to be: a non-component export next
+ * to a component makes Fast Refresh reload the whole page instead of swapping
+ * the component, and nothing outside this file needs it.
+ */
+function describeActivity(events: readonly RunEvent[], runId: string | null): string {
   if (!runId) return ""
   const mine = events.filter((e) => e.runId === runId)
   if (mine.length === 0) return "Sending"
