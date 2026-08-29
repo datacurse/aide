@@ -456,8 +456,8 @@ function ChatRow({
   chat: ConversationRow
   /**
    * The row's status as of NOW, which is not `chat.status` — see `withLock`.
-   * Passed in rather than read off the chat so that the badge and the ordering
-   * cannot be looking at two different answers.
+   * Passed in rather than read off the chat so that the badge and the group the
+   * row is drawn in cannot be looking at two different answers.
    */
   status: ChatStatus
   /** When the run holding the repo started, if this row is the one holding it. */
@@ -571,11 +571,11 @@ const USAGE_SHARE = (tokens: number) =>
 /**
  * How a parked chat looks to the ordering the started ones use.
  *
- * It has no status and no session, but it has a date, and a date is all the
- * order needs — so it sorts AMONG the conversations rather than in a block above
- * them. Two ideas parked either side of a chat you actually had keep the order
- * you had them in, which is the whole point of ordering by when a thing came to
- * exist.
+ * It has no status and no session, but it has a date, and a date is the whole of
+ * what the order reads — so it sorts AMONG the conversations rather than in a
+ * block above them. Two ideas parked either side of a chat you actually had keep
+ * the order you had them in, which is the whole point of ordering by when a
+ * thing came to exist.
  *
  * One object for every parked row, because none of them differ.
  */
@@ -602,7 +602,8 @@ const PARKED: ChatStatus = { state: null, blocked: false, done: false }
  *
  * The reconstruction is `chatStatuses`' own rule, in the same order: running
  * outranks done, because a chat you ticked off and then asked one more thing of
- * is running whatever the tick says.
+ * is running whatever the tick says — and that is what keeps it out of the
+ * archived group while the turn is in flight.
  */
 function withLock(
   status: ChatStatus,
@@ -623,9 +624,10 @@ function withLock(
 /**
  * A row in the list, whichever kind it is.
  *
- * Flattened to the three fields `sortChats` reads, so both kinds go through one
- * ordering. Two sorts stitched together was the alternative, and it can only
- * ever produce a list whose two halves disagree about what "first" means.
+ * Flattened to the two dates the order reads and the status the groups are split
+ * on, so both kinds go through one sort. Two sorts stitched together was the
+ * alternative, and it can only ever produce a list whose two halves disagree
+ * about what "first" means.
  */
 type ListRow = { status: ChatStatus; createdAt: number | null; lastModified: number } & (
   | { kind: "draft"; draft: Draft }
@@ -840,17 +842,18 @@ export function ConversationList({
   const holderBlocked = holder?.blocked ?? false
 
   /**
-   * Every row this project has, in one order.
+   * Every row this project has, in one order: newest first, whatever each one is
+   * doing. See `sortChats` — a chat you park has to appear where you are looking.
    *
    * Memoized because `sortChats` copies, and this list is re-rendered on the
    * app's poll: a fresh array every 1.5 seconds is a fresh identity for every
    * row's props, which is enough to make a 200-chat list stutter while you
    * scroll it.
    *
-   * The status the sort reads is the one the badge draws — `withLock`'s, not the
-   * one the row was fetched with. Ordering by the stale copy is what pinned a
-   * finished conversation to the top of the list until something else asked for
-   * the list again.
+   * The status each row carries is `withLock`'s rather than the one it was
+   * fetched with, because it is what the badge draws and what the split below
+   * sorts a chat into — and the fetched copy is as old as the last time anything
+   * asked for the list.
    */
   const rows = useMemo<ListRow[]>(
     () =>

@@ -63,22 +63,6 @@ export interface ChatSpend {
 }
 
 /**
- * Chat-list order: what it costs to ignore, then how old it is.
- *
- * `blocked` first because an agent is literally stopped on a click. `closed`
- * last because you have said you are finished with it — that is the "all
- * finished pushed down" rule. Everything else sits between the two.
- */
-const CHAT_RANK: Record<string, number> = {
-  working: 1,
-  ordinary: 2,
-  closed: 3,
-}
-
-const chatRank = (s: ChatStatus): number =>
-  s.blocked && s.state !== "closed" ? 0 : (CHAT_RANK[s.state ?? "ordinary"] ?? 2)
-
-/**
  * When a row came into existence — the date the list is ordered by.
  *
  * `lastModified` used to be the key, and ordering by it meant the list
@@ -98,8 +82,30 @@ const chatRank = (s: ChatStatus): number =>
 export const born = (r: { createdAt: number | null; lastModified: number }): number =>
   r.createdAt ?? r.lastModified
 
-export function sortChats<
-  T extends { status: ChatStatus; createdAt: number | null; lastModified: number },
->(rows: readonly T[]): T[] {
-  return [...rows].sort((a, b) => chatRank(a.status) - chatRank(b.status) || born(b) - born(a))
+/**
+ * Chat-list order: newest first, and nothing else.
+ *
+ * There used to be a status rank in front of the date — blocked, then running,
+ * then ordinary, then closed — on the theory that the row an agent is stopped on
+ * belongs nearest the top. What it did in practice was move the top of the list
+ * out from under the thing you were adding to it: park two notes while a chat
+ * from this morning is running and they land BELOW that chat, in an order that
+ * reads as arbitrary unless you already knew a turn was in flight somewhere. A
+ * list you write into has to put what you just wrote where you were looking.
+ *
+ * Dropping it costs nothing that was only being said by position. Which row
+ * holds the checkout, and which one is stopped on a click, is on the row itself
+ * and in colour; and the ticked-off chats are still last because the list draws
+ * them as their own group under their own heading rather than leaning on this to
+ * sink them.
+ *
+ * So `status` is deliberately not a parameter here. Half a rank is worse than
+ * none — `blocked` is only ever true of the run in flight, so pinning that alone
+ * would make one row jump to the top and back down as permission prompts came
+ * and went.
+ */
+export function sortChats<T extends { createdAt: number | null; lastModified: number }>(
+  rows: readonly T[],
+): T[] {
+  return [...rows].sort((a, b) => born(b) - born(a))
 }

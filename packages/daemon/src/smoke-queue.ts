@@ -480,19 +480,25 @@ console.log("\nchat list order")
     done: state === "closed",
     ...extra,
   })
+  // Strictly by date, with nothing allowed in front of it. What a row is doing
+  // is drawn on the row; if it could also move the row, then parking a note
+  // while an older chat has the repo would file the note underneath it — and
+  // "newest" would stop meaning "top" exactly when you were adding to the list.
+  //
+  // Which is why `closed` comes out mid-list here and nothing is wrong: finished
+  // chats are last on screen because the list draws them as their own group
+  // under their own heading, not because the sort sinks them.
   const sorted = sortChats([
-    { id: "closed", ...at(500), status: st("closed") },
-    { id: "ordinary", ...at(400), status: st(null) },
-    { id: "working", ...at(300), status: st("working") },
     { id: "blocked", ...at(100), status: st("working", { blocked: true }) },
+    { id: "working", ...at(300), status: st("working") },
+    { id: "ordinary", ...at(400), status: st(null) },
+    { id: "closed", ...at(500), status: st("closed") },
+    { id: "parked", ...at(600), status: st(null) },
   ])
-  check("blocked first, even though it is the oldest", sorted[0]?.id === "blocked")
-  check("then working", sorted[1]?.id === "working")
-  check("then everything else", sorted[2]?.id === "ordinary")
   check(
-    "finished is pushed to the bottom, newest though it is",
-    sorted[3]?.id === "closed",
-    "all finished pushed down",
+    "newest first, whatever each row is doing",
+    sorted.map((r) => r.id).join(" ") === "parked closed ordinary working blocked",
+    "a note parked while an older chat has the repo is still the top row",
   )
 
   // The list is read by position, so speaking to a chat must not move it: a row
