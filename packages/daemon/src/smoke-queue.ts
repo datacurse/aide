@@ -148,6 +148,54 @@ check("a different conversation gets its own session", lane.liveSessions() === 2
 check("and starts its own turn count", turnsOf(other) === 1, `numTurns ${turnsOf(other)}`)
 
 // ---------------------------------------------------------------------------
+console.log("\na run log ends in exactly one terminal event")
+// Stated in `chat.ts`, relied on by `spend.ts` and by the receipt, and enforced
+// until now only by every caller remembering. It got away twice on the machine
+// this was written on: one log took a stray `assistant.start` after its
+// `run.finished`, and eight ended up with two terminal events. A log that breaks
+// it does not look broken — it reads as a turn that is still running, forever,
+// billing $0.
+{
+  const sealed = "aaaaaaaa-0000-4000-8000-000000000001"
+  log.append(sealed, { type: "user.message", text: "hi" })
+  log.append(sealed, {
+    type: "run.finished",
+    subtype: "success",
+    status: "success",
+    totalCostUsd: 1,
+    modelUsage: {},
+    numTurns: 1,
+    durationMs: 10,
+    permissionDenials: [],
+  })
+  const after = log.append(sealed, { type: "assistant.start" })
+  check("an append after the outcome is dropped", after === null)
+  check(
+    "so the log still ends in its outcome",
+    log.read(sealed).at(-1)?.type === "run.finished",
+    "this is the exact shape that billed a finished $5 turn as $0 and running",
+  )
+  check("and a second outcome cannot land either", log.read(sealed).length === 2)
+
+  // What a daemon killed mid-turn leaves behind: events, and nothing that says
+  // how it ended. Nobody is coming back to write one — the process that owed it
+  // an outcome is gone.
+  const abandoned = "aaaaaaaa-0000-4000-8000-000000000002"
+  log.append(abandoned, { type: "user.message", text: "left open" })
+  log.append(abandoned, { type: "tool.start", toolUseId: "t1", name: "Bash", input: {}, parentToolUseId: null })
+
+  const closed = await log.sealAbandoned()
+  check("boot closes a run left open", closed.includes(abandoned), closed.join(","))
+  const end = log.read(abandoned).at(-1)
+  check("and it now says how it ended", end?.type === "run.error", end?.type)
+  check(
+    "a run that ended properly is left alone",
+    !closed.includes(sealed),
+    "re-closing a finished run would overwrite an outcome with an error",
+  )
+}
+
+// ---------------------------------------------------------------------------
 console.log("\nevery turn leaves a place to go back to")
 // The conversation's checkpoint is one place to rewind to however long the chat
 // runs. These are the finer-grained ones, and the assertions that matter are

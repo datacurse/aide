@@ -809,15 +809,33 @@ async function stopEverything(why: string): Promise<void> {
 }
 
 // Ctrl-C on `pnpm daemon`, and any orderly kill. Note what these CANNOT catch:
-// Windows `taskkill /F` is TerminateProcess and delivers no signal at all.
-//
-// Boot reconciliation used to live here, and no longer needs to: a task filed
-// `running` in a file was wreckage a crash could leave behind, but a
-// conversation's state is derived on every read from whether a turn is actually
-// in flight. There is nothing left to correct at boot because nothing was
-// written that could be wrong.
+// Windows `taskkill /F` is TerminateProcess and delivers no signal at all —
+// which is exactly the case the reconciliation below exists for.
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => void stopEverything(signal))
+}
+
+/**
+ * Close whatever the last daemon left open.
+ *
+ * Boot reconciliation was removed once, and the note left behind said there was
+ * nothing at boot that could be wrong: a task filed `running` in a file was
+ * wreckage a crash could leave, but a conversation's state is DERIVED on every
+ * read from whether a turn is actually in flight. That is still true of the
+ * lock, and it is why nothing here rebuilds one.
+ *
+ * It was never true of the event log, which is written rather than derived. Six
+ * runs on this machine end mid-tool-call and never say how they ended, because
+ * the process that owed them an outcome was killed before it could write one —
+ * and every reader since has reported them as still running.
+ *
+ * Before `listen`, so no request can see the half-repaired state, and awaited
+ * because a browser that connects first would cache the wrong answer for a
+ * second.
+ */
+const abandoned = await log.sealAbandoned()
+if (abandoned.length) {
+  console.log(`  closed       ${abandoned.length} run(s) left open by a previous daemon`)
 }
 
 const address = await app.listen({ port: CONFIG.port, host: "127.0.0.1" })

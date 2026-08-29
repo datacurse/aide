@@ -237,13 +237,25 @@ export async function sessionOfRun(
 }
 
 /**
- * The last event in a log, read from the end.
+ * How a run ended, read from the end of its log.
  *
- * Leaning on the invariant `chat.ts` states and `smoke:queue` checks: a run log
- * ends in exactly one terminal event. So the last complete line is the answer,
- * and there is no need to parse the thousand in front of it.
+ * Scans backwards for a TERMINAL event rather than taking the last line and
+ * checking it, and the difference is not pedantry. The invariant — a log ends in
+ * exactly one terminal event — held for 423 of this machine's 432 logs and not
+ * for the rest: one had a stray `assistant.start` land after its `run.finished`,
+ * which is the SDK reporting a message for a turn that had already ended. Taking
+ * the last line called that run unfinished forever, so it billed as $0 and its
+ * row read "running" for good, over a log that plainly said what it cost two
+ * lines up.
+ *
+ * `EventLog.append` seals a run at its terminal event now, so no new log can
+ * gain a straggler. This is what makes the ones already written readable.
+ *
+ * Null means no terminal event in the window, which is what a turn still in
+ * flight looks like — and, before boot reconciliation, what a turn whose daemon
+ * died looked like forever.
  */
-async function terminalEvent(path: string): Promise<RunEvent | null> {
+export async function terminalEvent(path: string): Promise<RunEvent | null> {
   let fh: Awaited<ReturnType<typeof open>>
   try {
     fh = await open(path, "r")
@@ -264,14 +276,16 @@ async function terminalEvent(path: string): Promise<RunEvent | null> {
     for (let i = lines.length - 1; i >= 0; i -= 1) {
       const line = lines[i]?.trim()
       if (!line) continue
+      let event: RunEvent
       try {
-        return JSON.parse(line) as RunEvent
+        event = JSON.parse(line) as RunEvent
       } catch {
-        // The last line of a log being appended to right now is torn about as
-        // often as not. Reporting no terminal event says "still running", which
-        // is exactly what a log in that state means.
-        return null
+        // A torn line. Only the one being written right now can be torn, so it
+        // is skipped rather than returned — and skipping rather than giving up
+        // is what lets the terminal event one line above it still be found.
+        continue
       }
+      if (event.type === "run.finished" || event.type === "run.error") return event
     }
     return null
   } catch {
