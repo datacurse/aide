@@ -223,6 +223,20 @@ export type RunEventBody =
    */
   | { type: "commit.step"; label: string }
   /**
+   * A check is about to be spawned.
+   *
+   * Its own event rather than another `commit.step`, because the row this opens
+   * is the row `verify.result` closes — one line per check that appears when the
+   * check starts and settles in place, instead of materialising after the fact.
+   *
+   * It exists because the checks were the one stretch of a commit that emitted
+   * nothing at all. `pnpm build` is half a minute during which the last thing
+   * written was "reading what is uncommitted", so the screen both said nothing
+   * new and named the wrong phase. A commit that looks wedged gets pressed
+   * again, which is the failure this is here to prevent.
+   */
+  | { type: "verify.started"; command: string }
+  /**
    * One of the project's own checks, and what it did.
    *
    * The evidence half of "a verified diff". Until this existed, whether a change

@@ -158,6 +158,15 @@ export async function runChecks(
   commands: readonly string[],
   root: string,
   opts: {
+    /**
+     * About to spawn this one. Called after the stop check, so a run that is
+     * already ending never announces a check it will not run.
+     *
+     * The pair to `onResult`, and the reason it exists is the wait between them:
+     * a check reported only on completion is invisible for exactly as long as it
+     * takes, which is the part anybody watching needs to see.
+     */
+    onStart?: (command: string) => void
     onResult?: (result: CheckOutcome) => void
     stopped?: () => boolean
     timeoutMs?: number
@@ -166,6 +175,7 @@ export async function runChecks(
   const results: CheckOutcome[] = []
   for (const command of commands) {
     if (opts.stopped?.()) break
+    opts.onStart?.(command)
     const { done, stop } = runCheck(command, root, opts.timeoutMs)
     // Polled rather than pushed: nothing here owns the stop button, and a
     // conversation's interrupt sets a flag the lane reads. A second is well

@@ -208,6 +208,9 @@ async function verifyTree(opts: CommitWorkingTreeOptions): Promise<void> {
 
   const { failed } = await runChecks(opts.verify, opts.project.root, {
     stopped: opts.stopped,
+    // Both halves, so the transcript can draw the check while it runs rather
+    // than only once it is over. A commit spends most of its wall clock in here.
+    onStart: (command) => emit({ type: "verify.started", command }),
     onResult: (r) => emit({ type: "verify.result", ...r }),
   })
 

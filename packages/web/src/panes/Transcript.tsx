@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react"
+import { useEffect, useMemo, useState, type ReactNode } from "react"
 import type { MessageImage, RunEvent, RunStatus } from "@aide/protocol"
 import { Markdown } from "../Markdown.js"
 import { Button, Empty, money } from "../ui.js"
@@ -85,14 +85,31 @@ interface CommitLandedLine {
   sha: string
   paths: string[]
 }
-/** One of the project's own checks, run by aide rather than by the agent. */
+/**
+ * One of the project's own checks, run by aide rather than by the agent.
+ *
+ * Opened by `verify.started` and settled in place by `verify.result`, the same
+ * way a tool row is. Before it was opened on the result alone, a check was a row
+ * that did not exist until it was over — so the longest wait in a commit was the
+ * one part of it with nothing on screen.
+ */
 interface VerifyLine {
   kind: "verify"
   key: string
   command: string
-  ok: boolean
+  /** Null while it is still running. */
+  ok: boolean | null
   exitCode: number | null
-  ms: number
+  /** Null while it is still running; the row counts up from `startedAt` instead. */
+  ms: number | null
+  /**
+   * When the check was spawned, by the daemon's clock.
+   *
+   * Compared against the browser's `Date.now()`, which is only sound because
+   * both are this machine — aide is loopback-only by design, so there is no skew
+   * to correct for. Zero for a row that had no start event to open it.
+   */
+  startedAt: number
   output: string
 }
 interface OutcomeLine {
@@ -185,6 +202,7 @@ function toLines(events: RunEvent[], live?: LiveText | null): Line[] {
   const lines: Line[] = []
   const byToolId = new Map<string, ToolLine>()
   const byRequestId = new Map<string, PermissionLine>()
+  let openVerify: VerifyLine | null = null
 
   // The run has to be in the key, not just the seq. History is numbered from 1
   // for the whole session and a run's own log is numbered from 1 for that run,
@@ -311,7 +329,35 @@ function toLines(events: RunEvent[], live?: LiveText | null): Line[] {
       case "commit.landed":
         lines.push({ kind: "commit-landed", key: rowKey(e), sha: e.sha, paths: e.paths })
         break
-      case "verify.result":
+      case "verify.started": {
+        const line: VerifyLine = {
+          kind: "verify",
+          key: rowKey(e),
+          command: e.command,
+          ok: null,
+          exitCode: null,
+          ms: null,
+          startedAt: e.ts,
+          output: "",
+        }
+        // One slot, not a map: `runChecks` runs the commands in series and stops
+        // at the first failure, so at most one check is ever in flight.
+        openVerify = line
+        lines.push(line)
+        break
+      }
+      case "verify.result": {
+        // Settle the row its start opened. The fallback is not defensive
+        // padding: every transcript written before `verify.started` existed
+        // carries only this half, and has to keep rendering.
+        if (openVerify && openVerify.command === e.command) {
+          openVerify.ok = e.ok
+          openVerify.exitCode = e.exitCode
+          openVerify.ms = e.durationMs
+          openVerify.output = e.output
+          openVerify = null
+          break
+        }
         lines.push({
           kind: "verify",
           key: rowKey(e),
@@ -319,9 +365,11 @@ function toLines(events: RunEvent[], live?: LiveText | null): Line[] {
           ok: e.ok,
           exitCode: e.exitCode,
           ms: e.durationMs,
+          startedAt: 0,
           output: e.output,
         })
         break
+      }
       case "tool.denied":
         lines.push({ kind: "denied", key: rowKey(e), name: e.name, reason: e.reason })
         break
@@ -679,21 +727,62 @@ function StaleRow({ supervised }: { supervised: boolean }) {
  * failing one is the only thing on screen worth reading — making that one click
  * away would be hiding the answer to the question the whole gate exists to ask.
  */
+/**
+ * Seconds since a check started, ticking.
+ *
+ * A number that moves is the cheapest possible proof the commit has not wedged
+ * — the same job `WorkingBar` does for a turn, needed again here because a check
+ * is the one thing in a commit that can run for half a minute with nothing else
+ * on screen changing. Its own component so the interval exists only while a
+ * check is actually running.
+ */
+function RunningFor({ since }: { since: number }) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 500)
+    return () => clearInterval(timer)
+  }, [])
+  // Clamped, because a row replayed from a log written moments ago can briefly
+  // compute a negative age, and "-1s" reads as a bug rather than as a start.
+  return <span className="shrink-0 text-fg-dim">{Math.max(0, Math.round((now - since) / 1000))}s</span>
+}
+
 function VerifyRow({ line }: { line: VerifyLine }) {
-  const [open, setOpen] = useState(!line.ok)
-  const seconds = line.ms >= 1000 ? `${(line.ms / 1000).toFixed(1)}s` : `${line.ms}ms`
+  const running = line.ok === null
+  /**
+   * Derived rather than stored, with a click as an override.
+   *
+   * `useState(!line.ok)` was right when a row arrived already finished. It is
+   * wrong now that a row starts life running: `!null` is true, so every check
+   * would spring open the moment it passed, having initialised from a state it
+   * was only passing through.
+   */
+  const [override, setOverride] = useState<boolean | null>(null)
+  const open = override ?? line.ok === false
+  const seconds =
+    line.ms === null ? "" : line.ms >= 1000 ? `${(line.ms / 1000).toFixed(1)}s` : `${line.ms}ms`
   return (
     <div>
       <div
-        onClick={() => toggleUnlessSelecting(setOpen)}
+        // Through the same guard every collapsible row uses, so dragging a
+        // selection across a check's output does not fold it away mid-drag.
+        onClick={() => toggleUnlessSelecting((flip) => setOverride(flip(open)))}
         className="flex min-w-0 cursor-pointer items-baseline gap-2 rounded px-1 py-0.5 hover:bg-hover"
       >
-        <span className={line.ok ? "text-ok" : "text-err"}>{line.ok ? "✓" : "✗"}</span>
+        {/* `▸` while it runs, the same marker a commit step in flight uses, so
+            "this one is happening now" reads the same everywhere. */}
+        <span className={running ? "text-info" : line.ok ? "text-ok" : "text-err"}>
+          {running ? "▸" : line.ok ? "✓" : "✗"}
+        </span>
         <span className="min-w-0 truncate text-syn-string">{line.command}</span>
-        <span className="shrink-0 text-fg-dim">{seconds}</span>
+        {running ? (
+          line.startedAt > 0 && <RunningFor since={line.startedAt} />
+        ) : (
+          <span className="shrink-0 text-fg-dim">{seconds}</span>
+        )}
         {/* Only when it failed. "exit 0" on every green row is noise, and the
             code is the thing you want when it is anything else. */}
-        {!line.ok && (
+        {line.ok === false && (
           <span className="shrink-0 text-err">
             {line.exitCode === null ? "stopped" : `exit ${line.exitCode}`}
           </span>

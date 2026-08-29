@@ -16,15 +16,21 @@ export function describeActivity(events: readonly RunEvent[], runId: string | nu
   const mine = events.filter((e) => e.runId === runId)
   if (mine.length === 0) return "Sending"
 
-  // A tool call with no matching tool.end is the thing currently running.
+  // A tool call with no matching tool.end is the thing currently running, and a
+  // check with no matching result is the same idea for a commit.
   const open = new Set<string>()
   let lastToolName = ""
+  let openCheck = ""
   for (const e of mine) {
     if (e.type === "tool.start") {
       open.add(e.toolUseId)
       lastToolName = e.name
     } else if (e.type === "tool.end") {
       open.delete(e.toolUseId)
+    } else if (e.type === "verify.started") {
+      openCheck = e.command
+    } else if (e.type === "verify.result") {
+      openCheck = ""
     }
   }
 
@@ -38,12 +44,19 @@ export function describeActivity(events: readonly RunEvent[], runId: string | nu
   if (waiting && waiting.type === "permission.request") return `Waiting for you · ${waiting.name}`
 
   if (open.size > 0) return `Running ${lastToolName}`
+  // Ahead of the tail below, which would otherwise still be reporting the step
+  // BEFORE the checks — a commit spends most of its wall clock in here, and for
+  // all of it the bar read "reading what is uncommitted".
+  if (openCheck) return `Running ${openCheck}`
 
   const last = mine[mine.length - 1]
   if (!last) return "Working"
   // The commit narrates itself, and its own words are better than anything
   // derivable from the shape of its log.
   if (last.type === "commit.step") return last.label
+  // Between two checks, or just after the last one. Naming the check that just
+  // finished would read as one still running.
+  if (last.type === "verify.result") return "Checking"
   if (last.type === "commit.drafted") return "Committing"
   if (last.type === "user.message") return "Starting"
   if (last.type === "assistant.thinking") return "Thinking"
