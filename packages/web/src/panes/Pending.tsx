@@ -435,7 +435,7 @@ function CommitRow({
   const place =
     number === undefined
       ? "not a step along this branch's line, so it has no number"
-      : `commit ${number}`
+      : `commit #${number} along this branch`
   return (
     <div
       title={`${commit.subject}\n\n${place} · ${commit.short} · ${commit.author} · ${new Date(commit.date).toLocaleString()}`}
@@ -464,13 +464,18 @@ function CommitRow({
           ))}
         </div>
         <div className="flex items-baseline gap-2 text-[10px] leading-[13px] text-fg-dim">
-          {/* A column of its own, right-aligned and never dropped, so the digits
-              stack into something you can read a count off. Held open even when
-              a commit has no number: letting the row close the gap would shunt
-              every sha under it half a column left and turn the one list on
-              screen you scan vertically into a ragged edge. */}
-          <span className="min-w-[1.75rem] shrink-0 text-right font-mono text-fg-muted">
-            {number ?? ""}
+          {/* A column of its own, fixed width and never dropped. Held open even
+              when a commit has no number: letting the row close the gap would
+              shunt every sha under it half a column left and turn the one list
+              on screen you scan vertically into a ragged edge.
+
+              Left-aligned, not right: right-aligning parked the digits against
+              the far edge of the box, so the number started a few pixels in
+              from the subject above it and the whole column read as crooked.
+              The `#` is what makes a bare integer next to a sha legible as a
+              position at all. */}
+          <span className="min-w-[2rem] shrink-0 font-mono text-fg-muted">
+            {number === undefined ? "" : `#${number}`}
           </span>
           <span className="shrink-0 font-mono">{commit.short}</span>
           <span className="ml-auto shrink-0">{ago(commit.date)}</span>
