@@ -196,6 +196,17 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  /**
+   * Which conversation a run's first turn became, and whether it is over.
+   *
+   * The one thing a page that walked away cannot work out for itself: a session
+   * id is announced once, on the live stream, a second or two into a chat's
+   * first turn. `ended` says when to stop asking, for a turn that died before
+   * the SDK named anything.
+   */
+  runSession: (runId: string) =>
+    call<{ sessionId: string | null; ended: boolean }>(`/api/runs/${runId}/session`),
+
   answerPermission: (runId: string, requestId: string, allowed: boolean) =>
     call<{ ok: true }>(`/api/runs/${runId}/permissions/${requestId}`, {
       method: "POST",

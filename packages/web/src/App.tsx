@@ -248,6 +248,37 @@ export function App() {
   }
 
   /**
+   * A chat's first turn has named its session, so the unsent record that was
+   * standing in for it becomes that conversation.
+   *
+   * Two things reach here, and the second is why this is not just the pane's
+   * `onStarted` any more. The pane calls it from the live stream, for a turn you
+   * stayed to watch. The chat list calls it from the daemon, for one you did not
+   * — the name lands a second or two after the turn starts, and before this the
+   * pane was the only thing listening, so leaving in those two seconds stranded
+   * the record: it kept its "not sent yet" row beside the conversation it had
+   * become, and the project's remembered chat went on pointing at it, so coming
+   * back to the project opened an empty box.
+   *
+   * The pane follows only when the chat that started is the one on screen.
+   * Healing a row four places down the list must not take you out of what you
+   * are reading.
+   */
+  const chatStarted = useCallback(
+    (fromDraftId: string | null, id: string) => {
+      // The unstarted record IS this conversation, so it does not linger next to
+      // the real one the list is about to grow — anything still unsent in its
+      // box moves across with it.
+      if (projectId && fromDraftId) {
+        carryDraft(draftKey(projectId, fromDraftId), draftKey(projectId, id))
+      }
+      if (fromDraftId === null || fromDraftId === draftId) navigate({ sessionId: id })
+      setConversationsSeq((n) => n + 1)
+    },
+    [projectId, draftId, navigate],
+  )
+
+  /**
    * Add a project by pointing at it.
    *
    * The dialog is the daemon's, because a page cannot learn where a folder is on
@@ -420,6 +451,7 @@ export function App() {
             navigate({ draftId: id })
             setAutoSend(id)
           }}
+          onDraftStarted={chatStarted}
           onChanged={() => setConversationsSeq((n) => n + 1)}
         />
       </aside>
@@ -439,15 +471,9 @@ export function App() {
         // A new chat has no id until its first turn starts. Put it in the
         // URL the moment it exists, so a reload mid-first-turn still lands
         // on the conversation rather than on a blank new one — and refetch
-        // the list so the row appears.
-        onStarted={(id) => {
-          // The unstarted record IS this conversation, so it does not linger
-          // next to the real one the list is about to grow — anything still
-          // unsent in its box moves across with it.
-          if (projectId && draftId) carryDraft(draftKey(projectId, draftId), draftKey(projectId, id))
-          navigate({ sessionId: id })
-          setConversationsSeq((n) => n + 1)
-        }}
+        // the list so the row appears. The chat that started is by definition
+        // the one this pane is showing, so `chatStarted` always navigates here.
+        onStarted={(id) => chatStarted(draftId, id)}
       />
 
       {/* Always on screen. Not a view of the repository — reading a change

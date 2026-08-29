@@ -37,6 +37,21 @@ export interface Draft {
    * conversation that already exists is deleted the moment its box is emptied.
    */
   pinned: boolean
+  /**
+   * The run this chat's first turn went out under. Absent until it is sent, and
+   * gone again the moment the conversation has a name.
+   *
+   * So a record carrying one is a chat mid-handoff: sent, and not yet called
+   * anything. That window is a second or two — the SDK names the session shortly
+   * after the turn starts, and announces it exactly once, on that run's live
+   * stream — and the pane watching the turn was the only thing that could hear
+   * it. Leave in those two seconds, by switching project or clicking another
+   * chat, and the name arrived to nobody: this record went on saying "not sent
+   * yet" beside the conversation it had become, and the project's remembered
+   * chat went on pointing at it, so coming back opened an empty box. This is
+   * what lets the list ask the daemon what it missed.
+   */
+  startedRunId?: string
   /** epoch ms */
   createdAt: number
   updatedAt: number
@@ -206,9 +221,42 @@ export function saveDraft(key: string, content: { text: string; attachments: Att
     text: content.text,
     attachments: content.attachments,
     pinned: prev?.pinned ?? false,
+    // Carried, not dropped. The composer empties the box on the very press that
+    // sends the first turn, so this write lands immediately after the one that
+    // recorded the run — and forgetting it here would lose the handoff in the
+    // one case it exists for.
+    startedRunId: prev?.startedRunId,
     createdAt: prev?.createdAt ?? now,
     updatedAt: now,
   })
+}
+
+/**
+ * This chat's first turn has gone out, under this run.
+ *
+ * On the record rather than in the pane's state, which is what makes the handoff
+ * survive leaving the pane — see `startedRunId`. Only ever set on a chat with no
+ * session yet: everything else already knows what conversation it is.
+ */
+export function markDraftSent(key: string, runId: string): void {
+  const prev = cache.get(key)
+  if (!prev || prev.startedRunId === runId) return
+  commit(key, { ...prev, startedRunId: runId })
+}
+
+/**
+ * Stop waiting for a name that is not coming.
+ *
+ * A turn can end without the SDK ever having named a session — it failed to
+ * spawn, or the daemon went away under it — and this record is then an ordinary
+ * parked chat again rather than one mid-handoff. Without a way to say so, the
+ * list would ask what it became every second and a half for as long as the
+ * project is open.
+ */
+export function forgetDraftRun(key: string): void {
+  const prev = cache.get(key)
+  if (!prev?.startedRunId) return
+  commit(key, { ...prev, startedRunId: undefined })
 }
 
 /**
@@ -276,7 +324,10 @@ export function carryDraft(from: string, to: string): void {
   if (!row) return
   commit(from, null)
   if (row.text !== "" || row.attachments.length > 0) {
-    commit(to, { ...row, key: to, pinned: false })
+    // Not the run it started under: what lands here is the box on a conversation
+    // that now has a name, and a box still advertising a handoff would have the
+    // list waiting on one that has already happened.
+    commit(to, { ...row, key: to, pinned: false, startedRunId: undefined })
   }
 }
 

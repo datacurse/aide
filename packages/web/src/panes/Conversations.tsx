@@ -16,7 +16,9 @@ import {
   addBacklogChat,
   discardDraft,
   draftKey,
+  forgetDraftRun,
   idFromKey,
+  markDraftSent,
   saveDraft,
   useUnstartedChats,
   type Draft,
@@ -39,6 +41,17 @@ import { CommitMessageDraft, Transcript, type LiveText } from "./Transcript.js"
  * actually wants to see on open.
  */
 const VISIBLE_TAIL = 250
+
+/**
+ * How often to ask the daemon what a sent-but-unnamed chat became.
+ *
+ * The app's own beat, because the answer takes about as long to exist: the SDK
+ * names a session a second or two after a first turn starts. There is at most
+ * one handoff outstanding at a time — one agent per project — and the asking
+ * stops the moment it lands, so this is not a poll the app carries, it is the
+ * tail of one press.
+ */
+const HANDOFF_MS = 1500
 
 /**
  * Midnights crossed between then and now, in local time.
@@ -647,6 +660,7 @@ export function ConversationList({
   onSelect,
   onSelectDraft,
   onStartDraft,
+  onDraftStarted,
   onChanged,
 }: {
   projectId: string | null
@@ -672,6 +686,11 @@ export function ConversationList({
   onSelectDraft: (draftId: string) => void
   /** Open a parked chat and send it, from its ▶. */
   onStartDraft: (draftId: string) => void
+  /**
+   * An unstarted chat turned out to have a session after all — see `waiting`.
+   * Must be stable, or the handoff below restarts on every poll.
+   */
+  onDraftStarted: (draftId: string, sessionId: string) => void
   /** Ticking a chat off changes the row the pane below is showing. */
   onChanged: () => void
 }) {
@@ -715,6 +734,63 @@ export function ConversationList({
       cancelled = true
     }
   }, [projectId, reloadSeq, rememberItems, rememberError])
+
+  /**
+   * Chats whose first turn has gone out and which have no session id here yet.
+   *
+   * Every new chat spends a second or two in this state: the conversation
+   * exists, the SDK has not named it, and the name will be announced exactly
+   * once — on that run's live stream, to whoever is watching it. The pane
+   * watching the turn picks it up, and until this it was the ONLY thing that
+   * could. Switch project, or click another chat, inside those two seconds and
+   * the name arrived to nobody: the record that WAS the chat stayed in this list
+   * reading "not sent yet", beside the conversation it had turned into, and the
+   * project's remembered chat went on pointing at it — so coming back to the
+   * project opened an empty box instead of the work you had just started.
+   *
+   * So the list asks the daemon, which wrote the name down. Here rather than in
+   * the pane because the stranded row is here, and it is stranded exactly when
+   * nobody is looking at it.
+   */
+  const waiting = useMemo(() => unstarted.filter((d) => d.startedRunId), [unstarted])
+  /** Runs already answered for, so two overlapping ticks hand off once. */
+  const handedOff = useRef(new Set<string>())
+
+  useEffect(() => {
+    if (!projectId || waiting.length === 0) return
+    let cancelled = false
+    const ask = () => {
+      for (const draft of waiting) {
+        const runId = draft.startedRunId
+        if (!runId || handedOff.current.has(runId)) continue
+        void api
+          .runSession(runId)
+          .then(({ sessionId, ended }) => {
+            if (cancelled || handedOff.current.has(runId)) return
+            if (sessionId) {
+              handedOff.current.add(runId)
+              onDraftStarted(idFromKey(draft.key), sessionId)
+            } else if (ended) {
+              // The turn is over and never got a session, so there is no
+              // conversation for this row to become and no name left to wait
+              // for. It goes back to being an ordinary parked chat.
+              handedOff.current.add(runId)
+              forgetDraftRun(draft.key)
+            }
+          })
+          .catch(() => {
+            // The daemon is down, or newer than this page. Either way the row is
+            // unchanged and the next tick asks again.
+          })
+      }
+    }
+    ask()
+    const timer = setInterval(ask, HANDOFF_MS)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [projectId, waiting, onDraftStarted])
 
   const toggleDone = (row: ConversationRow) => {
     if (!projectId || !items) return
@@ -1349,6 +1425,10 @@ export function ConversationPane({
     try {
       const { runId: id } = await api.chat(projectId, { sessionId, ...msg })
       setRunId(id)
+      // A first turn, from a chat that has no name yet. Written on the unsent
+      // record so that walking away from this pane in the seconds before the SDK
+      // names the session does not lose the handoff — see `startedRunId`.
+      if (!sessionId && draftId) markDraftSent(draftKey(projectId, draftId), id)
       return true
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))

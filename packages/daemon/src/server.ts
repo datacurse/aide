@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs"
 import { dirname } from "node:path"
 import fastifyWebsocket from "@fastify/websocket"
 import Fastify from "fastify"
@@ -14,6 +15,7 @@ import type {
   ServerMessage,
 } from "@aide/protocol"
 import { CHAT_MODES, EFFORT_LEVELS } from "@aide/protocol"
+import { runLogPath } from "@aide/protocol/node"
 import { MAX_PROJECT_DOC_CHARS } from "./agent.js"
 import {
   chatStatuses,
@@ -31,7 +33,7 @@ import { commitWorkingTree, conversationBaseline } from "./review.js"
 import * as repo from "./repo.js"
 import { BOOT_SOURCE_ID, currentSourceId, isStale } from "./source.js"
 import { getConversation, listConversations } from "./sessions.js"
-import { spendBySession } from "./spend.js"
+import { sessionOfRun, spendBySession, terminalEvent } from "./spend.js"
 import { planUsage } from "./usage.js"
 
 const log = new EventLog()
@@ -700,6 +702,36 @@ app.post("/api/projects/:id/chat", async (req, reply) => {
   } catch (err) {
     return reply.code(409).send({ message: err instanceof Error ? err.message : String(err) })
   }
+})
+
+/**
+ * Which conversation a run's first turn became, and whether it is over.
+ *
+ * The browser's one blind spot. A new chat has no session id until the SDK
+ * assigns one a second or two into its first turn, and that name is announced
+ * exactly once — `run.started`, on that run's live stream. A page that has moved
+ * on by then never hears it, and the unsent record that WAS the chat is
+ * stranded. This is how it catches up, out of the log, which is where the name
+ * was written down.
+ *
+ * `ended` is the other half, and it is the half that stops the asking: a turn
+ * that died before the SDK named anything never will, and a caller polling for a
+ * name that is not coming would poll for as long as the tab is open.
+ */
+app.get("/api/runs/:runId/session", async (req, reply) => {
+  const { runId } = req.params as { runId: string }
+  // Checked rather than trusted, because it goes into a filename. Run ids are
+  // `randomUUID`s; anything else is a caller building a path, not asking about a
+  // run — and the log directory sits in the home folder, not in a repository.
+  if (!/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(runId)) {
+    return reply.code(400).send({ message: `${runId} is not a run id` })
+  }
+  const path = runLogPath(runId)
+  // A log that is not there counts as ended. Nothing is going to name a run
+  // nobody wrote, and the caller is asking precisely so it can stop waiting.
+  if (!existsSync(path)) return { sessionId: null, ended: true }
+  const [named, terminal] = await Promise.all([sessionOfRun(path), terminalEvent(path)])
+  return { sessionId: named?.sessionId ?? null, ended: terminal !== null }
 })
 
 /** Answer a tool call the turn is blocked on. */
