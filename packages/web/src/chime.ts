@@ -28,18 +28,62 @@ export function chimeEnabled(): boolean {
 /** One context for the life of the page: browsers cap how many you may open. */
 let shared: AudioContext | null = null
 
+/**
+ * The shared context, started if the browser will let it start.
+ *
+ * Rebuilt when it is `closed`, which is not a state this page ever asks for: a
+ * context outlives the machine sleeping and its output device going away, and
+ * what comes back is a context that reports itself fine and plays nothing. An
+ * aide tab left open across a lunch break went silent for the rest of the day,
+ * which is the worst failure available to the one thing whose job is to fetch
+ * you.
+ */
+function audio(): AudioContext | null {
+  try {
+    if (shared?.state === "closed") shared = null
+    const ctx = (shared ??= new AudioContext())
+    // Suspended means the browser is waiting for somebody to touch this
+    // document. Ask anyway — the ask is what starts it once they have.
+    if (ctx.state === "suspended") void ctx.resume()
+    return ctx
+  } catch {
+    // No Web Audio. A notification that does not sound is not worth taking down
+    // the pane that asked for it.
+    return null
+  }
+}
+
+/**
+ * Start the audio on the first thing anybody does to the page.
+ *
+ * Calling `resume()` at ring time is not enough on its own: `currentTime` is
+ * frozen while a context is suspended, so the notes below get scheduled against
+ * a clock that is not moving and land in the past the moment it starts — which
+ * arrives as a click rather than as a chime. Arming on the first gesture means
+ * the context has been running for minutes by the time anything wants it.
+ */
+function arm(): void {
+  audio()
+  window.removeEventListener("pointerdown", arm)
+  window.removeEventListener("keydown", arm)
+}
+window.addEventListener("pointerdown", arm, { passive: true })
+window.addEventListener("keydown", arm, { passive: true })
+
 /** A two-note ping — the agent stopped, it is your move. */
 export function chime(): void {
   if (!chimeEnabled()) return
 
-  try {
-    const ctx = (shared ??= new AudioContext())
-    // Autoplay policy holds a context suspended until the page has been
-    // interacted with. Sending a message is an interaction, so a turn you
-    // started always rings; a run you only ever watched may not, and staying
-    // silent is the only option — there is no permission to ask for.
-    void ctx.resume()
+  const ctx = audio()
+  // Anything but `running` is the browser holding this document silent because
+  // nobody has touched it since it loaded, and there is no permission to ask
+  // for. That is not the rare case it reads as: an agent editing packages/web
+  // hands Vite an update Fast Refresh cannot swap in, the page reloads under
+  // the turn, the pane adopts the run again — and the finish rings into a
+  // document with no gesture behind it. `useDoneChime` has the title for that.
+  if (!ctx || ctx.state !== "running") return
 
+  try {
     const now = ctx.currentTime
     for (const [after, hz] of [
       [0, 880],
@@ -59,8 +103,9 @@ export function chime(): void {
       osc.stop(now + after + 0.35)
     }
   } catch {
-    // No Web Audio, or the context refused to start. A notification that does
-    // not sound is not worth taking down the pane that asked for it.
+    // A context that died between the check above and the note below. Nothing
+    // to do about it here, and a notification that does not sound is not worth
+    // taking down the pane that asked for it — the next ring rebuilds it.
   }
 }
 
@@ -116,6 +161,21 @@ export function useDoneChime(active: boolean, key: string | null): void {
       return
     }
 
+    // The half of the alarm that does not need permission to happen.
+    //
+    // A page nobody has touched cannot make a sound, and after one of the dev
+    // server's full reloads that is the page every finish rings into — so the
+    // alarm went off silently, and the mouse you moved on your way back to the
+    // window was the thing that stopped it. The title is the channel left, and
+    // it is the one you can read from the taskbar, which is where you are
+    // standing when the alarm is for you.
+    //
+    // Steady rather than blinking: a hidden page's timers get throttled to once
+    // a minute, and a title that toggles on that clock is a title that is
+    // saying nothing for half of every two minutes.
+    const title = document.title
+    document.title = `● done · ${title}`
+
     chime()
     const timer = window.setInterval(() => {
       // Where turning the chime off mid-alarm lands: the header toggle writes
@@ -159,6 +219,7 @@ export function useDoneChime(active: boolean, key: string | null): void {
     window.addEventListener("pointerdown", roused)
     return () => {
       window.clearInterval(timer)
+      document.title = title
       window.removeEventListener("mousemove", onMove)
       window.removeEventListener("keydown", roused)
       window.removeEventListener("pointerdown", roused)
