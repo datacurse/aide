@@ -527,6 +527,12 @@ app.post("/api/projects/:id/conversations/:sessionId/commit", async (req, reply)
   // carry it — which is the better source anyway: it is what you actually typed
   // rather than a line somebody summarised it into.
   const opening = (await listConversations(project)).find((c) => c.sessionId === sessionId)
+  // Read on the press rather than cached from when the project was added: the
+  // checks live in the repository, so a run that added one has changed the gate
+  // it is about to be measured by, and reading a copy from boot would apply the
+  // old gate to the diff that changed it.
+  const doc = await readProjectDoc(project.root)
+  const force = (req.body as { force?: unknown } | null)?.force === true
   try {
     // Throws if another conversation holds the checkout, with that
     // conversation's name in it. `reviewable` has already refused the narrower
@@ -542,6 +548,8 @@ app.post("/api/projects/:id/conversations/:sessionId/commit", async (req, reply)
           sessionId,
           checkpoint: found.checkpoint,
           request: opening?.firstPrompt ?? "",
+          verify: doc.verify,
+          force,
           emit: run.emit,
           delta: run.delta,
           stopped: run.stopped,

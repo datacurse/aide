@@ -223,6 +223,32 @@ export type RunEventBody =
    */
   | { type: "commit.step"; label: string }
   /**
+   * One of the project's own checks, and what it did.
+   *
+   * The evidence half of "a verified diff". Until this existed, whether a change
+   * was sound came from the agent saying so at the end of its turn — a summary
+   * written by the thing being checked, in a run where 36% of the time no check
+   * had been run at all. These are spawned by aide, outside the model, and this
+   * event carries what the command actually printed.
+   *
+   * `output` is the TAIL, and is kept whether it passed or failed. Keeping it on
+   * success too costs a few lines and answers "green against what?" — a check
+   * that silently matched nothing reads exactly like a check that passed, and
+   * the log is the only place that difference is visible.
+   *
+   * `exitCode` is null when the command never produced one: killed on a timeout,
+   * or stopped by the human. `ok` is the field to branch on; the code is for
+   * reading afterwards.
+   */
+  | {
+      type: "verify.result"
+      command: string
+      ok: boolean
+      exitCode: number | null
+      durationMs: number
+      output: string
+    }
+  /**
    * The message the helper model wrote.
    *
    * Shown rather than swallowed. Nobody typed this message, so the transcript is

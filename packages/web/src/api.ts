@@ -136,9 +136,14 @@ export const api = {
    * and takes about as long as a short turn, so it goes on the event stream
    * like one — what it wrote and what it took arrive in the transcript.
    */
-  commitChat: (projectId: string, sessionId: string) =>
+  /**
+   * `force` commits over a failed check. It is a second press, never a setting —
+   * see `CommitConversationOptions.force` for why that distinction is the point.
+   */
+  commitChat: (projectId: string, sessionId: string, force = false) =>
     call<{ runId: string }>(`/api/projects/${projectId}/conversations/${sessionId}/commit`, {
       method: "POST",
+      body: JSON.stringify({ force }),
     }),
   /** Done. Nothing an agent runs can reach this. */
   closeChat: (projectId: string, sessionId: string) =>

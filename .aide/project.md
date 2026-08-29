@@ -1,3 +1,13 @@
+---
+# What has to pass before aide will write a commit here, in order. `CI=true` and
+# NO_COLOR are supplied, so these are written without the prefix CLAUDE.md shows.
+verify:
+  - pnpm typecheck
+  - pnpm smoke
+  - pnpm smoke:queue
+  - pnpm build
+---
+
 # aide
 
 A bird's-eye view across projects, with Claude working tasks in each one.

@@ -70,6 +70,7 @@ export function PendingRail({
   error,
   commitBlocked,
   committing,
+  verifyRefused,
   onCommit,
 }: {
   projectId: string | null
@@ -85,6 +86,15 @@ export function PendingRail({
    */
   commitBlocked: string | null
   committing: boolean
+  /**
+   * The last commit stopped because one of the project's checks failed.
+   *
+   * Turns the button into a second, deliberate press rather than adding a
+   * checkbox beside it: the failure is written out in the conversation next to
+   * this rail, so the only honest place to offer "anyway" is after you have been
+   * shown what is wrong.
+   */
+  verifyRefused: boolean
   onCommit: () => void
 }) {
   const files = pending?.files ?? []
@@ -123,17 +133,25 @@ export function PendingRail({
             </span>{" "}
             uncommitted on {pending.branch ?? "a detached checkout"}. Commit this work before
             starting another chat.
+            {verifyRefused && (
+              <div className="mt-2 text-warn">
+                A check failed, so nothing was committed. It is written out in the conversation —
+                read it, then press again to commit anyway.
+              </div>
+            )}
             <div className="mt-2">
               <Button
-                tone="primary"
+                tone={verifyRefused ? "danger" : "primary"}
                 onClick={onCommit}
                 disabled={committing || commitBlocked !== null}
                 title={
                   commitBlocked ??
-                  "Draft a message from this conversation's diff and commit everything in it. Both happen in the chat, where you can watch them."
+                  (verifyRefused
+                    ? "Commit this work even though a check failed. The failure stays in the log."
+                    : "Draft a message from this conversation's diff and commit everything in it. Both happen in the chat, where you can watch them.")
                 }
               >
-                {committing ? "committing…" : "commit"}
+                {committing ? "committing…" : verifyRefused ? "commit anyway" : "commit"}
               </Button>
             </div>
           </div>

@@ -35,15 +35,26 @@ async function saveProjects(projects: Project[]): Promise<void> {
 }
 
 /**
- * No frontmatter, because there is no longer anything in it aide acts on.
- *
- * There used to be a `bootstrap` command, run once in each fresh worktree
- * because `git worktree add` checks out tracked files only and left the agent
- * without `node_modules`. Runs work the project's own checkout now, which is
- * already installed, so scaffolding a commented-out setting for a step that no
- * longer exists would be inviting someone to configure nothing.
+ * The frontmatter is scaffolded COMMENTED OUT, which is the opposite of what
+ * `bootstrap` got and for a reason worth stating. Bootstrap was removed rather
+ * than commented because worktrees went and there was nothing left for it to do
+ * — scaffolding a setting for a step that no longer exists invites someone to
+ * configure nothing. `verify` does something, but only the project's owner knows
+ * what this repository's checks are called, and a guessed `pnpm test` that fails
+ * on every commit would teach people to reach for "commit anyway" by reflex.
+ * So it is shown, named, and inert until somebody fills it in.
  */
-const PROJECT_DOC = `# Project
+const PROJECT_DOC = `---
+# Commands that have to pass before aide will write a commit, in order, run from
+# the repo root. Uncomment and name this project's own. \`CI=true\` and NO_COLOR
+# are supplied for you, so write \`pnpm typecheck\`, not \`CI=true pnpm typecheck\`.
+#
+# verify:
+#   - pnpm typecheck
+#   - pnpm test
+---
+
+# Project
 
 <!--
 Why this exists. Read by every agent that works here, as a standing constraint
@@ -69,7 +80,9 @@ portable. If aide disappears, this directory is still a description of the proje
 | \`project.md\` | Why this exists, constraints, non-goals. Rarely changes. |
 
 Agents read \`project.md\` on every turn, so it is where a constraint belongs.
-What is finished is decided by you alone — see the tick beside a chat.
+Its frontmatter holds \`verify:\` — the commands that have to pass before aide
+will write a commit. What is finished is decided by you alone — see the tick
+beside a chat.
 `
 
 /**

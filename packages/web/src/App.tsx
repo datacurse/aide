@@ -53,6 +53,15 @@ export function App() {
   const [commitRunId, setCommitRunId] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
   /**
+   * The last commit stopped on a failed check, so the next press may override it.
+   *
+   * Reported up by the conversation pane, which is where the run's events are.
+   * Not remembered anywhere durable: an override has to be answered while you
+   * are still looking at what failed, and one that survived a reload would be a
+   * commit-anyway armed for a reason nobody on screen can see.
+   */
+  const [verifyRefused, setVerifyRefused] = useState(false)
+  /**
    * A parked chat that has had its ▶ pressed and has not gone out yet.
    *
    * One press has to do two things that live in different components — open the
@@ -184,7 +193,13 @@ export function App() {
     setStarting(true)
     setError(null)
     try {
-      const { runId } = await api.commitChat(projectId, sessionId)
+      // The override is spent on the press that uses it. Clearing it here rather
+      // than waiting for the new run's events means a second failure has to
+      // arm it again — otherwise one refusal would leave every later commit in
+      // this conversation forced, silently.
+      const force = verifyRefused
+      setVerifyRefused(false)
+      const { runId } = await api.commitChat(projectId, sessionId, force)
       setCommitRunId(runId)
       await refresh()
     } catch (err) {
@@ -379,6 +394,7 @@ export function App() {
         // somehow outlived its navigation cannot fire at whatever is open now.
         autoSend={autoSend !== null && autoSend === draftId}
         onAutoSent={() => setAutoSend(null)}
+        onVerifyRefused={setVerifyRefused}
         onChanged={() => setConversationsSeq((n) => n + 1)}
         // A new chat has no id until its first turn starts. Put it in the
         // URL the moment it exists, so a reload mid-first-turn still lands
@@ -404,6 +420,7 @@ export function App() {
         error={pendingError}
         commitBlocked={commitBlocked}
         committing={committing}
+        verifyRefused={verifyRefused}
         onCommit={() => void commitWork()}
       />
     </main>

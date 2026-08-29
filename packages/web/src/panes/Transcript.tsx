@@ -85,6 +85,16 @@ interface CommitLandedLine {
   sha: string
   paths: string[]
 }
+/** One of the project's own checks, run by aide rather than by the agent. */
+interface VerifyLine {
+  kind: "verify"
+  key: string
+  command: string
+  ok: boolean
+  exitCode: number | null
+  ms: number
+  output: string
+}
 interface OutcomeLine {
   kind: "outcome"
   key: string
@@ -139,6 +149,7 @@ type Line =
   | CommitLandedLine
   | { kind: "commit-message"; key: string; message: string; model: string }
   | { kind: "stale"; key: string; supervised: boolean }
+  | VerifyLine
 
 /**
  * A run must always end with a visible line saying how it ended. Without one, a
@@ -296,6 +307,17 @@ function toLines(events: RunEvent[], live?: LiveText | null): Line[] {
         break
       case "commit.landed":
         lines.push({ kind: "commit-landed", key: rowKey(e), sha: e.sha, paths: e.paths })
+        break
+      case "verify.result":
+        lines.push({
+          kind: "verify",
+          key: rowKey(e),
+          command: e.command,
+          ok: e.ok,
+          exitCode: e.exitCode,
+          ms: e.durationMs,
+          output: e.output,
+        })
         break
       case "tool.denied":
         lines.push({ kind: "denied", key: rowKey(e), name: e.name, reason: e.reason })
@@ -645,6 +667,43 @@ function StaleRow({ supervised }: { supervised: boolean }) {
   )
 }
 
+/**
+ * A check aide ran, and what it printed.
+ *
+ * Open by default when it FAILED, closed when it passed. The two are not the
+ * same kind of row: a green check is a fact you want counted and not read, and a
+ * failing one is the only thing on screen worth reading — making that one click
+ * away would be hiding the answer to the question the whole gate exists to ask.
+ */
+function VerifyRow({ line }: { line: VerifyLine }) {
+  const [open, setOpen] = useState(!line.ok)
+  const seconds = line.ms >= 1000 ? `${(line.ms / 1000).toFixed(1)}s` : `${line.ms}ms`
+  return (
+    <div>
+      <div
+        onClick={() => toggleUnlessSelecting(setOpen)}
+        className="flex min-w-0 cursor-pointer items-baseline gap-2 rounded px-1 py-0.5 hover:bg-hover"
+      >
+        <span className={line.ok ? "text-ok" : "text-err"}>{line.ok ? "✓" : "✗"}</span>
+        <span className="min-w-0 truncate text-syn-string">{line.command}</span>
+        <span className="shrink-0 text-fg-dim">{seconds}</span>
+        {/* Only when it failed. "exit 0" on every green row is noise, and the
+            code is the thing you want when it is anything else. */}
+        {!line.ok && (
+          <span className="shrink-0 text-err">
+            {line.exitCode === null ? "stopped" : `exit ${line.exitCode}`}
+          </span>
+        )}
+      </div>
+      {open && !!line.output && (
+        <pre className="mt-1 mb-2 max-h-80 overflow-auto rounded-sm bg-chrome p-2 text-[11px] leading-relaxed whitespace-pre-wrap text-fg-muted">
+          {line.output}
+        </pre>
+      )}
+    </div>
+  )
+}
+
 /** Mirrors CheckpointRow: one line, click for exactly what was staged. */
 function CommitLandedRow({ line }: { line: CommitLandedLine }) {
   const [open, setOpen] = useState(false)
@@ -691,6 +750,7 @@ function renderLine(
     )
   if (line.kind === "commit-landed") return <CommitLandedRow key={line.key} line={line} />
   if (line.kind === "stale") return <StaleRow key={line.key} supervised={line.supervised} />
+  if (line.kind === "verify") return <VerifyRow key={line.key} line={line} />
   if (line.kind === "checkpoint") return <CheckpointRow key={line.key} line={line} />
   if (line.kind === "thinking")
     return (

@@ -717,6 +717,7 @@ export function ConversationPane({
   adoptRunId,
   autoSend,
   onAutoSent,
+  onVerifyRefused,
   onStarted,
   onChanged,
 }: {
@@ -753,6 +754,11 @@ export function ConversationPane({
   autoSend: boolean
   /** The ▶ has been acted on, whether or not the box could send. */
   onAutoSent: () => void
+  /**
+   * The commit run in this pane refused because a check failed, or stopped
+   * doing so. Lifted because the button that can answer it lives in the rail.
+   */
+  onVerifyRefused?: (refused: boolean) => void
   /** A new chat learns its session id mid-turn; the URL needs to know. */
   onStarted?: (sessionId: string) => void
   /** Something happened that the list is showing a stale copy of. */
@@ -959,6 +965,31 @@ export function ConversationPane({
     const started = mine.find((e) => e.type === "run.started")
     return started?.type === "run.started" ? started.model : ""
   }, [turnEvents, runId])
+
+  /**
+   * A commit that stopped because the project's checks failed.
+   *
+   * Derived here rather than reported by the daemon as a flag, because this pane
+   * is the only thing already holding the commit run's events — the rail that
+   * has to offer "commit anyway" is a sibling three panes over and subscribes to
+   * nothing.
+   *
+   * Both halves are required. A failing check on its own is a commit that was
+   * forced through and landed anyway, and offering to force a commit that has
+   * already happened would be offering to commit nothing.
+   */
+  const verifyRefused = useMemo(() => {
+    if (!runId) return false
+    const mine = turnEvents.filter((e) => e.runId === runId)
+    return (
+      mine.some((e) => e.type === "verify.result" && !e.ok) &&
+      mine.some((e) => e.type === "run.error")
+    )
+  }, [turnEvents, runId])
+
+  useEffect(() => {
+    onVerifyRefused?.(verifyRefused)
+  }, [verifyRefused, onVerifyRefused])
 
   const usage = useMemo<ContextUsage | null>(() => {
     for (let i = turnEvents.length - 1; i >= 0; i -= 1) {

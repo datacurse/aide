@@ -3,6 +3,7 @@ import { commitRun, recentSubjects, runChanges, withSessionTrailer } from "./cha
 import { readCheckpoint } from "./checkpoint.js"
 import { CONFIG } from "./config.js"
 import { draftCommitMessage } from "./helper.js"
+import { runChecks } from "./verify.js"
 
 /**
  * Reviewing a conversation's work and committing it.
@@ -60,12 +61,41 @@ export interface CommitConversationOptions {
   checkpoint: string
   /** What the work was asked for, so the drafter can tell intent from incident. */
   request: string
+  /** The project's own checks, from `.aide/project.md`. Empty means no gate. */
+  verify: readonly string[]
+  /**
+   * Commit even though the checks failed.
+   *
+   * A second, deliberate press rather than a setting, because the honest reason
+   * for it is one aide cannot see: a failure that was already there before this
+   * conversation started, or one the human has decided to land anyway. What it
+   * must never be is the default — the whole point of the gate is that getting
+   * past it is a decision somebody made.
+   */
+  force: boolean
   /** Progress, straight onto the conversation's event stream. */
   emit: (body: RunEventBody) => void
   /** The message as the model types it. Live only — `commit.drafted` is the record. */
   delta: (d: RunDelta) => void
   /** Whether the human has pressed stop. Read once, at the last moment it helps. */
   stopped: () => boolean
+}
+
+/**
+ * Thrown when the project's own checks say no.
+ *
+ * Its own class because the browser has to tell this refusal from every other
+ * way a commit can fail: this is the one the human can answer by pressing again,
+ * and offering "commit anyway" after a git error would be offering to do
+ * something that will fail the same way twice.
+ */
+export class VerifyFailed extends Error {
+  readonly command: string
+  constructor(command: string) {
+    super(`\`${command}\` failed — nothing was committed`)
+    this.name = "VerifyFailed"
+    this.command = command
+  }
 }
 
 /**
@@ -109,6 +139,12 @@ export async function commitConversation(
     })
   }
 
+  // BEFORE the drafting, which is the only part of a commit that costs money.
+  // A tree that fails its own checks should cost the checks and nothing else —
+  // and a message describing work that is about to be refused is a model call
+  // spent on something nobody will read.
+  await verifyTree(opts)
+
   emit({ type: "commit.step", label: `writing the message · ${CONFIG.helperModel}` })
   const message = await draftCommitMessage({
     model: CONFIG.helperModel,
@@ -142,6 +178,44 @@ export async function commitConversation(
   })
   emit({ type: "commit.landed", sha, paths })
   return spend
+}
+
+/**
+ * Run the project's checks, narrate them, and refuse the commit if one fails.
+ *
+ * Split out so the ordering above reads as one line. Everything interesting is
+ * in what it does on failure: it throws, so `commitConversation` cannot go on to
+ * write history, and the results are already in the log by then — the human
+ * reads what the command printed in the conversation, not in a terminal
+ * somewhere else.
+ *
+ * `force` still runs them. Skipping the checks would make the override mean "and
+ * do not tell me", when what it means is "I have read this and I am landing it
+ * anyway" — and the log of a forced commit should say exactly what was wrong
+ * with it at the time.
+ */
+async function verifyTree(opts: CommitConversationOptions): Promise<void> {
+  const { emit } = opts
+  if (opts.verify.length === 0) return
+
+  const { failed } = await runChecks(opts.verify, opts.project.root, {
+    stopped: opts.stopped,
+    onResult: (r) => emit({ type: "verify.result", ...r }),
+  })
+
+  // A stop mid-check reads as a failed check, and must not be reported as a
+  // tree that failed its own gate. The run is ending either way; let the
+  // interrupt be the reason.
+  if (opts.stopped()) return
+  if (!failed) return
+  if (opts.force) {
+    emit({
+      type: "commit.step",
+      label: `committing anyway — \`${failed.command}\` failed and you asked for it`,
+    })
+    return
+  }
+  throw new VerifyFailed(failed.command)
 }
 
 export interface CommitReviewOptions {

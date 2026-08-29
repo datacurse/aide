@@ -29,6 +29,8 @@ import { chatModeFromSdk } from "@aide/protocol"
 import { HUMAN_ONLY_COMMANDS, checkBashCommand } from "./policy.js"
 import { restartDecision, type Health } from "@aide/protocol"
 import { staleVerdict } from "./source.js"
+import { runCheck, runChecks } from "./verify.js"
+import { parseProjectDoc } from "@aide/protocol/node"
 import {
   buildGraph,
   commitDetail,
@@ -579,6 +581,64 @@ console.log("\nrestarting a stale daemon")
   // Unknown must never read as changed: a daemon with no source tree to compare
   // against is not stale, it is unknowable.
   check("never restarts on an unreadable source", !decide({ sourceId: null }, null).restart)
+}
+
+console.log("\nthe checks a commit has to get past")
+{
+  // The gate on the code was half a gate: an agent ran the project's checks
+  // about two thirds of the time and then reported the result itself, so the
+  // only evidence a diff was sound was a sentence written by the thing being
+  // checked. These are the two halves of taking that out of the model's hands —
+  // reading what the human declared, and running it.
+  check("a project that declares none has no gate", parseProjectDoc("# hi").verify.length === 0)
+  check(
+    "the commands come off the frontmatter in order",
+    parseProjectDoc("---\nverify:\n  - pnpm typecheck\n  - pnpm smoke\n---\nbody").verify.join("|") ===
+      "pnpm typecheck|pnpm smoke",
+  )
+  check(
+    "the prose still reaches the agent",
+    parseProjectDoc("---\nverify:\n  - pnpm typecheck\n---\nthe brief").body === "the brief",
+    "frontmatter aide acts on must not leak into what the model reads",
+  )
+  check(
+    "a mistyped verify throws rather than silently opening the gate",
+    (() => {
+      try {
+        parseProjectDoc("---\nverify: pnpm typecheck\n---\n")
+        return false
+      } catch {
+        return true
+      }
+    })(),
+    "a scalar where a list belongs would otherwise become an empty list, and every commit would sail through",
+  )
+
+  const ok = await runCheck("git --version", root).done
+  check("a passing check reports its exit code", ok.ok && ok.exitCode === 0, ok.output.slice(0, 40))
+  const bad = await runCheck("git nope-not-a-command", root).done
+  check("a failing one does not", !bad.ok && bad.exitCode !== 0)
+  check("and it keeps what the command printed", /nope-not-a-command/.test(bad.output), bad.output.slice(0, 60))
+
+  const seen: string[] = []
+  const run = await runChecks(["git --version", "git nope-not-a-command", "git --version"], root, {
+    onResult: (r) => seen.push(r.command),
+  })
+  check(
+    "the run stops at the first failure",
+    seen.length === 2 && run.failed?.command === "git nope-not-a-command",
+    `ran ${seen.length}`,
+  )
+  check(
+    "all-green reports nothing failed",
+    (await runChecks(["git --version"], root)).failed === null,
+  )
+  check(
+    "a stop is honoured before the next check",
+    (await runChecks(["git --version", "git --version"], root, { stopped: () => true })).results
+      .length === 0,
+    "a human who pressed stop is not waiting out a ten-minute build",
+  )
 }
 
 console.log("\ntelling a turn it left the daemon behind")
