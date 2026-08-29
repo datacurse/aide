@@ -3,7 +3,7 @@
  *
  * The event log already holds this — each run log ends in a `run.finished`
  * carrying the SDK's duration, its cost estimate and its per-model token counts
- * — but `receipt.ts` reads it one conversation at a time, on a button press. The
+ * — but `profile.ts` reads it one conversation at a time, on a button press. The
  * list asks about thirty conversations every poll, so this is the same data read
  * the other way round: one pass over `~/.aide/runs`, an index from session to
  * totals, held until a log changes underneath it.
@@ -43,7 +43,7 @@ const HEADER_LINES = 8
  */
 const TAIL_BYTES = 64 * 1024
 
-/** One run log, reduced to what a list row and a receipt need from it. */
+/** One run log, reduced to what a list row and a profile need from it. */
 export interface RunTotals {
   runId: string
   sessionId: string

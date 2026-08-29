@@ -881,7 +881,7 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
         // API has started answering. It is a single event per assistant message
         // rather than one per token, and it is the only stamp that exists
         // between "the tool result went back" and "the whole reply arrived" —
-        // without it those two are the same number and a receipt cannot say
+        // without it those two are the same number and a profile cannot say
         // whether a slow turn was thinking or queueing. See `assistant.start`.
         if ((message as { event?: { type?: string } }).event?.type === "message_start") {
           yield { type: "assistant.start" }

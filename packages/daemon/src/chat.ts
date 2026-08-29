@@ -407,7 +407,7 @@ export class ChatLane {
     sessionId: string | null
     /** What this run is, for the lock refusal the next chat would get. */
     text: string
-    /** Named in `run.started` so a receipt bills it to something. */
+    /** Named in `run.started` so a profile bills it to something. */
     model: string
     work: (run: {
       runId: string
@@ -446,7 +446,7 @@ export class ChatLane {
 
     // `run.started` carries the session id, and it is the ONLY event that does.
     // A log without it is a log nothing can attribute to a conversation — which
-    // is right here when there is no conversation, and a receipt billing this
+    // is right here when there is no conversation, and a profile billing this
     // run to nobody is the truth about a commit nobody asked for in a chat.
     this.log.append(runId, {
       type: "run.started",
@@ -482,7 +482,7 @@ export class ChatLane {
           totalCostUsd: spend.costUsd,
           modelUsage: spend.modelUsage,
           // Not an agent: there are no SDK steps to count, and inventing one
-          // would put a turn in a receipt that never happened.
+          // would put a turn in a profile that never happened.
           numTurns: 0,
           durationMs: Date.now() - record.startedAt,
           permissionDenials: [],

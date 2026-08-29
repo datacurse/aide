@@ -21,7 +21,7 @@ import {
   useUnstartedChats,
   type Draft,
 } from "../drafts.js"
-import { ReceiptOverlay } from "../Receipt.js"
+import { ProfileOverlay } from "../Profile.js"
 import { WorkingBar } from "../Working.js"
 import { Button, Empty, PaneHeader } from "../ui.js"
 import { useKeyed } from "../useKeyed.js"
@@ -845,8 +845,8 @@ export function ConversationPane({
   const chatKey = projectId && openSessionId ? `${projectId}:${openSessionId}` : null
   const [view, rememberView] = useKeyed<ConversationView>(chatKey)
   const [error, setError] = useState<string | null>(null)
-  /** The receipt is open over this conversation. */
-  const [receiptOpen, setReceiptOpen] = useState(false)
+  /** The profile is open over this conversation. */
+  const [profileOpen, setProfileOpen] = useState(false)
   /** The turn in flight, if any. */
   const [runId, setRunId] = useState<string | null>(null)
   /**
@@ -903,8 +903,8 @@ export function ConversationPane({
     // Unconditionally, including across the handoff below: the overlay is about
     // one named conversation, and left open across a switch it would refetch
     // and silently redraw itself for the chat you moved to while still reading
-    // as the receipt you asked for.
-    setReceiptOpen(false)
+    // as the profile you asked for.
+    setProfileOpen(false)
     // Picking up the id of the chat you just started here is not switching — the
     // turn is streaming, and clearing `runId` unsubscribes from it mid-answer,
     // which is what left a new chat showing your message and nothing else while
@@ -1241,23 +1241,23 @@ export function ConversationPane({
     <section className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-editor">
       <PaneHeader title={title}>
         {/* Only for a conversation that has actually run. A chat with no
-            session id has no event log to bill, and offering the button anyway
-            would answer every press with the same empty document. */}
+            session id has no event log to measure, and offering the button
+            anyway would answer every press with the same empty document. */}
         {projectId && sessionId && (
           <Button
-            onClick={() => setReceiptOpen(true)}
-            title="What this conversation cost, and where its time went"
+            onClick={() => setProfileOpen(true)}
+            title="Where this conversation's time went, and what it cost"
           >
-            receipt
+            profile
           </Button>
         )}
       </PaneHeader>
 
-      {receiptOpen && projectId && sessionId && (
-        <ReceiptOverlay
+      {profileOpen && projectId && sessionId && (
+        <ProfileOverlay
           projectId={projectId}
           sessionId={sessionId}
-          onClose={() => setReceiptOpen(false)}
+          onClose={() => setProfileOpen(false)}
         />
       )}
 

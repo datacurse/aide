@@ -149,7 +149,7 @@ check("and starts its own turn count", turnsOf(other) === 1, `numTurns ${turnsOf
 
 // ---------------------------------------------------------------------------
 console.log("\na run log ends in exactly one terminal event")
-// Stated in `chat.ts`, relied on by `spend.ts` and by the receipt, and enforced
+// Stated in `chat.ts`, relied on by `spend.ts` and by the profile, and enforced
 // until now only by every caller remembering. It got away twice on the machine
 // this was written on: one log took a stray `assistant.start` after its
 // `run.finished`, and eight ended up with two terminal events. A log that breaks
@@ -540,14 +540,14 @@ console.log("\nticking a conversation off keeps its undo")
 }
 
 // ---------------------------------------------------------------------------
-console.log("\nthe receipt")
+console.log("\nthe profile")
 // Arithmetic over an event log, which is the kind of thing that goes wrong
-// silently: nobody notices that a receipt bills four minutes of waiting for a
+// silently: nobody notices that a profile bills four minutes of waiting for a
 // human to the model's thinking, or reports six minutes of tool work inside a
 // four-minute turn. The synthetic run below is built to have exactly those two
 // traps in it.
 {
-  const { summarizeRun, conversationReceipt } = await import("./receipt.js")
+  const { summarizeRun, conversationProfile } = await import("./profile.js")
 
   let seq = 0
   const at = (ts: number, body: RunEventBody): RunEvent =>
@@ -637,7 +637,7 @@ console.log("\nthe receipt")
   // as two bullets, the second reading "no reason recorded", so the section
   // that exists to say what went wrong doubled its own count.
   {
-    const { unexplainedDenials } = await import("./receipt.js")
+    const { unexplainedDenials } = await import("./profile.js")
     const left = unexplainedDenials(
       s.calls.filter((c) => c.ok === false),
       s.denials,
@@ -666,29 +666,34 @@ console.log("\nthe receipt")
 
   // And the whole thing, over the logs the stub actually wrote. Four turns:
   // three that ran to completion and the one that was interrupted.
-  const receipt = await conversationReceipt(log, project, chatSession ?? "")
+  const profile = await conversationProfile(log, project, chatSession ?? "")
   check(
     "every turn of the conversation is found",
-    receipt.runs === 4,
-    `${receipt.runs} — matched by run.started, since nothing indexes session to run`,
+    profile.runs === 4,
+    `${profile.runs} — matched by run.started, since nothing indexes session to run`,
   )
   check(
     "the prompts are in it verbatim",
-    receipt.markdown.includes("> stop me"),
-    "the prompts are the thing the receipt exists to be asked about",
+    profile.markdown.includes("> stop me"),
+    "the prompts are the thing the profile exists to be asked about",
   )
   check(
     "the interrupted turn is reported as cancelled",
-    receipt.markdown.includes("**cancelled**"),
+    profile.markdown.includes("**cancelled**"),
     "a turn that was stopped must not read as one that succeeded",
   )
   check(
     "the cost is labelled an estimate",
-    receipt.markdown.includes("estimate"),
+    profile.markdown.includes("estimate"),
     "the brief: anything that displays a cost figure has to say what it is",
   )
+  check(
+    "the round trips are in it",
+    profile.markdown.includes("## Round trips") && profile.markdown.includes("tool calls per step"),
+    "the number that predicts the wall clock is the reason this is not called a receipt",
+  )
 
-  const empty = await conversationReceipt(log, project, "11111111-2222-4333-8444-555555555555")
+  const empty = await conversationProfile(log, project, "11111111-2222-4333-8444-555555555555")
   check(
     "a conversation aide never ran gets an answer, not an error",
     empty.runs === 0 && empty.markdown.includes("no run log"),
@@ -771,7 +776,7 @@ console.log("\ncommitting is a run of its own")
   check(
     "and it reports what the drafting spent",
     terminal?.type === "run.finished" && terminal.totalCostUsd === 0.02,
-    "a commit billing $0 would quietly shrink every receipt that adds these up",
+    "a commit billing $0 would quietly shrink every profile that adds these up",
   )
   check(
     "the steps are in it, in order",

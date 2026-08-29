@@ -112,7 +112,7 @@ process.on("message", (raw: unknown) => {
     // every turn of an open session, not only on the first, and that repetition
     // is load bearing: a run log is the only record of which conversation a turn
     // belonged to, so a stub that announced it once left every turn after the
-    // first unattributable — and a receipt, which finds a conversation's runs by
+    // first unattributable — and a profile, which finds a conversation's runs by
     // exactly this event, read a four-turn chat as a one-turn chat.
     announce()
     timer = setTimeout(finish, WORK_MS)

@@ -77,7 +77,7 @@ function stripFence(text: string): string {
  * calls happened inside an HTTP request nobody was accounting for. Committing is
  * a run of its own now, and a run log ends in a `run.finished` carrying what the
  * run spent — so a commit reporting $0 over the call that wrote its message
- * would quietly under-report every receipt that adds those up.
+ * would quietly under-report every profile that adds those up.
  */
 export interface Drafted {
   text: string

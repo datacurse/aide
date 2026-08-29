@@ -26,7 +26,7 @@ import { CONFIG } from "./config.js"
 import { EventLog } from "./eventlog.js"
 import { addProject, getProject, listProjects, readProjectDoc, removeProject } from "./registry.js"
 import { pickFolder } from "./picker.js"
-import { conversationReceipt } from "./receipt.js"
+import { conversationProfile } from "./profile.js"
 import { commitWorkingTree, conversationBaseline } from "./review.js"
 import * as repo from "./repo.js"
 import { BOOT_SOURCE_ID, currentSourceId, isStale } from "./source.js"
@@ -478,16 +478,16 @@ app.get("/api/projects/:id/conversations/:sessionId/diff", async (req, reply) =>
  * What the conversation cost and where it went wrong, as one pasteable document.
  *
  * Deliberately unguarded, unlike the commit below. That guard exists because
- * committing underneath a working agent races its next write; reading a receipt
+ * committing underneath a working agent races its next write; reading a profile
  * races nothing, and a turn in flight is exactly when you want to see what the
  * last five did. The renderer reports an unfinished turn as unfinished rather
  * than pretending it ended.
  */
-app.get("/api/projects/:id/conversations/:sessionId/receipt", async (req, reply) => {
+app.get("/api/projects/:id/conversations/:sessionId/profile", async (req, reply) => {
   const { id, sessionId } = req.params as { id: string; sessionId: string }
   const project = await getProject(id)
   if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-  return await conversationReceipt(log, project, sessionId)
+  return await conversationProfile(log, project, sessionId)
 })
 
 /**

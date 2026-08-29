@@ -63,7 +63,7 @@ export class EventLog extends EventEmitter {
    * that dies and the `closed` message covers a session that ends, but neither
    * runs in a daemon that is no longer there. The log then claims a turn that is
    * still going, forever — `spend.ts` reads one as running and bills it $0, and
-   * a receipt reports it unfinished a week later.
+   * a profile reports it unfinished a week later.
    *
    * Sound to do unconditionally BECAUSE it runs at boot, and only there. No turn
    * can be in flight in a process that has not begun listening, so a log without

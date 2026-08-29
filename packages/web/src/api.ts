@@ -10,12 +10,12 @@ import type {
   GitPending,
   Health,
   PlanUsage,
+  Profile,
   Project,
-  Receipt,
   RunEvent,
 } from "@aide/protocol"
 
-export type { ConversationSummary, FolderPick, GitHistory, GitPending, Health, PlanUsage, Receipt }
+export type { ConversationSummary, FolderPick, GitHistory, GitPending, Health, PlanUsage, Profile }
 
 /**
  * A conversation, plus the two things aide knows about it that the session file
@@ -168,8 +168,8 @@ export const api = {
    * log the conversation has, which is cheap for one conversation and pointless
    * to redo every 1.5 seconds for one nobody has asked about.
    */
-  receipt: (projectId: string, sessionId: string) =>
-    call<Receipt>(`/api/projects/${projectId}/conversations/${sessionId}/receipt`),
+  profile: (projectId: string, sessionId: string) =>
+    call<Profile>(`/api/projects/${projectId}/conversations/${sessionId}/profile`),
 
   chat: (
     projectId: string,

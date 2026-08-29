@@ -98,7 +98,7 @@ never exit, so the run burns its entire budget waiting. **Never run `pnpm probe`
 anyway; this is so you do not waste a turn finding out.
 
 Run only the checks the change can break — `typecheck` for anything, `smoke` for
-git plumbing, `smoke:queue` for the chat lane or the receipt, `build` for web —
+git plumbing, `smoke:queue` for the chat lane or the profile, `build` for web —
 and when you do want all four, **send them as four Bash calls in one message**.
 They are independent (each smoke builds its own throwaway repo; only `build`
 writes into the tree), so that is one round trip and one wall clock rather than
