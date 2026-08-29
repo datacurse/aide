@@ -16,9 +16,74 @@ import { useCallback, useEffect, useState } from "react"
  * localStorage mirrors it as a fallback, for the case the hash cannot cover:
  * opening `localhost:5173` fresh in a new tab. The URL is the source of truth
  * whenever it says anything; the mirror only speaks when it is silent.
+ *
+ * It also keeps the chat each project was last left on, which is the other case
+ * a single location cannot cover — see REMEMBERED_CHATS. That one is consulted
+ * only when a move to another project would otherwise open nothing, so it never
+ * argues with a URL either.
  */
 
 const REMEMBERED = "aide.location"
+/**
+ * Which chat each project was last left on, `{ [projectId]: hash }`.
+ *
+ * A second store rather than a field on the one above, because that one only
+ * ever holds the single place you were most recently — so every trip to another
+ * project and back dropped you on an empty pane, with the conversation you were
+ * in the middle of somewhere in a thirty-row list under a title you half
+ * remember.
+ *
+ * Values are whole locations, the same strings `formatLocation` writes, so a
+ * hand-edited or stale entry costs nothing: `parseLocation` already turns
+ * anything it does not recognise into "this project, nothing open".
+ */
+const REMEMBERED_CHATS = "aide.open-chats"
+
+/** Which chat is open, the half of a location that belongs to a project. */
+type OpenChat = Pick<AppLocation, "sessionId" | "draftId">
+
+const NO_CHAT: OpenChat = { sessionId: null, draftId: null }
+
+function readOpenChats(): Record<string, string> {
+  try {
+    const raw = window.localStorage.getItem(REMEMBERED_CHATS)
+    const parsed: unknown = raw === null ? null : JSON.parse(raw)
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {}
+    return Object.fromEntries(
+      Object.entries(parsed as Record<string, unknown>).filter(
+        (entry): entry is [string, string] => typeof entry[1] === "string",
+      ),
+    )
+  } catch {
+    // Private mode, storage disabled, or malformed JSON. Landing on nothing open
+    // is the behaviour this replaced, so there is nothing to report.
+    return {}
+  }
+}
+
+/** Where a project was left, or nothing open if it has not been visited. */
+function rememberedChat(projectId: string | null): OpenChat {
+  if (!projectId) return NO_CHAT
+  const saved = readOpenChats()[projectId]
+  if (saved === undefined) return NO_CHAT
+  const loc = parseLocation(saved)
+  // A saved entry naming a different project would open one project's
+  // conversation under another's name, which the pane would then fetch and fail
+  // on. Cheap to check, and the only way in is a hand-edited store.
+  if (loc.projectId !== projectId) return NO_CHAT
+  return { sessionId: loc.sessionId, draftId: loc.draftId }
+}
+
+function rememberChat(loc: AppLocation): void {
+  if (!loc.projectId) return
+  try {
+    const all = readOpenChats()
+    all[loc.projectId] = formatLocation(loc)
+    window.localStorage.setItem(REMEMBERED_CHATS, JSON.stringify(all))
+  } catch {
+    /* the selection still holds for this page */
+  }
+}
 
 export interface AppLocation {
   projectId: string | null
@@ -100,17 +165,26 @@ export function useAppLocation(): [AppLocation, (patch: Partial<AppLocation>) =>
     } catch {
       /* nothing to do about it */
     }
+    // Recorded on arrival as well as on every later move, so the project you are
+    // in right now is already remembered before you leave it — including the one
+    // restored from storage on first paint.
+    rememberChat(loc)
   }, [loc])
 
   const navigate = useCallback((patch: Partial<AppLocation>) => {
     setLoc((prev) => {
-      const next = { ...prev, ...patch }
       // Selecting a different project cannot keep the old selection: neither a
       // session id nor a draft id from another project resolves to anything.
-      if (patch.projectId !== undefined && patch.projectId !== prev.projectId) {
-        next.sessionId = null
-        next.draftId = null
-      }
+      // What takes its place is that project's own last chat rather than a blank
+      // pane — moving between projects is how you follow two pieces of work at
+      // once, and each arrival was costing you the one you had left there.
+      //
+      // Under the patch rather than over it, so a move that names a chat as well
+      // as a project still opens the chat it named.
+      const moved = patch.projectId !== undefined && patch.projectId !== prev.projectId
+      const next = moved
+        ? { ...prev, ...rememberedChat(patch.projectId ?? null), ...patch }
+        : { ...prev, ...patch }
       // The two are one field wearing two names — opening either closes the
       // other, so a patch naming one clears the other unless it named both.
       if (patch.sessionId !== undefined && patch.draftId === undefined) next.draftId = null
