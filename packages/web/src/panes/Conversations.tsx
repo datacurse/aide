@@ -23,10 +23,11 @@ import {
   useUnstartedChats,
   type Draft,
 } from "../drafts.js"
+import { Lock } from "../icons.js"
 import { draftName, useAutoNames } from "../naming.js"
 import { ProfileOverlay } from "../Profile.js"
 import { WorkingBar } from "../Working.js"
-import { Button, Empty, PaneHeader } from "../ui.js"
+import { Button, Empty, LOCKED, PaneHeader } from "../ui.js"
 import { useKeyed } from "../useKeyed.js"
 import { useRunStream } from "../useRunStream.js"
 import { useAutoGrow } from "../useAutoGrow.js"
@@ -221,20 +222,28 @@ function UnstartedRow({
 
         Nothing to start on an empty row, so nothing is drawn there — a ▶ that
         would do nothing is worse than a gap.
+
+        Held back, it becomes a padlock rather than a faded ▶. The list is where
+        this matters most: a project mid-run draws a column of six or seven of
+        them, and six faded triangles read as a list that has not loaded. Six
+        padlocks read as one run holding everything, which is the truth, and the
+        row wearing "has the repo" a few lines up is the one holding it.
       */}
       {written && (
         <button
           type="button"
-          onClick={onStart}
-          disabled={blocked !== null}
+          // Not `disabled`: the title is the only place this row can say WHY,
+          // and a disabled button never opens one. See `Button` in ui.tsx.
+          aria-disabled={blocked ? true : undefined}
+          onClick={blocked ? undefined : onStart}
           title={blocked ?? "Start this chat — opens it and sends it"}
-          className={`shrink-0 rounded-sm border px-1 text-[10px] leading-4 ${
+          className={`flex h-4 shrink-0 items-center justify-center rounded-sm border px-1 text-[10px] leading-4 ${
             blocked
-              ? "cursor-not-allowed border-line text-fg-dim opacity-40"
+              ? `border-diff-del-fg/40 ${LOCKED}`
               : "border-line text-fg-dim hover:border-ok hover:text-ok"
           }`}
         >
-          ▶
+          {blocked ? <Lock className="size-2.5" /> : "▶"}
         </button>
       )}
     </div>

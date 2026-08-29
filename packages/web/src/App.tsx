@@ -417,18 +417,23 @@ export function App() {
           <Button
             // Held back by uncommitted work, for the same reason the daemon
             // refuses the message: a conversation opened on top of somebody
-            // else's edits takes them as its own baseline. Disabled rather
-            // than hidden — a button that vanishes teaches you nothing.
-            disabled={!project || uncommitted > 0}
+            // else's edits takes them as its own baseline. Locked rather than
+            // hidden, and locked rather than merely dimmed — the work in the way
+            // is one pane over, and the padlock is what sends you to look at it.
+            //
+            // `disabled` stays for having no project, which is not a lock: there
+            // is nothing holding it and nothing to go and clear.
+            disabled={!project}
+            locked={
+              uncommitted > 0
+                ? `${uncommitted} uncommitted file${uncommitted === 1 ? "" : "s"} — commit this work before starting another chat.`
+                : null
+            }
             onClick={() => {
               if (!project) return
               navigate({ draftId: openNewChat(project.id) })
             }}
-            title={
-              uncommitted > 0
-                ? `${uncommitted} uncommitted file${uncommitted === 1 ? "" : "s"} — commit this work before starting another chat.`
-                : "An empty chat, opened here. Discard one you did not want with the ✕ on its row."
-            }
+            title="An empty chat, opened here. Discard one you did not want with the ✕ on its row."
           >
             new
           </Button>

@@ -184,12 +184,16 @@ export function PendingRail({
                   <Button
                     tone={verifyRefused ? "danger" : "primary"}
                     onClick={onCommit}
-                    disabled={committing || commitBlocked !== null}
+                    // Locked by the run that has the checkout; disabled by our
+                    // own commit already being in flight. Only the first has
+                    // something else holding it, and only the first is worth a
+                    // padlock — the second says "committing…" on its own face.
+                    locked={commitBlocked}
+                    disabled={committing}
                     title={
-                      commitBlocked ??
-                      (verifyRefused
+                      verifyRefused
                         ? "Commit this work even though a check failed. The failure stays in the log."
-                        : `Draft a message from these ${files.length} file${files.length === 1 ? "" : "s"} and commit all of them. Both happen in the pane beside this one, where you can watch them.`)
+                        : `Draft a message from these ${files.length} file${files.length === 1 ? "" : "s"} and commit all of them. Both happen in the pane beside this one, where you can watch them.`
                     }
                   >
                     {committing ? "committing…" : verifyRefused ? "commit anyway" : "commit"}

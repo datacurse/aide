@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react"
 import { MAX_ATTACHMENT_BYTES, readAsAttachment } from "./attachments.js"
 import { readDraft, saveDraft, useDraft } from "./drafts.js"
+import { Lock } from "./icons.js"
+import { LOCKED } from "./ui.js"
 import { useAutoGrow } from "./useAutoGrow.js"
 import { useRemembered } from "./useRemembered.js"
 import {
@@ -436,11 +438,21 @@ export function Composer({
               )}
               <button
                 type="button"
-                onClick={send}
-                disabled={!canSend}
-                title="Enter to send, Shift+Enter for a newline"
-                className="rounded-sm bg-accent px-3 py-1 font-sans text-xs text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-40"
+                // Locked by work in the way, merely disabled by an empty box.
+                // The distinction is the whole point of the padlock: one is
+                // something to go and clear, the other is something to type.
+                //
+                // Only `send` gets it. `blocked` is set only on a chat that has
+                // never run, and `proceed` above is drawn only on one that has.
+                aria-disabled={blocked ? true : undefined}
+                onClick={blocked ? undefined : send}
+                disabled={blocked ? undefined : !canSend}
+                title={blocked ?? "Enter to send, Shift+Enter for a newline"}
+                className={`inline-flex items-center gap-1 rounded-sm px-3 py-1 font-sans text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                  blocked ? LOCKED : "bg-accent text-white hover:bg-accent-hover"
+                }`}
               >
+                {blocked && <Lock className="size-3 shrink-0" />}
                 send
               </button>
             </>

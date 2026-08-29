@@ -1,13 +1,42 @@
+import { Lock } from "./icons.js"
+
+/**
+ * How a control that something else is holding is drawn.
+ *
+ * Red, and at full strength. The state this marks is not "there is nothing here"
+ * — it is "this is the thing in your way", which is what you are looking for
+ * when you press a dead button, so it has to be the most legible control on
+ * screen rather than the least. Fading to 40% said the opposite, and said it in
+ * the same grey as a button that is merely empty.
+ *
+ * gitDecoration.deletedResourceForeground rather than errorForeground: #f14c4c
+ * is the colour of something that broke, and nothing here has. A run holding the
+ * checkout is a wait — this is the darker, flatter red of a refusal.
+ *
+ * Exported because two controls that are not `Button` wear it too: the ▶ on a
+ * parked chat and the composer's send. One plate, so a locked control looks the
+ * same wherever you meet it.
+ */
+export const LOCKED = "cursor-not-allowed bg-diff-del-fg/15 text-diff-del-fg"
+
 export function Button({
   children,
   onClick,
   disabled,
+  locked = null,
   tone = "default",
   title,
 }: {
   children: React.ReactNode
   onClick?: () => void
   disabled?: boolean
+  /**
+   * Why something else is holding this control, or null when it is yours to
+   * press. Distinct from `disabled`, which is for a button with nothing to do —
+   * no project selected, nothing to copy, a request already in flight. A lock
+   * has a holder and a sentence naming it; those have neither.
+   */
+  locked?: string | null
   tone?: "default" | "primary" | "danger"
   title?: string
 }) {
@@ -21,11 +50,19 @@ export function Button({
   return (
     <button
       type="button"
-      title={title}
-      onClick={onClick}
-      disabled={disabled}
-      className={`rounded-sm px-2.5 py-1 text-xs transition-colors outline-none focus-visible:ring-1 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-40 ${tones[tone]}`}
+      title={locked ?? title}
+      // `aria-disabled` and a dropped press, not `disabled`. A disabled button
+      // takes no pointer events, so its `title` never opens — which is how the
+      // one sentence naming what has the repo became the one thing on screen you
+      // could not read. Every `locked` here is a sentence written to be read.
+      aria-disabled={locked ? true : undefined}
+      onClick={locked ? undefined : onClick}
+      disabled={locked ? undefined : disabled}
+      className={`inline-flex items-center gap-1 rounded-sm px-2.5 py-1 text-xs transition-colors outline-none focus-visible:ring-1 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-40 ${
+        locked ? LOCKED : tones[tone]
+      }`}
     >
+      {locked && <Lock className="size-3 shrink-0" />}
       {children}
     </button>
   )
