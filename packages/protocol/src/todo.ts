@@ -89,8 +89,13 @@ const chatRank = (s: ChatStatus): number =>
  *
  * A null `createdAt` is a session whose first entry carried no timestamp, and
  * the file's mtime is the only date it has.
+ *
+ * Exported because the row PRINTS this date as well as being ordered by it, and
+ * the two have to read the same field. Sorting on one and labelling with the
+ * other gives you a list whose visible timestamps are out of order — which
+ * looks like a broken sort rather than like two dates being shown.
  */
-const born = (r: { createdAt: number | null; lastModified: number }): number =>
+export const born = (r: { createdAt: number | null; lastModified: number }): number =>
   r.createdAt ?? r.lastModified
 
 export function sortChats<

@@ -7,7 +7,7 @@ import type {
   EffortLevel,
   RunEvent,
 } from "@aide/protocol"
-import { sortChats } from "@aide/protocol"
+import { born, sortChats } from "@aide/protocol"
 import { api, type ConversationRow, type ConversationView } from "../api.js"
 import { useDoneChime } from "../chime.js"
 import { MAX_ATTACHMENT_BYTES, readAsAttachment } from "../attachments.js"
@@ -40,13 +40,48 @@ import { CommitMessageDraft, Transcript, type LiveText } from "./Transcript.js"
  */
 const VISIBLE_TAIL = 250
 
-function ago(ms: number): string {
-  const s = Math.round((Date.now() - ms) / 1000)
-  if (s < 60) return "just now"
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`
-  if (s < 86_400) return `${Math.floor(s / 3600)}h ago`
-  return `${Math.floor(s / 86_400)}d ago`
+/**
+ * Midnights crossed between then and now, in local time.
+ *
+ * Rounded rather than floored: the two DST changeovers make a local day 23 or
+ * 25 hours long, and a floor over the short one dates every row on that Sunday
+ * to the day before.
+ */
+function daysAgo(then: Date): number {
+  const midnight = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+  return Math.round((midnight(new Date()) - midnight(then)) / 86_400_000)
 }
+
+/**
+ * When a chat started: the clock time if that was today, days if it was not.
+ *
+ * "3h ago" cannot tell you which of this morning's conversations came before
+ * which meeting; 11:09 can, and that is the whole of what a date on a row is
+ * for. Past yesterday nobody places a chat by the hour, so days do from there.
+ *
+ * The boundary is midnight, not 24 hours. On elapsed seconds a chat from 11:09
+ * yesterday still prints "11:09" at 09:00 this morning, and a clock time with
+ * no date beside it reads as today.
+ *
+ * Written out rather than `toLocaleTimeString`, whose width moves with the
+ * locale — "9:05 AM" and "11:09" in one column undoes the tabular figures the
+ * rest of the line is aligned by.
+ */
+function when(ms: number): string {
+  const then = new Date(ms)
+  const days = daysAgo(then)
+  if (days <= 0) {
+    return `${String(then.getHours()).padStart(2, "0")}:${String(then.getMinutes()).padStart(2, "0")}`
+  }
+  if (days === 1) return "yesterday"
+  return `${days}d ago`
+}
+
+/**
+ * The same moment in full, for a hover. Locale-formatted, unlike the row: a
+ * tooltip has no column to keep straight, so the reader's own format wins.
+ */
+const fullDate = (ms: number) => new Date(ms).toLocaleString()
 
 /** Token counts, short enough for a tooltip: 940, 12.4k, 3.20M. */
 const compact = (n: number): string =>
@@ -130,7 +165,11 @@ function UnstartedRow({
           <span className="shrink-0 text-[10px] text-syn-var">chat</span>
           <span className="flex-1 truncate text-[13px]">{preview || "New chat"}</span>
         </div>
-        <div className="flex items-baseline gap-2 text-[10px] text-fg-dim">
+        <div className="flex items-baseline gap-2 text-[10px] tabular-nums text-fg-dim">
+          {/* First in the line, the column a started chat puts its own time in —
+              a parked chat is the same list at an earlier age, and a date that
+              moves between the two would be a date you have to hunt for. */}
+          <span title={`Parked ${fullDate(draft.createdAt)}`}>{when(draft.createdAt)}</span>
           <span>not sent yet</span>
           {draft.attachments.length > 0 && (
             <span>
@@ -406,7 +445,7 @@ function ChatRow({
         {/* Tabular figures, so the money column does not shuffle sideways as you
             read down a list of costs that differ only in the cents. */}
         <div className={`flex items-baseline gap-1.5 text-[10px] tabular-nums ${meta}`}>
-          <span>{ago(chat.lastModified)}</span>
+          <span title={dateTitle(chat)}>{when(born(chat))}</span>
           {spend && spend.activeMs > 0 && (
             <>
               <Dot />
@@ -448,6 +487,24 @@ const WORKING_TIME = (turns: number) =>
 
 const COST_IS_AN_ESTIMATE =
   "An estimate, from a price table bundled into the SDK at build time. Fine for a list, never for billing."
+
+/**
+ * What the date on a row means, on hover.
+ *
+ * The row prints when the chat STARTED, because that is what it is ordered by.
+ * When it was last spoken to is the fact that used to be printed there, so it
+ * moved here rather than being dropped — it is the one that answers "did my
+ * question go through", and it is a second line rather than a second column
+ * because 320px was already full.
+ *
+ * A session whose first entry carried no timestamp has only its file's mtime.
+ * Labelling that "started" would date a month-old conversation to the last
+ * thing said in it, so that case says what it actually knows.
+ */
+const dateTitle = (chat: ConversationRow) =>
+  chat.createdAt === null
+    ? `Last active ${fullDate(chat.lastModified)}. This session's first entry carried no date, so when it started is not recorded.`
+    : `Started ${fullDate(chat.createdAt)}\nLast active ${fullDate(chat.lastModified)}`
 
 const USAGE_SHARE = (tokens: number) =>
   `${compact(tokens)} tokens, as a share of every token aide has spent on this machine. Not your plan's usage — that window counts every client at once.`
