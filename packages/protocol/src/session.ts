@@ -158,6 +158,29 @@ export interface ConversationSummary {
 }
 
 /**
+ * What a conversation cost, where its time went, and what went wrong in it.
+ *
+ * Derived from the event log by `daemon/src/receipt.ts`. It lives here rather
+ * than in that file because it crosses the wire, and a second copy of the shape
+ * declared browser-side is one the compiler cannot hold to the daemon's — which
+ * is the whole reason this package has no schema library.
+ *
+ * Carried as one markdown document rather than as a tree the browser lays out:
+ * the artifact exists to be pasted into a question about how the conversation
+ * could have gone better, so the pasteable form IS the form.
+ */
+export interface Receipt {
+  sessionId: string
+  /**
+   * Runs aide's event log holds for this conversation. Zero is a real answer,
+   * not a failure — a chat held in the CLI or the VS Code extension shows up in
+   * the same list and has no log behind it to measure.
+   */
+  runs: number
+  markdown: string
+}
+
+/**
  * A conversation's transcript, normalized into the same `RunEvent` shape the
  * live run stream uses — so the transcript renderer is shared rather than
  * reimplemented, and a replayed session reads exactly like a live one.

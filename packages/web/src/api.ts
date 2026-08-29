@@ -10,10 +10,11 @@ import type {
   Health,
   PlanUsage,
   Project,
+  Receipt,
   RunEvent,
 } from "@aide/protocol"
 
-export type { ConversationSummary, FolderPick, GitPending, Health, PlanUsage }
+export type { ConversationSummary, FolderPick, GitPending, Health, PlanUsage, Receipt }
 
 /**
  * A conversation, plus the two things aide knows about it that the session file
@@ -149,6 +150,15 @@ export const api = {
     call<void>(`/api/projects/${projectId}/conversations/${sessionId}/reopen`, { method: "POST" }),
   conversation: (projectId: string, sessionId: string) =>
     call<ConversationView>(`/api/projects/${projectId}/conversations/${sessionId}`),
+  /**
+   * What this conversation cost and where its time went.
+   *
+   * On a button press, never on the app's beat: it reads and reduces every run
+   * log the conversation has, which is cheap for one conversation and pointless
+   * to redo every 1.5 seconds for one nobody has asked about.
+   */
+  receipt: (projectId: string, sessionId: string) =>
+    call<Receipt>(`/api/projects/${projectId}/conversations/${sessionId}/receipt`),
 
   chat: (
     projectId: string,

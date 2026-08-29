@@ -19,17 +19,11 @@
  * rather than the gate on the code, which is why it sits beside the diff instead
  * of inside it.
  */
-import type { ModelSpend, Project, RunEvent, RunStatus } from "@aide/protocol"
+import type { ModelSpend, Project, Receipt, RunEvent, RunStatus } from "@aide/protocol"
 import type { EventLog } from "./eventlog.js"
 import { runIndex } from "./spend.js"
 
-/** The whole artifact. `markdown` is the thing; the rest is for the UI's header. */
-export interface Receipt {
-  sessionId: string
-  /** Runs the event log holds for this conversation. Zero is a real answer. */
-  runs: number
-  markdown: string
-}
+export type { Receipt }
 
 /** Tools that change the tree. Used only for the "before the first edit" signal. */
 const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"])
