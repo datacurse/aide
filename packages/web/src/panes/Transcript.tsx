@@ -138,6 +138,7 @@ type Line =
   | CommitStepLine
   | CommitLandedLine
   | { kind: "commit-message"; key: string; message: string; model: string }
+  | { kind: "stale"; key: string; supervised: boolean }
 
 /**
  * A run must always end with a visible line saying how it ended. Without one, a
@@ -253,6 +254,9 @@ function toLines(events: RunEvent[], live?: LiveText | null): Line[] {
           turn: e.n,
           restore: e.restore,
         })
+        break
+      case "turn.stale":
+        lines.push({ kind: "stale", key: rowKey(e), supervised: e.supervised })
         break
       case "permission.request": {
         const line: PermissionLine = {
@@ -615,6 +619,32 @@ export function CommitMessageDraft({ text, model }: { text: string; model: strin
   )
 }
 
+/**
+ * This turn changed the daemon, so the daemon you are talking to is behind.
+ *
+ * Written as what happens NEXT, not as what is true now, and the distinction is
+ * the whole row: a supervised daemon restarts within a couple of seconds of the
+ * turn ending, which is precisely when this is being read. "The daemon is
+ * running older code" would be a sentence that is false by the time it is
+ * finished, and the reader would be left doing the thing it was trying to spare
+ * them — restarting something by hand that had already restarted itself.
+ *
+ * Not an error colour. Needing a restart is the ordinary outcome of editing a
+ * long-lived process, and the supervised case needs nothing from anybody.
+ */
+function StaleRow({ supervised }: { supervised: boolean }) {
+  return (
+    <p className="flex min-w-0 items-baseline gap-2 px-1 py-0.5">
+      <span className="shrink-0 text-warn">↻</span>
+      <span className="min-w-0 font-sans text-[11px] leading-relaxed text-fg-muted">
+        {supervised
+          ? "This turn changed the daemon, so it is restarting now that the turn is done. Give it a second and the change is live — you do not have to do anything."
+          : "This turn changed the daemon, and this one was started by hand — nothing here will restart it. Until you do, aide keeps serving the code it booted with."}
+      </span>
+    </p>
+  )
+}
+
 /** Mirrors CheckpointRow: one line, click for exactly what was staged. */
 function CommitLandedRow({ line }: { line: CommitLandedLine }) {
   const [open, setOpen] = useState(false)
@@ -660,6 +690,7 @@ function renderLine(
       />
     )
   if (line.kind === "commit-landed") return <CommitLandedRow key={line.key} line={line} />
+  if (line.kind === "stale") return <StaleRow key={line.key} supervised={line.supervised} />
   if (line.kind === "checkpoint") return <CheckpointRow key={line.key} line={line} />
   if (line.kind === "thinking")
     return (

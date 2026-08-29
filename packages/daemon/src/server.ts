@@ -170,7 +170,7 @@ app.get("/api/health", async (): Promise<Health> => ({
   bootSourceId: BOOT_SOURCE_ID,
   sourceId: await currentSourceId(),
   stale: await isStale(),
-  supervised: process.env["AIDE_MANAGED"] === "1",
+  supervised: CONFIG.supervised,
   busy: {
     chats: chat.turns().length,
     writes: inFlightWrites.size,

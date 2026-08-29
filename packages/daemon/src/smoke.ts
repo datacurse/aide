@@ -28,6 +28,7 @@ import { promisify } from "node:util"
 import { chatModeFromSdk } from "@aide/protocol"
 import { HUMAN_ONLY_COMMANDS, checkBashCommand } from "./policy.js"
 import { restartDecision, type Health } from "@aide/protocol"
+import { staleVerdict } from "./source.js"
 import {
   buildGraph,
   commitDetail,
@@ -578,6 +579,42 @@ console.log("\nrestarting a stale daemon")
   // Unknown must never read as changed: a daemon with no source tree to compare
   // against is not stale, it is unknowable.
   check("never restarts on an unreadable source", !decide({ sourceId: null }, null).restart)
+}
+
+console.log("\ntelling a turn it left the daemon behind")
+{
+  // The other half of the same fact, and the half a human actually asks about:
+  // not "should the dev server restart this" but "is the change I just asked for
+  // in the thing I am looking at". These logs hold that question three times,
+  // typed into a fresh chat, because the only answer was a badge in a rail.
+  const BOOT = "aaaaaaaaaaaa"
+  const verdict = (before: string | null, now: string | null) => staleVerdict(BOOT, before, now)
+
+  check(
+    "a turn that edits the daemon says so",
+    verdict(BOOT, "bbbbbbbbbbbb")?.sourceId === "bbbbbbbbbbbb",
+  )
+  check(
+    "a turn that changed nothing says nothing",
+    verdict(BOOT, BOOT) === null,
+    "most turns are questions, and a row on every one of them is a row nobody reads",
+  )
+  check(
+    "an edit the human made before sending is not the turn's doing",
+    verdict("bbbbbbbbbbbb", "bbbbbbbbbbbb") === null,
+    "otherwise every turn repeats it until something restarts the process",
+  )
+  check(
+    "but editing it further within the turn is",
+    verdict("bbbbbbbbbbbb", "cccccccccccc")?.sourceId === "cccccccccccc",
+  )
+  check(
+    "a turn that puts the source back is silent",
+    verdict("bbbbbbbbbbbb", BOOT) === null,
+    "reverted to what is loaded — there is nothing to restart for",
+  )
+  check("unknown is never stale", verdict(BOOT, null) === null)
+  check("and neither is an unreadable boot", staleVerdict(null, BOOT, "bbbbbbbbbbbb") === null)
 }
 
 const project: Project = { id: "p1", name: "smoke", root, addedAt: new Date().toISOString() }

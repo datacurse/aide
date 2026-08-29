@@ -24,6 +24,7 @@ import type { EventLog } from "./eventlog.js"
 import { git, gitOr } from "./git.js"
 import { killTree, relayWorkerOutput } from "./proc.js"
 import { readProjectDoc } from "./registry.js"
+import { currentSourceId, staleSince } from "./source.js"
 import type { FromWorker, ToWorker } from "./worker/main.js"
 
 const WORKER =
@@ -112,6 +113,18 @@ interface TurnRecord extends Omit<ChatTurn, "blocked"> {
   interrupted: boolean
   /** Tool calls the human has not answered yet. */
   pending: Set<string>
+  /**
+   * The daemon's own source fingerprint when this turn was admitted.
+   *
+   * Kept so the end of the turn can tell "this run left the daemon behind" from
+   * "it was already behind when you pressed send". Without it the transcript
+   * would blame a run that only read files for an edit the human made by hand
+   * ten minutes earlier, on every turn until something restarted the process.
+   *
+   * Null when it could not be read, which reads as "say nothing" downstream —
+   * an unknown fingerprint must never be reported as a change.
+   */
+  sourceIdAtStart: string | null
   /**
    * The turn's restore point being written, between the agent stopping and the
    * turn being let go of.
@@ -300,11 +313,20 @@ export class ChatLane {
       interrupted: false,
       pending: new Set(),
       settling: null,
+      sourceIdAtStart: null,
     }
     this.#turns.set(runId, record)
 
     try {
-      const doc = await readProjectDoc(project.root)
+      // Together, because they are independent and this is the path a human is
+      // waiting on. The fingerprint is read AFTER admission like everything else
+      // that can suspend — the lock above is taken synchronously and nothing may
+      // run in front of it.
+      const [doc, sourceIdAtStart] = await Promise.all([
+        readProjectDoc(project.root),
+        currentSourceId(),
+      ])
+      record.sourceIdAtStart = sourceIdAtStart
 
       // The human's own words go in first, before the SDK is even contacted, so
       // a turn that fails to spawn still shows what it was answering. The pasted
@@ -407,6 +429,9 @@ export class ChatLane {
       interrupted: false,
       pending: new Set(),
       settling: null,
+      // A commit stages and writes history; it cannot edit the daemon's source,
+      // so there is nothing for the end of it to compare against.
+      sourceIdAtStart: null,
     }
     this.#turns.set(runId, record)
 
@@ -694,6 +719,10 @@ export class ChatLane {
             // succeeded must not be reported as one that never ended because a
             // git call for a convenience on top of it failed.
             .catch(() => {})
+            // Same bargain, and the same order: both of these are notes ABOUT
+            // the turn and both have to be in the log before the line that ends
+            // it, because a run log ends in exactly one terminal event.
+            .then(() => this.#noteStale(msg.runId).catch(() => {}))
             .then(() => {
               this.log.append(msg.runId, outcome)
             })
@@ -777,6 +806,33 @@ export class ChatLane {
       sha: made.sha,
       n: made.n,
       restore: restoreCommand(made.ref),
+    })
+  }
+
+  /**
+   * Say so if this turn left the daemon running code that no longer exists.
+   *
+   * Answers, in the transcript, the question this repository's logs show being
+   * asked in a fresh chat instead: whether the change that was just made is in
+   * the process you are talking to. The daemon rail has carried the same fact
+   * all along, three panes away and phrased as a state rather than as an answer
+   * to anything.
+   *
+   * Silent unless the fingerprint moved across this turn, which is what keeps it
+   * off every run on every project that is not aide's own checkout — no path
+   * matching, and nothing here knows the name of a directory.
+   */
+  async #noteStale(runId: string): Promise<void> {
+    const record = this.#turns.get(runId)
+    if (!record) return
+    const moved = await staleSince(record.sourceIdAtStart)
+    if (!moved) return
+
+    this.log.append(runId, {
+      type: "turn.stale",
+      bootSourceId: moved.bootSourceId,
+      sourceId: moved.sourceId,
+      supervised: CONFIG.supervised,
     })
   }
 

@@ -17,6 +17,16 @@ export const CONFIG = {
   webPort: num("AIDE_WEB_PORT", 5173),
 
   /**
+   * Started by a dev server, and therefore restarted by one without being asked.
+   *
+   * Read here rather than at each use because two places now need it — `/health`
+   * answers it, and a turn that leaves this process running older code has to
+   * say whether anything will pick that up — and two copies of an env-var
+   * comparison is exactly how they end up disagreeing about a restart.
+   */
+  supervised: process.env["AIDE_MANAGED"] === "1",
+
+  /**
    * Extra browser origins permitted to call this daemon, beyond loopback and
    * the dev server. Comma-separated. Almost nobody should need this.
    */

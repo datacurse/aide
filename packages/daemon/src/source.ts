@@ -82,9 +82,17 @@ const TTL_MS = 2000
 
 let cached: { id: string | null; at: number } | null = null
 
-export async function currentSourceId(): Promise<string | null> {
+/**
+ * `fresh` walks the tree rather than trusting the memo, and exists for exactly
+ * one caller: the end of a chat turn. The TTL is there to stop a polling browser
+ * re-reading forty files a second, and it is the wrong trade at a turn boundary
+ * — the run may have written its last edit half a second ago, and a cached
+ * answer from before it would report a daemon as current that is not, in the one
+ * place a human is being told whether their change is live.
+ */
+export async function currentSourceId(fresh = false): Promise<string | null> {
   const now = Date.now()
-  if (cached && now - cached.at < TTL_MS) return cached.id
+  if (!fresh && cached && now - cached.at < TTL_MS) return cached.id
   const id = await fingerprint()
   cached = { id, at: now }
   return id
@@ -97,7 +105,57 @@ export async function currentSourceId(): Promise<string | null> {
 export const BOOT_SOURCE_ID = await fingerprint()
 
 /** True only when both fingerprints are known and differ. Unknown is never stale. */
-export async function isStale(): Promise<boolean> {
-  const now = await currentSourceId()
+export async function isStale(fresh = false): Promise<boolean> {
+  const now = await currentSourceId(fresh)
   return BOOT_SOURCE_ID !== null && now !== null && now !== BOOT_SOURCE_ID
+}
+
+/** What a turn has to say about the daemon it left behind, or nothing. */
+export interface StaleVerdict {
+  bootSourceId: string
+  sourceId: string
+}
+
+/**
+ * Whether a turn left this process running code that no longer exists.
+ *
+ * Pure, and separated from the read for the same reason `restartDecision` is:
+ * every way of being wrong here is a sentence shown to a human about whether
+ * their work is live, and those are the three lines worth pinning down in a
+ * test rather than leaving inside something that also walks the filesystem.
+ *
+ * `before` is the fingerprint captured when the turn was admitted. Comparing
+ * against it, rather than only asking whether the process is behind, is what
+ * keeps the row honest when the human had already edited the daemon by hand
+ * before pressing send: the daemon was serving old code either way, and
+ * reporting it every turn until a restart would blame runs that only read.
+ */
+export function staleVerdict(
+  boot: string | null,
+  before: string | null,
+  now: string | null,
+): StaleVerdict | null {
+  // Unknown is never stale — the same rule `isStale` and `restartDecision` hold
+  // to. A daemon with no readable source tree is unknowable, not behind.
+  if (boot === null || now === null) return null
+  // Nothing moved across the turn, so whatever is true of this process was
+  // already true when the message was sent. Not this turn's news.
+  if (now === before) return null
+  // The turn moved the tree BACK to what is loaded — reverting an edit, or
+  // discarding one. There is nothing to restart for.
+  if (now === boot) return null
+  return { bootSourceId: boot, sourceId: now }
+}
+
+/**
+ * `staleVerdict` against the tree as it stands right now.
+ *
+ * The early return is not just a guard: this runs at a turn boundary, while the
+ * conversation still holds its project's lock, and an installed copy with no
+ * source tree to read would otherwise walk the filesystem every turn to reach a
+ * verdict that is null whatever it finds.
+ */
+export async function staleSince(before: string | null): Promise<StaleVerdict | null> {
+  if (BOOT_SOURCE_ID === null) return null
+  return staleVerdict(BOOT_SOURCE_ID, before, await currentSourceId(true))
 }

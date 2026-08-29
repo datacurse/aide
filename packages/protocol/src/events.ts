@@ -107,6 +107,43 @@ export type RunEventBody =
        */
       restore: string
     }
+  /**
+   * This turn left the daemon running code that no longer exists on disk.
+   *
+   * The one question this repository's own logs show being asked over and over —
+   * "do i have to restart aide, or start new chat?" — and until now the only
+   * answer was a badge in the daemon rail, panes away from where it was asked. A
+   * run that edits the daemon leaves a process serving code from before it, and
+   * nothing in the transcript said so: the turn reported success, the browser
+   * looked unchanged, and the obvious reading was that the agent had not done
+   * the work. Three separate conversations here go on to ask whether the fix was
+   * real.
+   *
+   * Appended only when the fingerprint actually moved across the turn, so it is
+   * silent for every run on a project that is not aide's own checkout — which is
+   * why there is no path matching here and nothing that knows the name of a
+   * directory. `source.ts` compares what this process loaded against what is on
+   * disk, and a run that never touched the daemon cannot move that answer.
+   *
+   * Sits before `run.finished`, like `turn.checkpoint`, because a run log ends in
+   * exactly one terminal event and the rest of the daemon leans on that.
+   *
+   * The renderer says what happens NEXT rather than what is true now, because
+   * this does not stay true: a supervised daemon restarts itself within seconds
+   * of the turn ending, which is exactly when the row is being read.
+   */
+  | {
+      type: "turn.stale"
+      /** What this process loaded at boot, and what is on disk now. */
+      bootSourceId: string
+      sourceId: string
+      /**
+       * Something will restart it without being asked — the dev server that
+       * started it. False for a daemon started by hand, which nothing else will
+       * touch and which the human has to restart where they started it.
+       */
+      supervised: boolean
+    }
   | {
       type: "run.started"
       taskId: string
