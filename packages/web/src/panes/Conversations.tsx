@@ -608,7 +608,27 @@ export function ConversationPane({
   const [liveSessionId, setLiveSessionId] = useState<string | null>(null)
   const summary = view?.summary ?? null
   const sessionId = openSessionId ?? liveSessionId
-  const { events: live, draft } = useRunStream(runId)
+  const { events: streamed, draft } = useRunStream(runId)
+
+  /**
+   * This run's events, and nothing else's.
+   *
+   * `useRunStream` empties itself in an effect keyed on the run id, so for one
+   * commit after the open chat changes it is still holding the turn belonging to
+   * the chat you just left. Everything below reads this as "what the open chat
+   * is doing now", and unfiltered that one commit put the previous
+   * conversation's turn into this chat's transcript.
+   */
+  const live = useMemo(() => streamed.filter((e) => e.runId === runId), [streamed, runId])
+
+  /**
+   * Which chat is on screen: a session id, or a draft id for one that has not
+   * started. Both halves count. Watching the session alone, moving between two
+   * chats that had never spoken was not a change at all, so the second one
+   * opened holding the first one's turn.
+   */
+  const openKey = openSessionId ?? draftId
+  const [shownKey, setShownKey] = useState<string | null>(openKey)
 
   /**
    * The session this pane started itself, so adopting its id from the URL is not
@@ -619,18 +639,32 @@ export function ConversationPane({
    */
   const startedHere = useRef<string | null>(null)
 
-  useEffect(() => {
-    // Switching conversations clears the pane. Picking up the id of the chat you
-    // just started here is not switching — the turn is streaming, and clearing
-    // `runId` unsubscribes from it mid-answer, which is what left a new chat
-    // showing your message and nothing else while the daemon carried on.
-    if (openSessionId !== null && openSessionId === startedHere.current) return
-    setView(null)
-    setError(null)
-    setRunId(null)
-    setSent(new Map())
-    setLiveSessionId(null)
-  }, [openSessionId])
+  // Switching conversations clears the pane — during this render, not in an
+  // effect after it. An effect leaves one commit in which the pane is already
+  // pointed at the new chat while `runId` and the stream still belong to the old
+  // one, and every effect that reads both fires inside it. That commit is the
+  // whole of the bug where clicking a chat you had parked in the list threw you
+  // into the conversation you were last in: the adoption below saw a chat with
+  // no session id, took the session id off the previous conversation's
+  // `run.started`, and carried your unsent message across to it.
+  if (openKey !== shownKey) {
+    setShownKey(openKey)
+    // Picking up the id of the chat you just started here is not switching — the
+    // turn is streaming, and clearing `runId` unsubscribes from it mid-answer,
+    // which is what left a new chat showing your message and nothing else while
+    // the daemon carried on.
+    if (openSessionId === null || openSessionId !== startedHere.current) {
+      setView(null)
+      setError(null)
+      setRunId(null)
+      setSent(new Map())
+      setLiveSessionId(null)
+      // Only that one handoff is exempt, so the exemption ends with it —
+      // otherwise coming back to the chat later skips the reset too, and it
+      // opens on top of whatever the chat in between left behind.
+      startedHere.current = null
+    }
+  }
 
   useEffect(() => {
     if (!projectId || !openSessionId) return
@@ -682,7 +716,7 @@ export function ConversationPane({
     if (openSessionId) return
     for (const e of live) {
       if (e.type === "run.started" && e.sessionId && !liveSessionId) {
-        // Set before navigating: the reset effect reads it on the very next
+        // Set before navigating: the reset above reads it on the very next
         // render, and a state update would not have landed by then.
         startedHere.current = e.sessionId
         setLiveSessionId(e.sessionId)
