@@ -1383,50 +1383,121 @@ export function ConversationPane({
   )
 
   const scroller = useRef<HTMLDivElement>(null)
+  /**
+   * The transcript's own box inside the scrollport.
+   *
+   * Held as state rather than in a ref because it is not rendered at all while
+   * the log is empty — which is every chat for the moment between opening it and
+   * the session store answering — and an effect that found a null ref at mount
+   * would never learn the rows had arrived.
+   */
+  const [body, setBody] = useState<HTMLDivElement | null>(null)
   const toBottom = useCallback(() => {
     const el = scroller.current
     if (el) el.scrollTop = el.scrollHeight
   }, [])
 
-  /**
-   * Whether the last line is on screen — the other half of when the jump button
-   * is worth having, and the half that is true while nothing is running.
-   *
-   * A `scroll` listener and nothing else. Content growing under a view that is
-   * already at the end fires no scroll event, so this would go stale in exactly
-   * one case: a turn writing. That case is `busy`, which the button already
-   * asks about, so an observer here would buy nothing and re-open the door to
-   * the follower this pane deliberately does not have.
-   */
+  /** Whether the last line is on screen: what draws the jump button. */
   const [atEnd, setAtEnd] = useState(true)
+  /**
+   * The same fact, where the follower can read it.
+   *
+   * A ref as well as state because the follower runs from an observer callback
+   * that closes over the render it was made in, and state read there is whatever
+   * was true when the observer was attached.
+   */
+  const following = useRef(true)
+
+  /**
+   * Stick to the end while you are at the end, and stay out of the way when you
+   * are not.
+   *
+   * There used to be an unconditional follower here and it was removed, because
+   * a transcript that moves while you are dragging a cursor across it cannot be
+   * read — the text goes out from under the pointer and the highlight lands
+   * somewhere else. Both halves of that survive. Scrolling up at all ends the
+   * follow, and being scrolled up is a resting state you can sit in for an hour
+   * with a turn writing underneath; and a drag that has selected something
+   * pauses it even at the bottom. Where the mouse-up leaves you is then simply
+   * where you are — the button comes back rather than the pane jumping and
+   * taking the selection you just made off screen with it.
+   */
   useEffect(() => {
     const el = scroller.current
-    if (!el) return
+    if (!el || !body) return
+
+    let dragging = false
     // A few pixels of slack: at fractional zoom the arithmetic lands half a
     // pixel short of the end, and an exact test would leave the pill on screen
     // for a view that is plainly already at the bottom.
-    const read = () => setAtEnd(el.scrollHeight - el.scrollTop - el.clientHeight < 24)
+    const read = () => {
+      const end = el.scrollHeight - el.scrollTop - el.clientHeight < 24
+      following.current = end
+      setAtEnd(end)
+    }
+    // A drag that has actually taken text, which is the only kind worth pausing
+    // for. A click is a mouse-down too, and dropping the follow at every click
+    // would stop a streaming turn following the first time you opened a tool row
+    // to see what it did.
+    const selecting = () => {
+      const sel = window.getSelection()
+      return dragging && !!sel && !sel.isCollapsed
+    }
+    const follow = () => {
+      if (!following.current || selecting()) return
+      el.scrollTop = el.scrollHeight
+    }
+    const down = (e: MouseEvent) => {
+      if (e.button === 0) dragging = true
+    }
+    // On the window, not on the pane: a drag very often ends outside the box it
+    // started in, and a mouse-up missed here leaves the follow paused for good.
+    const up = () => {
+      if (!dragging) return
+      dragging = false
+      read()
+    }
+
+    // In this order, and this is the whole of what makes opening a chat land at
+    // the bottom: the rows exist for the first time in this very commit, so
+    // reading the position first would find a full-height transcript scrolled to
+    // the top and conclude the reader had scrolled up.
+    follow()
     read()
     el.addEventListener("scroll", read, { passive: true })
-    return () => el.removeEventListener("scroll", read)
-  }, [])
+    el.addEventListener("mousedown", down)
+    window.addEventListener("mouseup", up)
+    // Content growing under a view that is already at the end fires no scroll
+    // event, so the follow cannot hang off `scroll` the way the button's state
+    // does: a reply streaming in, a tool row opening, a pasted screenshot
+    // finishing loading and the pane being dragged narrower are all height
+    // changes with no scroll behind them.
+    const grow = new ResizeObserver(follow)
+    grow.observe(body)
+    return () => {
+      el.removeEventListener("scroll", read)
+      el.removeEventListener("mousedown", down)
+      window.removeEventListener("mouseup", up)
+      grow.disconnect()
+    }
+  }, [body])
 
   /**
-   * The pane scrolls when you open it, and never again on its own.
-   *
-   * There used to be a follower: a ResizeObserver that pinned the view to the
-   * bottom while a reply streamed. It is gone because reading is what this pane
-   * is for, and a transcript that moves while you are dragging a cursor across
-   * it cannot be read — the text goes out from under the pointer and the
-   * highlight lands somewhere else. The button below is the whole of what
-   * replaced it, and it only moves the pane when you ask it to.
+   * Opening a chat, and starting a turn, both put you back at the end.
    *
    * A turn starting counts as asking: you pressed send, or pressed commit, and
-   * the thing you pressed it for is about to appear at the end.
+   * the thing you pressed it for is about to appear down there.
+   *
+   * `view.events.length` used to be in here as well, and that is the one thing
+   * removed rather than kept: it meant a poll picking up a line yanked a reader
+   * back down, which is exactly what the follow above is careful not to do.
+   * Anything arriving while you are scrolled up is the button's business now.
    */
   useEffect(() => {
+    following.current = true
+    setAtEnd(true)
     toBottom()
-  }, [sessionId, runId, view?.events.length, toBottom])
+  }, [sessionId, runId, toBottom])
 
   /**
    * Answers whether the turn actually started.
@@ -1521,7 +1592,13 @@ export function ConversationPane({
                 : "Select a project."}
             </Empty>
           ) : (
-            <>
+            // The box the follower measures. A plain div wrapping the rows,
+            // rather than the scrollport itself, because a scrollport's own
+            // height does not change when what is inside it grows — and it is
+            // not around the two empty states above because `Empty` centres
+            // itself with `h-full`, which resolves against its parent and would
+            // quietly become "as tall as the text" inside a wrapper.
+            <div ref={setBody}>
               {(truncating || view?.truncated) && (
                 <div className="mb-2 border-b border-line pb-2 text-center font-sans text-[11px] text-fg-dim">
                   {view?.truncated
@@ -1552,17 +1629,18 @@ export function ConversationPane({
                   <CommitMessageDraft text={draft.text} model={draftingCommit} />
                 ) : null}
               </Transcript>
-            </>
+            </div>
           )}
           {error && <p className="mt-2 font-sans text-[11px] text-err">{error}</p>}
         </div>
 
-        {/* The only thing that moves the pane, and it moves it only when asked.
-            Shown while a turn is arriving, and whenever the end is off screen,
-            because this pane never scrolls itself: being scrolled up is a
-            resting state you can sit in for an hour, and gated on `busy` alone
-            the only way back to the end was dragging the scrollbar. */}
-        {(busy || !atEnd) && (
+        {/* The way back into the follow, and the only thing that moves the pane
+            while you are reading it. Shown exactly when the end is off screen —
+            which, now that the pane follows, is exactly when you scrolled away
+            from it. It used to show on `busy` as well, from when nothing
+            followed at all; that would now be a pill sitting over a turn it has
+            nothing left to do for. */}
+        {!atEnd && (
           <button
             type="button"
             onClick={toBottom}
