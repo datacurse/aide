@@ -32,6 +32,15 @@ const isBoolean = (v: unknown): v is boolean => typeof v === "boolean"
 
 let attachmentSeq = 0
 
+/**
+ * The one message typed often enough to be worth a button of its own.
+ *
+ * "proceed" and not "continue": continue also reads as "resume what was cut
+ * off", which is a different instruction, and the wrong one to hand a turn that
+ * ended by itself.
+ */
+const PROCEED = "proceed"
+
 /** One array for every empty box, so the identity is stable across renders. */
 const NOTHING_ATTACHED: Attachment[] = []
 
@@ -347,6 +356,31 @@ export function Composer({
   }
 
   /**
+   * Send the one word without typing it.
+   *
+   * Live on an empty box, which is exactly when `send` is not: the two are
+   * never both pressable, so whichever one is lit is the one that means
+   * something. It deliberately will not fire over a box with something in it —
+   * that press would have to either throw the typing away or leave it stranded
+   * behind a turn it was not part of.
+   *
+   * Nothing is cleared, so unlike `send` there is nothing to put back when the
+   * daemon refuses the turn; the rail says why, as it does for any refusal.
+   */
+  const canProceed = !busy && !blocked && text.trim().length === 0 && attachments.length === 0
+  const proceed = () => {
+    if (!canProceed) return
+    void onSend({
+      text: PROCEED,
+      attachments: [],
+      mode,
+      autoAfterPlan: mode === "plan" && autoAfterPlan,
+      effort,
+    })
+    setNote(null)
+  }
+
+  /**
    * The ▶ pressed on a parked chat, carried out.
    *
    * Consumed whether or not the box could send it: if this chat is held back —
@@ -479,15 +513,33 @@ export function Composer({
               stop
             </button>
           ) : (
-            <button
-              type="button"
-              onClick={send}
-              disabled={!canSend}
-              title="Enter to send, Shift+Enter for a newline"
-              className="rounded-sm bg-accent px-3 py-1 font-sans text-xs text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              send
-            </button>
+            <>
+              {/* Only on a conversation that has run. Before there is a
+                  session there is nothing to carry on with, and the press
+                  would be the chat's FIRST message — which is what names the
+                  row, so a list of chats called "proceed" is a list of
+                  nothing. */}
+              {sessionId && (
+                <button
+                  type="button"
+                  onClick={proceed}
+                  disabled={!canProceed}
+                  title={`Send “${PROCEED}” — for when the answer is just carry on`}
+                  className="rounded-sm bg-input px-2.5 py-1 font-sans text-xs text-fg transition-colors hover:bg-raised disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {PROCEED}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={send}
+                disabled={!canSend}
+                title="Enter to send, Shift+Enter for a newline"
+                className="rounded-sm bg-accent px-3 py-1 font-sans text-xs text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                send
+              </button>
+            </>
           )}
         </div>
       </div>
