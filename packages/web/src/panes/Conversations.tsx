@@ -14,12 +14,15 @@ import { MAX_ATTACHMENT_BYTES, readAsAttachment } from "../attachments.js"
 import { Composer } from "../Composer.js"
 import {
   addBacklogChat,
+  captureKey,
   discardDraft,
   draftKey,
   forgetDraftRun,
   idFromKey,
   markDraftSent,
+  readDraft,
   saveDraft,
+  useDraft,
   useUnstartedChats,
   type Draft,
 } from "../drafts.js"
@@ -279,8 +282,22 @@ function UnstartedRow({
  * the box.
  */
 function CaptureBox({ projectId }: { projectId: string }) {
-  const [text, setText] = useState("")
-  const [attachments, setAttachments] = useState<Attachment[]>([])
+  /**
+   * The box reads straight out of the draft store, exactly as the composer does
+   * and for the same reason: component state is what evaporated a half-written
+   * idea on every reload, and this pane is reloaded by the dev server whenever
+   * a run finishes rewriting the modules it is running.
+   *
+   * Under a key of its own — see `captureKey`. Nothing here has been parked yet,
+   * so it must not become a row; keeping the words is not the same as saying
+   * you meant them.
+   */
+  const key = captureKey(projectId)
+  const draft = useDraft(key)
+  const text = draft?.text ?? ""
+  const attachments = draft?.attachments ?? NOTHING_TYPED
+  const edit = (patch: { text?: string; attachments?: Attachment[] }) =>
+    saveDraft(key, { text, attachments, ...patch })
   const [note, setNote] = useState<string | null>(null)
   const box = useRef<HTMLTextAreaElement>(null)
   useAutoGrow(box, text, { minRows: 1, maxRows: 8 })
@@ -293,8 +310,7 @@ function CaptureBox({ projectId }: { projectId: string }) {
     addBacklogChat(projectId, { text: text.trim(), attachments })
     // The box keeps the focus it already has, so a second idea is a second
     // Enter rather than a click back up here.
-    setText("")
-    setAttachments([])
+    edit({ text: "", attachments: [] })
     setNote(null)
   }
 
@@ -307,7 +323,12 @@ function CaptureBox({ projectId }: { projectId: string }) {
       images.filter((f) => f.size <= MAX_ATTACHMENT_BYTES).map(readAsAttachment),
     )
     const added = read.filter((a): a is Attachment => a !== null)
-    if (added.length) setAttachments((prev) => [...prev, ...added])
+    if (added.length === 0) return
+    // Re-read the box rather than trusting what this closure captured: decoding
+    // is async, so anything typed — or a second image pasted — while it ran
+    // would be overwritten by the stale copy.
+    const now = readDraft(key)
+    saveDraft(key, { text: now.text, attachments: [...now.attachments, ...added] })
   }
 
   return (
@@ -318,7 +339,7 @@ function CaptureBox({ projectId }: { projectId: string }) {
             <button
               key={a.id}
               type="button"
-              onClick={() => setAttachments((prev) => prev.filter((x) => x.id !== a.id))}
+              onClick={() => edit({ attachments: attachments.filter((x) => x.id !== a.id) })}
               title="Remove this image"
               className="inline-flex items-center gap-1 rounded border border-line-soft px-1.5 py-0.5 font-sans text-[10px] text-fg-dim hover:border-err hover:text-err"
             >
@@ -334,7 +355,7 @@ function CaptureBox({ projectId }: { projectId: string }) {
       <textarea
         ref={box}
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => edit({ text: e.target.value })}
         // Enter rather than a button as the primary path. Capturing an idea has
         // to cost one line typed, or it loses to saying the thing in a chat and
         // the list stops being true.
@@ -613,6 +634,9 @@ const USAGE_SHARE = (tokens: number) =>
  * One object for every parked row, because none of them differ.
  */
 const PARKED: ChatStatus = { state: null, blocked: false, done: false }
+
+/** One array for every empty box, so the identity is stable across renders. */
+const NOTHING_TYPED: Attachment[] = []
 
 /**
  * A fetched status, brought up to date from the lock.

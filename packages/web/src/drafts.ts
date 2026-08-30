@@ -95,6 +95,22 @@ const newDraftId = (): string => {
 
 export const draftKey = (projectId: string, id: string): string => `${projectId}:${id}`
 
+/**
+ * Where the capture box's own contents live, per project.
+ *
+ * A record in the same store as a chat's box, because it is the same fact: words
+ * you have typed and not sent. It was component state, and a reload — which in
+ * this repo is anything the dev server decides to do while you are mid-sentence
+ * — threw away the idea you were in the middle of writing down.
+ *
+ * NOT a `new-` id, and that is the point of a name of its own: nothing has been
+ * parked yet, so this must not appear as a row in the list, and `unstartedFor`
+ * reads exactly that prefix. Fixed rather than generated, so a reload finds it
+ * again; per project, so an idea typed for one is not parked in another when you
+ * switch panes mid-thought.
+ */
+export const captureKey = (projectId: string): string => draftKey(projectId, "capture")
+
 /** The id half of a key. Keys are `<projectId>:<id>` and project ids have no colon. */
 export const idFromKey = (key: string): string => key.slice(key.indexOf(":") + 1)
 
