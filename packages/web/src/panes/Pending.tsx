@@ -263,14 +263,32 @@ function PendingRow({ file }: { file: GitFileChange }) {
 const POLL_MS = 4000
 
 /**
- * How much history the rail asks for.
+ * How much history the rail asks for, and how much more each press adds.
  *
- * A page rather than a window with a pager under it. This is here to answer
- * "where am I", and thirty commits is several days of a project moving; going
- * further back is reading history rather than getting your bearings, and that is
- * what the terminal is for.
+ * Thirty is what "where am I" costs: several days of a project moving, and the
+ * question this half exists to answer. What it is not is a claim that the
+ * thirty-first commit is none of your business — the list said so itself, with
+ * a line at the bottom admitting it stopped, and the only way past that line was
+ * a terminal. So the line became the control: the page grows by another thirty
+ * per press, on the reasoning that somebody who has scrolled to the end of one
+ * page wants the next one, not all five hundred.
+ *
+ * Still a page and not an infinite scroll. Each press is a deliberate ask for
+ * more work from a `git log` that runs every four seconds from then on, and the
+ * poll costs what the current page costs — a rail that quietly grew itself while
+ * you scrolled would raise that bill without anybody choosing to.
  */
 const PAGE = 30
+
+/**
+ * Where growing stops.
+ *
+ * The daemon clamps at 500 of its own accord, so past this the button would
+ * still be there, still be pressable, and buy nothing — a control that no longer
+ * does what it says. Same number on both sides deliberately: this is the point
+ * where the rail admits the rest is the terminal's job.
+ */
+const MAX_PAGE = 500
 
 function ago(iso: string): string {
   const t = new Date(iso).getTime()
@@ -297,12 +315,19 @@ function History({ projectId }: { projectId: string }) {
   // project it was read from keeps it without emptying the rail on every switch.
   const [history, rememberHistory] = useKeyed<GitHistory>(projectId)
   const [error, rememberError] = useKeyed<string>(projectId)
+  // How far back this project's history is currently opened. Keyed like the
+  // page itself, so coming back to a project you had expanded finds it still
+  // expanded — and, more to the point, so a project you had NOT expanded is
+  // never handed the previous one's depth, which would show as the rail
+  // silently costing five hundred commits a poll in a repo you just opened.
+  const [depth, rememberDepth] = useKeyed<number>(projectId)
+  const page = depth ?? PAGE
 
   useEffect(() => {
     let live = true
     const load = async () => {
       try {
-        const next = await api.gitHistory(projectId, PAGE)
+        const next = await api.gitHistory(projectId, page)
         if (!live) return
         rememberHistory(projectId, next)
         rememberError(projectId, null)
@@ -311,13 +336,17 @@ function History({ projectId }: { projectId: string }) {
         rememberError(projectId, err instanceof Error ? err.message : String(err))
       }
     }
+    // Runs on `page` as well as on the project, which is what makes the button
+    // below a single `rememberDepth` and nothing else: growing the page IS the
+    // fetch for the longer one, immediately, rather than a press that appears
+    // to do nothing until the next poll comes round up to four seconds later.
     void load()
     const timer = setInterval(() => void load(), POLL_MS)
     return () => {
       live = false
       clearInterval(timer)
     }
-  }, [projectId, rememberHistory, rememberError])
+  }, [projectId, page, rememberHistory, rememberError])
 
   return (
     <section className="flex min-h-0 flex-1 flex-col border-t border-line">
@@ -338,13 +367,34 @@ function History({ projectId }: { projectId: string }) {
       ) : history.log.commits.length === 0 ? (
         <Note>No commits yet. The first one starts the history.</Note>
       ) : (
-        <Commits log={history.log} head={history.overview.head} />
+        <Commits
+          log={history.log}
+          head={history.overview.head}
+          // Null at the ceiling rather than a press that re-fetches the same
+          // five hundred rows: see MAX_PAGE. `Commits` takes the absence as
+          // "say it stopped, offer nothing", which is what the line did before
+          // any of this was pressable.
+          onMore={
+            page >= MAX_PAGE
+              ? null
+              : () => rememberDepth(projectId, Math.min(page + PAGE, MAX_PAGE))
+          }
+        />
       )}
     </section>
   )
 }
 
-function Commits({ log, head }: { log: GitLog; head: string | null }) {
+function Commits({
+  log,
+  head,
+  onMore,
+}: {
+  log: GitLog
+  head: string | null
+  /** Grow the page, or null when there is no more room to grow into. */
+  onMore: (() => void) | null
+}) {
   // Which row the working tree is standing on. Matched on the abbreviation git
   // itself printed for both, so there is no guess about how many characters
   // "short" means in this repo.
@@ -369,15 +419,36 @@ function Commits({ log, head }: { log: GitLog; head: string | null }) {
       ))}
       {/* Said rather than left to be inferred from a list that stops. A page
           that ends silently reads as "this is the whole repository", which on a
-          project older than thirty commits is simply false. */}
-      {log.more && (
-        <p
-          className="py-1 pr-3 font-sans text-[10px] text-fg-dim"
-          style={{ paddingLeft: graphWidth(log.lanes) + 16 }}
-        >
-          history continues past here
-        </p>
-      )}
+          project older than thirty commits is simply false.
+
+          And pressable, because saying it was only half the job: the sentence
+          admitted the list had been cut off and then left the terminal as the
+          only way to see past the cut. Indented to the lane the graph's lines
+          end at, so it reads as the bottom of the list rather than a control
+          parked underneath it — this is where the history keeps going, and the
+          press is how. */}
+      {log.more &&
+        (onMore ? (
+          <button
+            type="button"
+            onClick={onMore}
+            title={`Show another ${PAGE} commits. The rail re-reads this longer page every few seconds from now on.`}
+            className="w-full cursor-pointer py-1 pr-3 text-left font-sans text-[10px] text-fg-dim transition-colors outline-none hover:text-fg-muted focus-visible:text-fg-muted"
+            style={{ paddingLeft: graphWidth(log.lanes) + 16 }}
+          >
+            show {PAGE} more
+          </button>
+        ) : (
+          /* At the ceiling. The list still stops, so it still has to say so —
+             what it must not do is keep offering a press that would return the
+             same rows. */
+          <p
+            className="py-1 pr-3 font-sans text-[10px] text-fg-dim"
+            style={{ paddingLeft: graphWidth(log.lanes) + 16 }}
+          >
+            history continues past here
+          </p>
+        ))}
     </div>
   )
 }
