@@ -27,6 +27,14 @@ export const registryPath = () => join(aideHome(), "registry.json")
  * from the session store or from git.
  */
 export const boardPath = () => join(aideHome(), "board.json")
+/**
+ * `~/.aide/ssh_config` — the machines aide can add a project from.
+ *
+ * Beside the registry rather than inside a project, because a machine is not a
+ * property of any one repository: the same host usually holds several.
+ * Deliberately NOT `~/.ssh/config` — see `ssh.ts` for why aide reads its own.
+ */
+export const sshConfigPath = () => join(aideHome(), "ssh_config")
 export const runsDir = () => join(aideHome(), "runs")
 export const runLogPath = (runId: string) => join(runsDir(), `${runId}.ndjson`)
 

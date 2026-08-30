@@ -13,9 +13,11 @@ import type {
   PlanUsage,
   RunEvent,
   ServerMessage,
+  SshHost,
+  SshListing,
 } from "@aide/protocol"
 import { CHAT_MODES, EFFORT_LEVELS } from "@aide/protocol"
-import { runLogPath } from "@aide/protocol/node"
+import { runLogPath, sshConfigPath } from "@aide/protocol/node"
 import { MAX_PROJECT_DOC_CHARS } from "./agent.js"
 import {
   chatStatuses,
@@ -29,6 +31,7 @@ import { EventLog } from "./eventlog.js"
 import { nameChat } from "./helper.js"
 import { addProject, getProject, listProjects, readProjectDoc, removeProject } from "./registry.js"
 import { pickFolder } from "./picker.js"
+import { listRemoteDirectories, listSshHosts } from "./ssh.js"
 import { conversationProfile } from "./profile.js"
 import { commitWorkingTree, conversationBaseline } from "./review.js"
 import * as repo from "./repo.js"
@@ -266,6 +269,48 @@ app.post("/api/projects/browse", async (): Promise<FolderPick> => {
     // Never a 500. Whatever went wrong, the useful next move is the same one the
     // caller already has for a machine with no dialog: type the path.
     return { path: null, unavailable: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+/**
+ * The machines in `~/.aide/ssh_config`.
+ *
+ * A GET, and therefore something the poll could call — but it is not on one. The
+ * file changes when a person edits it, which is rare and is followed by them
+ * opening the picker, so it is read when the picker opens.
+ */
+app.get("/api/ssh/hosts", async (): Promise<{ hosts: SshHost[]; configPath: string }> => {
+  // The path travels with the list because the empty case needs it: "no machines
+  // yet" is only actionable next to the name of the file to put one in.
+  return { hosts: await listSshHosts(), configPath: sshConfigPath() }
+})
+
+/**
+ * What is in a directory on one of those machines.
+ *
+ * A POST rather than a GET despite reading nothing, because the path is a body
+ * rather than a query string: it can contain slashes, spaces and `#`, and the
+ * round trip through URL encoding is a bug farm for no gain.
+ *
+ * A 502 rather than a 400 when ssh fails, and the distinction is worth keeping:
+ * an unknown host alias is this end's fault and a 400, while a machine that is
+ * asleep or refusing a key is the far end's and is not something the caller can
+ * fix by sending different bytes.
+ */
+app.post("/api/ssh/list", async (req, reply): Promise<SshListing | { message: string }> => {
+  const { host, path } = (req.body ?? {}) as { host?: string; path?: string }
+  if (!host) return reply.code(400).send({ message: "body must include { host }" })
+
+  const known = (await listSshHosts()).find((h) => h.alias === host)
+  if (!known) {
+    return reply
+      .code(400)
+      .send({ message: `no host named ${host} in ${sshConfigPath()}` })
+  }
+  try {
+    return await listRemoteDirectories(known, path ?? ".")
+  } catch (err) {
+    return reply.code(502).send({ message: err instanceof Error ? err.message : String(err) })
   }
 })
 

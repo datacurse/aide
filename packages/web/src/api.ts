@@ -13,9 +13,21 @@ import type {
   Profile,
   Project,
   RunEvent,
+  SshHost,
+  SshListing,
 } from "@aide/protocol"
 
-export type { ConversationSummary, FolderPick, GitHistory, GitPending, Health, PlanUsage, Profile }
+export type {
+  ConversationSummary,
+  FolderPick,
+  GitHistory,
+  GitPending,
+  Health,
+  PlanUsage,
+  Profile,
+  SshHost,
+  SshListing,
+}
 
 /**
  * A conversation, plus the two things aide knows about it that the session file
@@ -132,6 +144,18 @@ export const api = {
   browseForFolder: () => call<FolderPick>("/api/projects/browse", { method: "POST" }),
   addProject: (path: string) =>
     call<Project>("/api/projects", { method: "POST", body: JSON.stringify({ path }) }),
+
+  /** The machines in `~/.aide/ssh_config`, and where that file is. */
+  sshHosts: () => call<{ hosts: SshHost[]; configPath: string }>("/api/ssh/hosts"),
+  /**
+   * What is in a directory on one of them.
+   *
+   * Can take seconds and can fail for reasons that are nothing to do with aide —
+   * a machine asleep, a key not loaded — so every caller shows what came back
+   * rather than swallowing it. Like `browseForFolder`, this belongs to a press.
+   */
+  sshList: (host: string, path: string) =>
+    call<SshListing>("/api/ssh/list", { method: "POST", body: JSON.stringify({ host, path }) }),
   removeProject: (id: string) => call<void>(`/api/projects/${id}`, { method: "DELETE" }),
 
   events: (runId: string, fromSeq = 0) =>

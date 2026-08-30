@@ -8,6 +8,7 @@ import { useKeyed } from "./useKeyed.js"
 import { useRemembered } from "./useRemembered.js"
 import { ConversationList, ConversationPane } from "./panes/Conversations.js"
 import { PendingRail } from "./panes/Pending.js"
+import { RemotePicker } from "./RemotePicker.js"
 import { Button, Empty, heldBy, PaneHeader, SELECTED } from "./ui.js"
 
 /** While anything is in flight the lists need to move on their own. */
@@ -87,6 +88,8 @@ export function App() {
    * for no reason.
    */
   const [picking, setPicking] = useState(false)
+  /** Whether the ssh machine picker is open. See `RemotePicker`. */
+  const [remote, setRemote] = useState(false)
   /**
    * Whether a finished run makes a sound. Remembered rather than a session
    * toggle: a chime you have to silence again after every reload is worse than
@@ -341,6 +344,13 @@ export function App() {
           <Button onClick={addProject} disabled={picking}>
             {picking ? "choosing…" : "add"}
           </Button>
+          {/* Separate from `add` rather than a mode of it. The local one opens
+              the machine's own dialog and this one cannot — there is no window
+              on the far side of an ssh connection — so they are two different
+              acts wearing one word only if you hide the difference. */}
+          <Button onClick={() => setRemote(true)} title="Add a project from another machine">
+            ssh
+          </Button>
         </PaneHeader>
         <div className="flex-1 overflow-auto py-1">
           {projects.length === 0 ? (
@@ -528,6 +538,27 @@ export function App() {
         verifyRefused={verifyRefused}
         onCommit={() => void commitWork()}
       />
+
+      {remote && (
+        <RemotePicker
+          onCancel={() => setRemote(false)}
+          onPick={(host, path) => {
+            setRemote(false)
+            // Refused HERE, in front of the person who just pressed it, rather
+            // than by registering the project and letting it fail at the first
+            // turn. A row in the rail that cannot run is worse than no row: the
+            // reason would arrive as a checkpoint error naming a path that does
+            // not exist on this machine, which reads as a bug in aide.
+            //
+            // The picker itself is finished and real — the machines, the walk,
+            // the `git` marks — and this is the one step behind it. See
+            // `addRemoteProject` in daemon/src/ssh.ts for what it needs.
+            setError(
+              `aide can browse ${host.alias} but cannot run a project there yet: every run spawns the agent locally and shells out to \`git -C\`, so ${path} would be read as a path on this machine. The machine list and the walk are done; running over ssh is not.`,
+            )
+          }}
+        />
+      )}
     </main>
   )
 }

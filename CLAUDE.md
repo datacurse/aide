@@ -33,6 +33,7 @@ record. They are all rows in the same list, in that order of urgency.
 | Where the graph's lines go, and the SVG that draws them | `packages/web/src/graph.ts`, `packages/web/src/GitGraph.tsx` |
 | Branch, history and lanes, read off the repo | `packages/daemon/src/repo.ts` |
 | The folder dialog behind `add`, and why it is the daemon's | `packages/daemon/src/picker.ts` |
+| The machines in `~/.aide/ssh_config`, and walking one | `packages/protocol/src/ssh.ts`, `packages/daemon/src/ssh.ts` |
 | One agent per project, the lock, warm sessions, a turn run inside a commit | `packages/daemon/src/chat.ts` |
 | The SDK call, the system prompt, permissions | `packages/daemon/src/agent.ts` |
 | Snapshots and turn boundaries under `refs/aide/` | `packages/daemon/src/checkpoint.ts` |
@@ -58,6 +59,20 @@ Decisions already taken, which are not gaps to fill:
   many there are — so it means the same thing tomorrow. Numbering rows 1..30 from
   the top of the page is the obvious cheap version and is wrong: it renumbers
   every commit in the project every time you make one.
+- **A machine list, and no remote runs yet.** `~/.aide/ssh_config` is aide's own
+  file in OpenSSH's format — not `~/.ssh/config`, which aide never writes and
+  only partly understands (no `Match`, no `ProxyJump`, no `Include`, no
+  `%`-tokens; a picker that silently disagreed with `ssh` would be worse than a
+  smaller one that says so). The `ssh` button lists those machines, walks them,
+  and marks which directories are repositories. It then REFUSES the add, in front
+  of the person who pressed it, because a run spawns the Agent SDK's `claude`
+  binary for this platform with `cwd` set to the project root and every git call
+  is `execFile("git", ["-C", root])` — a remote root would be read as a local
+  path and fail at the first checkpoint. Registering it anyway would put a row in
+  the rail that cannot run, and the reason would surface as a path error that
+  reads as a bug in aide. What the rest would take is written out at the foot of
+  `daemon/src/ssh.ts`; the short version is that it is an aide agent running on
+  the far machine, not a flag on this one.
 - **No capability file.** There was a model-maintained `.aide/spec.md`; it cost
   more wall-clock than the rest of a commit, nothing read it, and it corrupted
   itself. What the project does is discoverable by reading the code, and what it

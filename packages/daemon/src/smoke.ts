@@ -32,6 +32,8 @@ import { staleVerdict } from "./source.js"
 import { runCheck, runChecks } from "./verify.js"
 import { parseProjectDoc } from "@aide/protocol/node"
 import { planChecks } from "@aide/protocol"
+import { connectableHosts, parseSshConfig, sshTarget } from "@aide/protocol"
+import { cleanSshError } from "./ssh.js"
 import {
   buildGraph,
   commitDetail,
@@ -1217,6 +1219,125 @@ console.log("\nthe first commit in a repository that has none")
   check("it commits", /^[0-9a-f]{40}$/.test(sha), sha.slice(0, 8))
   check("and the rail is empty afterwards", (await pending(fresh)).files.length === 0)
   await rm(fresh, { recursive: true, force: true })
+}
+
+// ---------------------------------------------------------------------------
+// ~/.aide/ssh_config
+// ---------------------------------------------------------------------------
+//
+// A parser over a hand-edited file, which is the one kind of input this project
+// validates rather than trusting. It does not throw on a bad line — a machine
+// that fails to appear is visible in the picker, unlike a `verify:` gate that
+// silently stops running — so what is asserted here is that the SHAPES people
+// actually write come back right.
+console.log("\nssh config")
+{
+  const hosts = parseSshConfig(`
+Host raspberrypi.local
+  HostName raspberrypi.local
+  User pi
+
+Host 192.168.3.161
+  HostName 192.168.3.161
+  User orangepi
+
+Host orangepi
+    HostName 192.168.3.81
+    User orangepi
+    IdentityFile ~/.ssh/id_ed25519
+
+Host tg
+  HostName 88.214.24.214
+  User root
+`)
+  check("every host is found", hosts.length === 4, String(hosts.length))
+  // Four-space indentation, which the file above mixes with two on purpose:
+  // OpenSSH does not care and neither may this.
+  const orange = hosts.find((h) => h.alias === "orangepi")
+  check("an alias keeps its own HostName", orange?.hostName === "192.168.3.81", orange?.hostName)
+  check("indentation does not matter", orange?.user === "orangepi", String(orange?.user))
+  check("IdentityFile is kept unexpanded", orange?.identityFile === "~/.ssh/id_ed25519")
+  // `~` stays as written: only the daemon knows whose home directory this is,
+  // and expanding it here would bake this machine's path into the wire type.
+  check("and the alias is what ssh is handed", sshTarget(orange!) === "orangepi@orangepi")
+  const pi = hosts.find((h) => h.alias === "raspberrypi.local")
+  check("a host with no key parses", pi?.identityFile === null && pi?.user === "pi")
+  check("a port defaults to unstated", pi?.port === null)
+}
+
+{
+  // The shapes OpenSSH allows that the file above does not use. Each of these
+  // silently dropped a host or a setting at some point while this was written.
+  const hosts = parseSshConfig(
+    [
+      "Host *",
+      "  User nobody",
+      "Host a b",
+      "  HostName shared.example",
+      "  Port 2222",
+      "Host eq",
+      "  HostName=equals.example",
+      "HOST upper",
+      "  hostname UPPER.example",
+      "  USER Bob",
+      'Host quoted',
+      '  IdentityFile "C:/Program Files/key"',
+    ].join("\n"),
+  )
+  const byAlias = (alias: string) => hosts.find((h) => h.alias === alias)
+  check("a wildcard block parses", byAlias("*")?.user === "nobody")
+  check("but is not offered as a machine", !connectableHosts(hosts).some((h) => h.alias === "*"))
+  // One `Host` line naming two aliases is two rows sharing every keyword under
+  // it — the bug being guarded is the settings reaching only the last one.
+  check("two aliases on one line both appear", !!byAlias("a") && !!byAlias("b"))
+  check("and both get the shared settings", byAlias("a")?.port === 2222 && byAlias("b")?.hostName === "shared.example")
+  check("`Key=value` is read", byAlias("eq")?.hostName === "equals.example")
+  // Keywords are case-insensitive, values are not: a username's case matters.
+  check("keywords ignore case", byAlias("upper")?.hostName === "UPPER.example")
+  check("values keep theirs", byAlias("upper")?.user === "Bob")
+  check("quotes are stripped from a path", byAlias("quoted")?.identityFile === "C:/Program Files/key")
+}
+
+{
+  // The bug that made `siblings` a local: held at module scope it survived
+  // between calls, so a file beginning with a stray keyword wrote onto the last
+  // host of whatever was parsed before it.
+  const first = parseSshConfig("Host one\n  User first\n")
+  const second = parseSshConfig("User ghost\nHost two\n  User second\n")
+  check("a global keyword before any Host is ignored", second.length === 1 && second[0]?.user === "second")
+  check("and does not reach the previous parse", first[0]?.user === "first")
+}
+
+{
+  // What ssh says, turned into what to do about it. The two host-key failures
+  // are the point: they end in the SAME "Host key verification failed" line,
+  // and the advice for one is useless for the other. Getting this wrong sends
+  // someone round a loop running a command that cannot work — which it did,
+  // against a real machine, before these were separated.
+  const host = { alias: "tg", hostName: "88.214.24.214", user: "root", identityFile: null, port: null, line: 1 }
+
+  const changed = cleanSshError(
+    [
+      "@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@",
+      "Offending ECDSA key in /c/Users/loki/.ssh/known_hosts:28",
+      "Host key verification failed.",
+    ].join("\n"),
+    host,
+  )
+  check("a changed host key is not called an unknown one", !/unknown host key/.test(changed))
+  check("and it names the line to remove", changed.includes("known_hosts line 28"), changed.slice(0, 60))
+  // aide must not offer to clear it: this is also what interception looks like.
+  check("and it does not offer to fix it", !/keygen|aide will clear/i.test(changed))
+
+  const unknown = cleanSshError("No ECDSA host key is known for tg\nHost key verification failed.", host)
+  check("an unknown key still says to accept it once", unknown.includes("ssh root@tg"), unknown.slice(0, 50))
+
+  const denied = cleanSshError("root@tg: Permission denied (publickey).", host)
+  check("a refused key says aide never asks for a password", /never asks for a password/.test(denied))
+
+  // Anything unrecognised still reaches the person, on one line.
+  const other = cleanSshError("ssh: connect to host tg port 22: Connection timed out\n", host)
+  check("an unclassified error is passed through", other === "tg: ssh: connect to host tg port 22: Connection timed out")
 }
 
 console.log(`\n${failures === 0 ? "all checks passed" : `${failures} FAILED`}`)
