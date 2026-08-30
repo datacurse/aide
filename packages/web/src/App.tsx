@@ -8,7 +8,7 @@ import { useKeyed } from "./useKeyed.js"
 import { useRemembered } from "./useRemembered.js"
 import { ConversationList, ConversationPane } from "./panes/Conversations.js"
 import { PendingRail } from "./panes/Pending.js"
-import { Button, Empty, PaneHeader, SELECTED } from "./ui.js"
+import { Button, Empty, heldBy, PaneHeader, SELECTED } from "./ui.js"
 
 /** While anything is in flight the lists need to move on their own. */
 const POLL_MS = 1500
@@ -173,23 +173,34 @@ export function App() {
   }, [projectId, holderRunId])
 
   /**
-   * Why pressing ▶ on a parked chat would be refused right now, or null.
+   * Why this project cannot take another turn right now, or null. Both halves
+   * are the daemon's own rules, stated before the press rather than after it.
    *
-   * Both halves are the daemon's own rules, stated early. It turns a chat away
-   * while another one has the repo, and a chat started on top of somebody else's
-   * uncommitted edits takes them as its own baseline — which is why "new" is
-   * held back by the same thing.
+   * The holder half is not the uncommitted half arriving early — it is the one
+   * thing the uncommitted half can never say in time. A run writes files nobody
+   * can anticipate, and the rail only learns of them a poll after they land, so
+   * a chat admitted beside a run in flight took a tree that was being written
+   * under it as its baseline; the block then appeared, describing damage already
+   * done. Waiting for files to show up is waiting for the wrong event.
+   *
+   * It also has to come FIRST. A held checkout is very nearly always a dirty one
+   * too, and "commit that work" is an instruction you cannot follow while a run
+   * has the repo — the commit button is locked by the same holder.
+   */
+  const projectHeld = project?.holder
+    ? heldBy(project.holder.title)
+    : uncommitted > 0
+      ? `${uncommitted} uncommitted file${uncommitted === 1 ? "" : "s"} — commit that work before starting another chat.`
+      : null
+
+  /**
+   * Why pressing ▶ on a parked chat would be refused right now, or null.
    *
    * Stated BEFORE the press rather than after it, unlike the composer's own
    * refusal, because sending clears the box: a ▶ that fails would take the
    * parked idea with it and leave a red line where the work used to be.
    */
-  const startBlocked =
-    uncommitted > 0
-      ? `${uncommitted} uncommitted file${uncommitted === 1 ? "" : "s"} — commit that work before starting another chat.`
-      : project?.holder
-        ? `"${project.holder.title}" has this checkout. Wait for it, or stop it.`
-        : null
+  const startBlocked = projectHeld
 
   /**
    * Whether the commit we started is the thing currently holding the repo.
@@ -209,9 +220,7 @@ export function App() {
    * editor had made, in a project the same work was blocking every new chat in.
    */
   const commitBlocked =
-    project?.holder && project.holder.runId !== commitRunId
-      ? `"${project.holder.title}" has the repo right now.`
-      : null
+    project?.holder && project.holder.runId !== commitRunId ? heldBy(project.holder.title) : null
 
   /**
    * Commit everything uncommitted in this project.
@@ -420,20 +429,16 @@ export function App() {
       <aside className="flex w-80 shrink-0 flex-col border-r border-line bg-chrome">
         <PaneHeader title="chats">
           <Button
-            // Held back by uncommitted work, for the same reason the daemon
-            // refuses the message: a conversation opened on top of somebody
-            // else's edits takes them as its own baseline. Locked rather than
-            // hidden, and locked rather than merely dimmed — the work in the way
+            // The same sentence the ▶ on a parked row gets, because they are the
+            // same refusal: the daemon turns away a chat opened on top of work
+            // in flight or edits nobody has committed. Locked rather than
+            // hidden, and locked rather than merely dimmed — what is in the way
             // is one pane over, and the padlock is what sends you to look at it.
             //
             // `disabled` stays for having no project, which is not a lock: there
             // is nothing holding it and nothing to go and clear.
             disabled={!project}
-            locked={
-              uncommitted > 0
-                ? `${uncommitted} uncommitted file${uncommitted === 1 ? "" : "s"} — commit this work before starting another chat.`
-                : null
-            }
+            locked={projectHeld}
             onClick={() => {
               if (!project) return
               navigate({ draftId: openNewChat(project.id) })
@@ -471,6 +476,10 @@ export function App() {
         openSessionId={sessionId}
         draftId={draftId}
         uncommitted={uncommitted}
+        // Polled, unlike everything else the pane knows about other chats. The
+        // box has to go dark the moment another chat takes the repo, not the
+        // next time something asks for the list.
+        holder={project?.holder ?? null}
         adoptRunId={commitRunId}
         // Gated on the open chat being the one that was pressed, so a ▶ that
         // somehow outlived its navigation cannot fire at whatever is open now.

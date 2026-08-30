@@ -30,7 +30,7 @@ import { ArrowDown, Check, Lock, Play, X } from "../icons.js"
 import { draftName, useAutoNames } from "../naming.js"
 import { ProfileOverlay } from "../Profile.js"
 import { WorkingBar } from "../Working.js"
-import { Button, Empty, LOCKED, PaneHeader, SELECTED } from "../ui.js"
+import { Button, Empty, heldBy, LOCKED, PaneHeader, SELECTED } from "../ui.js"
 import { useKeyed } from "../useKeyed.js"
 import { useRunStream } from "../useRunStream.js"
 import { useAutoGrow } from "../useAutoGrow.js"
@@ -1075,6 +1075,7 @@ export function ConversationPane({
   openSessionId,
   draftId,
   uncommitted,
+  holder,
   adoptRunId,
   autoSend,
   onAutoSent,
@@ -1098,6 +1099,16 @@ export function ConversationPane({
    * about whether a new chat is allowed.
    */
   uncommitted: number
+  /**
+   * Who has the project's checkout right now, from the app's poll.
+   *
+   * The one fact about other chats this pane reads live, and it has to be: the
+   * daemon refuses every send while anything holds the project, and what a run
+   * is about to write is not knowable from `uncommitted`, which can only report
+   * files that already exist. Without this the box stayed lit beside a turn in
+   * flight and answered a press with a red line.
+   */
+  holder: LockHolder | null
   /**
    * A run started somewhere else that belongs on this transcript.
    *
@@ -1326,6 +1337,24 @@ export function ConversationPane({
     [turnEvents, runId],
   )
   const busy = runId !== null && !finished
+
+  /**
+   * Something OTHER than the run this pane is watching has the checkout.
+   *
+   * By run id, and deliberately not by session as well. A commit is attributed
+   * to a conversation without being that conversation's turn, so "the holder's
+   * session is the open one" is true of a commit you walked away from and came
+   * back to — and that box has to stay shut, because the daemon refuses a send
+   * under any holder. The run id is the only thing that means what is wanted
+   * here: the turn on this screen, which is the one you can interrupt rather
+   * than the one you must wait for.
+   *
+   * The cost is a padlock for the length of one fetch when you open a chat whose
+   * turn is already running — until the transcript comes back with its
+   * `activeRunId` and the box becomes the interrupt. It is not a lie while it is
+   * up: nothing could be sent in that moment either.
+   */
+  const heldElsewhere = holder && holder.runId !== runId ? holder : null
 
   // The point of the whole conversation pane is that you leave it running and
   // come back. Something has to say when to come back.
@@ -1776,15 +1805,25 @@ export function ConversationPane({
           // hand every unstarted chat the same box.
           draftKey={draftKey(projectId, sessionId ?? draftId ?? "")}
           inheritedMode={summary?.lastMode ?? null}
-          // Only a conversation that has not started is held back, and only by
-          // uncommitted work. The way out of the block is to finish the chat
-          // that caused it, so a follow-up is never refused — and neither is a
-          // first turn already in flight, which for its first few seconds has no
-          // session id yet while its own edits pile up in the tree.
+          // Two blocks, and they are held back from different chats.
+          //
+          // A run somewhere else stops EVERY box, this one included: the daemon
+          // takes one turn per project and refuses the rest, so a follow-up to a
+          // chat you are reading is refused just as flatly as a new one. That is
+          // the half that cannot wait for files to appear — the run is writing
+          // them right now — and it is why the padlock is on the lock rather
+          // than on what the lock has produced so far.
+          //
+          // Uncommitted work stops only a chat that has NOT started, because the
+          // way out of it is to finish the chat that caused it. Its own turn in
+          // flight is exempt too: for its first few seconds it has no session id
+          // yet, while its own edits pile up in the tree.
           blocked={
-            sessionId || busy || uncommitted === 0
-              ? null
-              : `${uncommitted} uncommitted file${uncommitted === 1 ? "" : "s"} in this project. Press commit in the rail on the right — it takes all of them, whether or not a chat made them.`
+            heldElsewhere
+              ? heldBy(heldElsewhere.title)
+              : sessionId || busy || uncommitted === 0
+                ? null
+                : `${uncommitted} uncommitted file${uncommitted === 1 ? "" : "s"} in this project. Press commit in the rail on the right — it takes all of them, whether or not a chat made them.`
           }
           autoSend={autoSend}
           onAutoSent={onAutoSent}

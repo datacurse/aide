@@ -175,10 +175,13 @@ export function Composer({
    * SDK names it, and there is no second moment to do it in.
    */
   /**
-   * Why this box cannot send, or null. Only ever set on a NEW conversation, and
-   * only for uncommitted work: the rule is that one chat's work is committed
-   * before the next one starts. Stated here as well as in the rail — which is
-   * where the commit button lives — because the refusal has to be readable from
+   * Why this box cannot send, or null.
+   *
+   * Two rules reach here, both the daemon's: one chat has the project's checkout
+   * at a time, and one chat's work is committed before the next one starts. The
+   * first is set on any conversation, the second only on one that has not
+   * started. Stated here as well as in the rails either side — which is where
+   * the things that clear it live — because the refusal has to be readable from
    * the box it applies to.
    */
   blocked: string | null
@@ -398,8 +401,16 @@ export function Composer({
         // as one paragraph stayed two rows tall and scrolled its own beginning
         // out of sight.
         rows={2}
+        // "Commit first" was right back when a commit was the only way out of a
+        // block. It is not any more — a run holding the checkout clears by
+        // finishing — and a placeholder naming the wrong remedy is worse than
+        // one naming none, so it points at the sentence below instead.
         placeholder={
-          busy ? "Claude is working…" : blocked ? "Commit first." : "Ask, or paste a screenshot"
+          busy
+            ? "Claude is working…"
+            : blocked
+              ? "Held — the line below says why."
+              : "Ask, or paste a screenshot"
         }
         className="w-full resize-none rounded border border-line-soft bg-input px-2 py-1.5 font-sans text-[13px] leading-relaxed outline-none placeholder:text-fg-dim focus:border-accent"
       />
@@ -429,11 +440,21 @@ export function Composer({
               {sessionId && (
                 <button
                   type="button"
-                  onClick={proceed}
-                  disabled={!canProceed}
-                  title={`Send “${PROCEED}” — for when the answer is just carry on`}
-                  className="rounded-sm bg-input px-2.5 py-1 font-sans text-xs text-fg transition-colors hover:bg-raised disabled:cursor-not-allowed disabled:opacity-40"
+                  // Locked on the same terms as `send` beside it. It did not use
+                  // to need this: `blocked` only ever landed on a chat that had
+                  // never run, and this button is drawn only on one that has. A
+                  // run holding the checkout refuses both, and two buttons
+                  // side by side refused by one thing must not read as one
+                  // blocked and one merely empty.
+                  aria-disabled={blocked ? true : undefined}
+                  onClick={blocked ? undefined : proceed}
+                  disabled={blocked ? undefined : !canProceed}
+                  title={blocked ?? `Send “${PROCEED}” — for when the answer is just carry on`}
+                  className={`inline-flex items-center gap-1 rounded-sm px-2.5 py-1 font-sans text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                    blocked ? LOCKED : "bg-input text-fg hover:bg-raised"
+                  }`}
                 >
+                  {blocked && <Lock className="size-3 shrink-0" />}
                   {PROCEED}
                 </button>
               )}
@@ -442,9 +463,6 @@ export function Composer({
                 // Locked by work in the way, merely disabled by an empty box.
                 // The distinction is the whole point of the padlock: one is
                 // something to go and clear, the other is something to type.
-                //
-                // Only `send` gets it. `blocked` is set only on a chat that has
-                // never run, and `proceed` above is drawn only on one that has.
                 aria-disabled={blocked ? true : undefined}
                 onClick={blocked ? undefined : send}
                 disabled={blocked ? undefined : !canSend}

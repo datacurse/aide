@@ -20,6 +20,20 @@ import { Lock } from "./icons.js"
 export const LOCKED = "cursor-not-allowed bg-diff-del-fg/15 text-diff-del-fg"
 
 /**
+ * What a control says when a run has the project, wherever it is drawn.
+ *
+ * Beside the plate rather than at each control it stops, for the same reason the
+ * plate is: one condition worded four ways reads as four conditions. It stops
+ * `new`, the ▶ on a parked row, `commit`, and the composer — and those said
+ * "has this checkout", "has the repo right now", and, on the composer, nothing
+ * at all. The last is what this is really for: a lock the daemon enforces on
+ * every send, which the box in front of you did not mention until the send came
+ * back red.
+ */
+export const heldBy = (title: string) =>
+  `"${title}" is working in this checkout. Wait for it to finish, or stop it.`
+
+/**
  * How the row you have open is drawn, in every list there is: a frame, not a
  * fill. `list.focusOutline`, which is the key VS Code draws this with.
  *
