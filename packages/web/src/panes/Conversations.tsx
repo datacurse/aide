@@ -1725,10 +1725,22 @@ export function ConversationPane({
    */
   const typing = useMemo<LiveText | null>(
     () =>
-      busy && runId && draftingCommit === null && (draft.text || draft.thinking)
-        ? { runId, thinking: typedThinking, text: typedText }
+      busy &&
+      runId &&
+      draftingCommit === null &&
+      (draft.text || draft.thinking || draft.tools.length)
+        ? { runId, thinking: typedThinking, text: typedText, tools: draft.tools }
         : null,
-    [busy, runId, draftingCommit, draft.text, draft.thinking, typedText, typedThinking],
+    [
+      busy,
+      runId,
+      draftingCommit,
+      draft.text,
+      draft.thinking,
+      draft.tools,
+      typedText,
+      typedThinking,
+    ],
   )
 
   const scroller = useRef<HTMLDivElement>(null)

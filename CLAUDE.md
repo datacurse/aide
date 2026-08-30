@@ -88,6 +88,24 @@ Decisions already taken, which are not gaps to fill:
 - **Two modes: Plan and Auto.** Manual and Edit-automatically are gone. Nothing
   aide runs may need a human mid-turn, because the fix above is a turn nobody
   typed. Re-adding a mode that asks means re-opening that.
+- **A tool row is drawn when the call opens, not when its event arrives.**
+  `tool.start` is read off the COMPLETED assistant message, so a call the model
+  announces two sentences into a reply reaches the log only once it has stopped
+  writing that reply — by which time the tool has usually run and returned. What
+  that looked like was a wait with nothing moving in it, then a finished call you
+  never saw start. So `content_block_start` for a `tool_use` block becomes a
+  `tool` delta (`RunDelta`), the browser draws a running row from it, and
+  `useRunStream` retires that row when its own `tool.start` lands — matched on
+  `toolUseId`, one at a time, because one message can open several calls and
+  their events arrive together at the end of it. The delta carries the name and
+  the id and NOT the input: arguments stream as `input_json_delta` fragments and
+  half-parsed JSON is not a filename, so the row names the tool, counts, and
+  fills in what it touched a moment later. Both copies share the key
+  `tool:<runId>:<toolUseId>` — the one row here not keyed by seq — and the event
+  keeps the delta's stamp, or the counter restarts from zero at the handover
+  having already shown twenty seconds. It is also the only delta that is not the
+  early copy of something: losing it loses the row until the event, which is the
+  behaviour this replaced.
 - **Thinking is a toggle, and the log remembers which way it was.** The struck-
   through word beside the mode picker sends the turn with extended thinking off.
   It goes through `setMaxThinkingTokens` — 0 for off, null for back to the

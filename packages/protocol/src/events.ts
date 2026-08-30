@@ -374,6 +374,22 @@ export type ClientMessage =
 export type RunDelta =
   | { kind: "text"; text: string }
   | { kind: "thinking"; text: string }
+  /**
+   * The model has begun a tool call, named but not yet complete.
+   *
+   * The one delta that is not the early copy of something — it is EARLIER than
+   * the event, and that gap is the whole reason it exists. A `tool.start` is
+   * read off the finished assistant message, so a call announced two sentences
+   * into a reply does not reach the transcript until the model has stopped
+   * writing that reply: the tool has often already run and returned by the time
+   * a row for it appears. Watching that is a wait with nothing moving in it,
+   * followed by a completed call you never saw start.
+   *
+   * No `input` here on purpose. The arguments arrive as `input_json_delta`
+   * fragments, and half-parsed JSON is not a filename — the row draws its name
+   * now and picks up its arguments from the event a moment later.
+   */
+  | { kind: "tool"; toolUseId: string; name: string }
   /** Cumulative for the message in flight, straight off the API's message_delta. */
   | { kind: "usage"; outputTokens: number }
 

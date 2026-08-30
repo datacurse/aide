@@ -360,7 +360,8 @@ const CHAT_TO_SDK_MODE: Record<ChatMode, "plan" | "auto"> = {
  * One `stream_event` into zero or more deltas.
  *
  * The payload is a raw Messages API streaming event, so the shapes worth
- * handling are `content_block_delta` (text and thinking, arriving in pieces) and
+ * handling are `content_block_delta` (text and thinking, arriving in pieces),
+ * `content_block_start` for a tool call, and
  * `message_delta` (cumulative output tokens for the message in flight). The
  * rest â block starts and stops â carries nothing a reader needs that
  * the finished message will not say better.
@@ -373,6 +374,21 @@ const CHAT_TO_SDK_MODE: Record<ChatMode, "plan" | "auto"> = {
 function toDeltas(message: unknown): RunDelta[] {
   const event = (message as { event?: Record<string, unknown> }).event
   if (!event) return []
+
+  // The one place a delta beats its own event to the browser rather than
+  // duplicating it early. A `tool.start` is read off the COMPLETED assistant
+  // message, so a call the model announces mid-reply stays invisible until it
+  // has finished writing that reply — which is after the tool has run. This
+  // fires when the model opens the block, so the row and its clock start with
+  // the call. See `RunDelta`.
+  if (event["type"] === "content_block_start") {
+    const block = event["content_block"] as Record<string, unknown> | undefined
+    if (block?.["type"] !== "tool_use") return []
+    const toolUseId = String(block["id"] ?? "")
+    const name = String(block["name"] ?? "")
+    // Both, or the row cannot be named now nor retired by the event later.
+    return toolUseId && name ? [{ kind: "tool", toolUseId, name }] : []
+  }
 
   if (event["type"] === "content_block_delta") {
     const d = event["delta"] as Record<string, unknown> | undefined

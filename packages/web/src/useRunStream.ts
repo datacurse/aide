@@ -6,6 +6,14 @@ export type StreamState = "idle" | "connecting" | "live" | "reconnecting"
 function applyDelta(prev: LiveDraft, delta: RunDelta): LiveDraft {
   if (delta.kind === "text") return { ...prev, text: prev.text + delta.text }
   if (delta.kind === "thinking") return { ...prev, thinking: prev.thinking + delta.text }
+  if (delta.kind === "tool") {
+    // Stamped on arrival rather than carried on the wire, which is the same
+    // trick a tool row already plays with `tool.start`: aide is loopback-only,
+    // so the browser's clock and the daemon's are the same clock.
+    if (prev.tools.some((t) => t.toolUseId === delta.toolUseId)) return prev
+    const started = { toolUseId: delta.toolUseId, name: delta.name, startedAt: Date.now() }
+    return { ...prev, tools: [...prev.tools, started] }
+  }
   return { ...prev, outputTokens: delta.outputTokens }
 }
 
@@ -16,15 +24,32 @@ function applyDelta(prev: LiveDraft, delta: RunDelta): LiveDraft {
  * keep streaming instead of showing a blank pane. It is also the path most likely
  * to be quietly broken, since it only matters on reconnect.
  */
+/** A tool call the model has named but whose `tool.start` has not arrived yet. */
+export interface LiveTool {
+  toolUseId: string
+  name: string
+  /** By the browser's clock; see `applyDelta`. */
+  startedAt: number
+}
+
 /** Text and thinking as they arrive, before the finished message replaces them. */
 export interface LiveDraft {
   text: string
   thinking: string
+  /**
+   * Calls announced but not yet events. Each is dropped the moment its own
+   * `tool.start` lands — matched on `toolUseId`, not cleared wholesale like
+   * text is, because one assistant message can open several calls and the
+   * events for them arrive together at the end of it. Clearing the list on the
+   * first would blank the rows for its siblings a frame before they were
+   * redrawn from the log.
+   */
+  tools: LiveTool[]
   /** Cumulative output tokens for the message in flight, 0 when unknown. */
   outputTokens: number
 }
 
-const EMPTY_DRAFT: LiveDraft = { text: "", thinking: "", outputTokens: 0 }
+const EMPTY_DRAFT: LiveDraft = { text: "", thinking: "", tools: [], outputTokens: 0 }
 
 export function useRunStream(runId: string | null): {
   events: RunEvent[]
@@ -97,6 +122,19 @@ export function useRunStream(runId: string | null): {
         }
         if (fresh.some((e) => e.type === "assistant.thinking")) {
           setDraft((prev) => ({ ...prev, thinking: "" }))
+        }
+        // A live tool row is superseded by its own event and no other, so this
+        // retires them one id at a time. The event carries the arguments the
+        // delta had none of, so the row it hands over to says more, not less.
+        const started = new Set(
+          fresh.flatMap((e) => (e.type === "tool.start" ? [e.toolUseId] : [])),
+        )
+        if (started.size) {
+          setDraft((prev) =>
+            prev.tools.some((t) => started.has(t.toolUseId))
+              ? { ...prev, tools: prev.tools.filter((t) => !started.has(t.toolUseId)) }
+              : prev,
+          )
         }
         if (fresh.some((e) => e.type === "run.finished" || e.type === "run.error")) {
           setDraft(EMPTY_DRAFT)

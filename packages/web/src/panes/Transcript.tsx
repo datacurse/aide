@@ -12,6 +12,7 @@ import {
 } from "../icons.js"
 import { Markdown } from "../Markdown.js"
 import { Button, Empty, money } from "../ui.js"
+import type { LiveTool } from "../useRunStream.js"
 
 /**
  * A run's event log, rendered as a conversation.
@@ -190,6 +191,13 @@ export interface LiveText {
   runId: string
   thinking: string
   text: string
+  /**
+   * Calls the model has opened but whose events have not landed. Keyed by
+   * `toolUseId` — the same id the event carries — so when it does land the row
+   * is updated in place rather than swapped for an identical one, which is the
+   * same reason the two blocks above are keyed by ordinal.
+   */
+  tools: LiveTool[]
 }
 type Line =
   | ToolLine
@@ -250,6 +258,10 @@ function toLines(events: RunEvent[], live?: LiveText | null): Line[] {
   // not change, which is the same way a selection dies.
   const rowKey = (e: RunEvent): string => `${e.runId}:${e.seq}`
 
+  // Looked up while building the rows, so a call that was drawn from a delta
+  // keeps the stamp it started counting from once its event arrives.
+  const liveTools = new Map((live?.tools ?? []).map((t) => [t.toolUseId, t]))
+
   // Counted over every event, not over the slice that ends up on screen: an
   // ordinal that shifts when the head of a long transcript is trimmed would
   // re-key — and so remount — every block below it on each new event.
@@ -283,16 +295,26 @@ function toLines(events: RunEvent[], live?: LiveText | null): Line[] {
         })
         break
       case "tool.start": {
+        // The one row not keyed by seq, because it is the one row that can
+        // already be on screen before its event exists: a `tool` delta draws it
+        // the moment the model opens the call. Keyed on the id both copies
+        // share, React updates that node in place instead of tearing down a
+        // counting row and building an identical one beside it.
+        const live = liveTools.get(e.toolUseId)
         const line: ToolLine = {
           kind: "tool",
-          key: rowKey(e),
+          key: `tool:${e.runId}:${e.toolUseId}`,
           toolUseId: e.toolUseId,
           name: e.name,
           input: e.input,
           nested: !!e.parentToolUseId,
           ok: null,
           summary: "",
-          startedAt: e.ts,
+          // The delta's stamp when there was one. This event is appended once
+          // the whole assistant message is complete, which is LATER — often by
+          // the length of the call itself — so preferring it would show a row
+          // that had been counting for twenty seconds start again from zero.
+          startedAt: live?.startedAt ?? e.ts,
           ms: null,
         }
         byToolId.set(e.toolUseId, line)
@@ -495,6 +517,30 @@ function toLines(events: RunEvent[], live?: LiveText | null): Line[] {
       nested: false,
     })
   }
+  // After the prose, because that is the order they were produced in: the model
+  // says what it is about to do and then opens the call. Only ones the log has
+  // not caught up with — `useRunStream` drops each as its `tool.start` arrives,
+  // and rendering both copies would show the same call twice for the frame
+  // between them.
+  for (const t of live?.tools ?? []) {
+    if (byToolId.has(t.toolUseId)) continue
+    settled.push({
+      kind: "tool",
+      // The same key the event's row will take, which is what makes the handover
+      // an update rather than a swap.
+      key: `tool:${live?.runId}:${t.toolUseId}`,
+      toolUseId: t.toolUseId,
+      name: t.name,
+      // The delta cannot carry arguments — see `RunDelta`. So the row names the
+      // tool and counts, and fills in what it touched when the event lands.
+      input: null,
+      nested: false,
+      ok: null,
+      summary: "",
+      startedAt: t.startedAt,
+      ms: null,
+    })
+  }
   return settled
 }
 
@@ -555,12 +601,19 @@ function ToolRow({ line }: { line: ToolLine }) {
     <X className={`${MARK} text-err`} />
   )
   const [open, setOpen] = useState(false)
+  /**
+   * A row drawn from a `tool` delta has a name and nothing else — the arguments
+   * are still streaming as partial JSON. Left expandable it would open onto
+   * "null", which reads as a call that was made with no arguments rather than as
+   * one whose arguments have not arrived.
+   */
+  const detailed = line.input !== null
 
   return (
     <div className={line.nested ? "ml-4 border-l border-line pl-3" : ""}>
       <div
-        onClick={() => toggleUnlessSelecting(setOpen)}
-        className="flex min-w-0 cursor-pointer items-baseline gap-2 rounded px-1 py-0.5 hover:bg-hover"
+        onClick={() => detailed && toggleUnlessSelecting(setOpen)}
+        className={`flex min-w-0 items-baseline gap-2 rounded px-1 py-0.5 hover:bg-hover ${detailed ? "cursor-pointer" : ""}`}
       >
         {mark}
         <span className="shrink-0 text-syn-func">{line.name}</span>
@@ -570,18 +623,20 @@ function ToolRow({ line }: { line: ToolLine }) {
         <span className="min-w-0 truncate text-syn-string">
           {describeInput(line.name, line.input)}
         </span>
-        {/* The same counter a running check gets, for the same reason: a tool row
-            has appeared the moment the call went out since `tool.start` has been
-            on the wire, but nothing on it moved — so a Bash that hangs for a
-            minute and a Read that returns instantly were the same picture, and
-            the only thing on screen that was going anywhere was the one bar at
-            the bottom of the pane naming the tool. */}
+        {/* The same counter a running check gets, for the same reason: without it
+            a Bash that hangs for a minute and a Read that returns instantly were
+            the same picture, and the only thing on screen that was going
+            anywhere was the one bar at the bottom of the pane naming the tool.
+            It counts from when the model OPENED the call rather than from when
+            the event was appended — see the `tool` delta — because the event is
+            written once the whole assistant message is done, which for a call
+            announced mid-reply is after the call has already run. */}
         {running
           ? line.startedAt > 0 && <RunningFor since={line.startedAt} />
           : line.ms !== null &&
             line.ms >= SLOW_TOOL_MS && <span className="shrink-0 text-fg-dim">{took(line.ms)}</span>}
       </div>
-      {open && (
+      {open && detailed && (
         <pre className="mt-1 mb-2 max-h-64 overflow-auto rounded-sm bg-chrome p-2 text-[11px] leading-relaxed whitespace-pre-wrap text-fg-muted">
           {JSON.stringify(line.input, null, 2)}
           {line.summary ? `\n\n--- result ---\n${line.summary}` : ""}
