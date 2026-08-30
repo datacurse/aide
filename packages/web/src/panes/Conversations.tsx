@@ -563,7 +563,12 @@ function Held({ since }: { since: number | null }) {
   if (since === null) return null
   const s = Math.max(0, Math.round((now - since) / 1000))
   return (
-    <span className="text-[9px] leading-none font-medium tabular-nums text-info">
+    // 11px, not the 9px this started at. 9px inside a 32px ring is a speck with
+    // a wide moat around it — the ring reads and the number does not, which
+    // wastes the whole reason the count sits in the middle rather than out on
+    // the meta line. `12m` is the widest string it can hold and it clears the
+    // ~28px inner circle at this size; the next step up does not.
+    <span className="text-[11px] leading-none font-semibold tabular-nums text-info">
       {s < 60 ? s : `${Math.floor(s / 60)}m`}
     </span>
   )
