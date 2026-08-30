@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState, type ReactNode, type RefObject } from "re
 import type { MessageImage, RunEvent, RunStatus } from "@aide/protocol"
 import {
   ArrowClockwise,
-  CaretRight,
   Check,
   Circle,
   GitCommit,
@@ -40,6 +39,30 @@ const MARK = "size-3 shrink-0 translate-y-[0.15em]"
  * underneath it.
  */
 const INLINE_MARK = "mr-1 inline size-3 align-[-0.15em]"
+
+/**
+ * The marker for a row that has not finished: a turning ring, in the column the
+ * check and the cross land in.
+ *
+ * It was a caret, which is a shape and not a motion — a row that had been
+ * running for a minute drew exactly what a row that had just opened drew, so
+ * the only thing on screen saying the tool had not wedged was the seconds
+ * beside it, and a number that changes twice a second is easy to read as a
+ * timestamp. The ring is the same idiom `WorkingBar` and `RunDial` already use
+ * for the same claim, borrowed here rather than reinvented.
+ *
+ * A bordered `span` rather than an `svg`: `animate-spin` on a stroked icon
+ * wobbles unless the artwork is exactly centred in its viewBox, and this needs
+ * none of the artwork. `size-2.5` inside `size-3`'s box, centred, because a
+ * ring drawn to the full 12px reads heavier than the check it alternates with.
+ */
+function Spinner() {
+  return (
+    <span className={`${MARK} flex items-center justify-center`}>
+      <span className="size-2.5 animate-spin rounded-full border border-info border-t-transparent" />
+    </span>
+  )
+}
 
 /** tool.start and tool.end arrive separately; pair them into one line per call. */
 interface ToolLine {
@@ -594,7 +617,7 @@ const SLOW_TOOL_MS = 2000
 function ToolRow({ line }: { line: ToolLine }) {
   const running = line.ok === null
   const mark = running ? (
-    <CaretRight className={`${MARK} text-info`} />
+    <Spinner />
   ) : line.ok ? (
     <Check className={`${MARK} text-ok`} />
   ) : (
@@ -1016,10 +1039,11 @@ function VerifyRow({ line }: { line: VerifyLine }) {
         onClick={() => toggleUnlessSelecting((flip) => setOverride(flip(open)))}
         className="flex min-w-0 cursor-pointer items-baseline gap-2 rounded px-1 py-0.5 hover:bg-hover"
       >
-        {/* A caret while it runs, the same marker a commit step in flight uses,
-            so "this one is happening now" reads the same everywhere. */}
+        {/* A spinner while it runs, the same marker a tool call and a commit
+            step in flight use, so "this one is happening now" reads the same
+            everywhere. */}
         {running ? (
-          <CaretRight className={`${MARK} text-info`} />
+          <Spinner />
         ) : line.ok ? (
           <Check className={`${MARK} text-ok`} />
         ) : (
@@ -1080,11 +1104,7 @@ function renderLine(
   if (line.kind === "commit-step")
     return (
       <p key={line.key} className="flex min-w-0 items-baseline gap-2 px-1">
-        {line.done ? (
-          <Check className={`${MARK} text-ok`} />
-        ) : (
-          <CaretRight className={`${MARK} text-info`} />
-        )}
+        {line.done ? <Check className={`${MARK} text-ok`} /> : <Spinner />}
         <span className="min-w-0 text-fg-muted">{line.label}</span>
       </p>
     )

@@ -74,19 +74,6 @@ export function X({ className }: IconProps) {
   )
 }
 
-/**
- * In flight. A caret rather than a filled triangle, so a marker on a row you are
- * reading cannot be mistaken for the play control that starts a chat.
- */
-export function CaretRight({ className }: IconProps) {
-  return (
-    <Icon
-      className={className}
-      d="M181.66,133.66l-80,80a8,8,0,0,1-11.32-11.32L164.69,128,90.34,53.66a8,8,0,0,1,11.32-11.32l80,80A8,8,0,0,1,181.66,133.66Z"
-    />
-  )
-}
-
 export function ArrowUp({ className }: IconProps) {
   return (
     <Icon
