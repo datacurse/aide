@@ -1,6 +1,6 @@
 import { useEffect, useReducer, useRef } from "react"
 import { api } from "./api.js"
-import { idFromKey, nameDraft, type Draft } from "./drafts.js"
+import { draftSubject, idFromKey, nameDraft, type Draft } from "./drafts.js"
 
 /**
  * Naming a chat before it has run.
@@ -38,7 +38,12 @@ export function draftName(draft: Draft): string | null {
   // request you have since rewritten describes work you are no longer about to
   // send, and a wrong label on a row is worse than no label — it is the failure
   // this whole feature exists to prevent, wearing the feature's clothes.
-  return draft.titledFrom === draft.text ? (draft.title ?? null) : null
+  //
+  // Against `draftSubject` rather than the box itself, so that the press which
+  // sends the chat does not take the name down with the words it clears. What
+  // was sent is what the name was written from, and for the seconds before the
+  // SDK's own name lands it is still the true label for the row.
+  return draft.titledFrom === draftSubject(draft) ? (draft.title ?? null) : null
 }
 
 /** Whether this row is worth a call right now. */

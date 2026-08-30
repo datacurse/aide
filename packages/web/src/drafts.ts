@@ -53,6 +53,21 @@ export interface Draft {
    */
   startedRunId?: string
   /**
+   * The message that went out, for the seconds this record is mid-handoff.
+   *
+   * The composer empties the box on the very press that sends, so from that
+   * press until the SDK's name arrives this record stands for a conversation
+   * whose every word it has just thrown away — and the row went blank and read
+   * "New chat", which is the one thing it is not. It is the chat you started
+   * three seconds ago and are watching work, and it read as an empty box you
+   * had never typed in.
+   *
+   * Only ever set alongside `startedRunId`, and cleared with it: what it holds
+   * is not in any box any more, so a row previewing it once the handoff is off
+   * would be advertising words that pressing ▶ would not send.
+   */
+  sentText?: string
+  /**
    * What this chat is called, for as long as it has not started.
    *
    * A few words a model wrote from `titledFrom`, so a parked row says what it is
@@ -262,6 +277,9 @@ export function saveDraft(key: string, content: { text: string; attachments: Att
     // recorded the run — and forgetting it here would lose the handoff in the
     // one case it exists for.
     startedRunId: prev?.startedRunId,
+    // The same for the words that went out under it — that clearing write is
+    // exactly the one this pair has to survive.
+    sentText: prev?.sentText,
     // Carried with the text it was written from, so that editing a parked chat
     // takes the name down with it and leaving it alone keeps it. Dropping the
     // pair here would ask for a new name on every keystroke.
@@ -279,10 +297,14 @@ export function saveDraft(key: string, content: { text: string; attachments: Att
  * survive leaving the pane — see `startedRunId`. Only ever set on a chat with no
  * session yet: everything else already knows what conversation it is.
  */
-export function markDraftSent(key: string, runId: string): void {
+export function markDraftSent(key: string, runId: string, text: string): void {
   const prev = cache.get(key)
   if (!prev || prev.startedRunId === runId) return
-  commit(key, { ...prev, startedRunId: runId })
+  // The words as well as the run. They have to be handed in rather than read off
+  // `prev`, because the composer clears the box in the same press and gets there
+  // first: this runs after the daemon has answered, `edit({ text: "" })` runs the
+  // moment the call is made — see `sentText`.
+  commit(key, { ...prev, startedRunId: runId, sentText: text })
 }
 
 /**
@@ -297,7 +319,10 @@ export function markDraftSent(key: string, runId: string): void {
 export function forgetDraftRun(key: string): void {
   const prev = cache.get(key)
   if (!prev?.startedRunId) return
-  commit(key, { ...prev, startedRunId: undefined })
+  // What was sent goes with it. The box is empty and this is an ordinary parked
+  // chat again, so a row still showing that message would be describing words
+  // that the ▶ beside it no longer has to send.
+  commit(key, { ...prev, startedRunId: undefined, sentText: undefined })
 }
 
 /**
@@ -316,6 +341,18 @@ export function nameDraft(key: string, from: string, title: string): void {
   // make every answer look like fresh typing.
   commit(key, { ...prev, title, titledFrom: from })
 }
+
+/**
+ * What this row is about: what is in its box, or — once sending has emptied the
+ * box — the message that went out of it.
+ *
+ * One rule in one place, because the name and the first line that stands in for
+ * it both read it, and two copies of it could disagree: a row would then show a
+ * name written from a sentence it was not showing, or fall back to a first line
+ * of nothing while the name it had sat right there in the record.
+ */
+export const draftSubject = (draft: Draft): string =>
+  draft.text.trim() === "" ? (draft.sentText ?? "") : draft.text
 
 /**
  * The current contents of a box, outside a render. For the handlers that have to
@@ -382,9 +419,10 @@ export function carryDraft(from: string, to: string): void {
   if (!row) return
   commit(from, null)
   if (row.text !== "" || row.attachments.length > 0) {
-    // Not the run it started under: what lands here is the box on a conversation
-    // that now has a name, and a box still advertising a handoff would have the
-    // list waiting on one that has already happened.
+    // Not the run it started under, nor the message that went out under it:
+    // what lands here is the box on a conversation that now has a name, and a
+    // box still advertising a handoff would have the list waiting on one that
+    // has already happened.
     //
     // Nor the name, for the same reason twice over: the conversation has its own
     // now, from the SDK, and what is left here is an unsent SECOND message that
@@ -394,6 +432,7 @@ export function carryDraft(from: string, to: string): void {
       key: to,
       pinned: false,
       startedRunId: undefined,
+      sentText: undefined,
       title: undefined,
       titledFrom: undefined,
     })

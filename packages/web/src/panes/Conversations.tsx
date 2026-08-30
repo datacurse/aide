@@ -17,6 +17,7 @@ import {
   captureKey,
   discardDraft,
   draftKey,
+  draftSubject,
   forgetDraftRun,
   idFromKey,
   markDraftSent,
@@ -166,12 +167,20 @@ function UnstartedRow({
   onStart: () => void
   onDiscard: () => void
 }) {
-  const firstLine = draft.text.trim().split("\n", 1)[0] ?? ""
-  // The name if it has one and it still describes what is in the box, and the
+  // What the row is about, which is the box until sending empties it and the
+  // message that went out after that — see `draftSubject`. Reading `draft.text`
+  // here is what made a chat you had just started read "New chat" for the two or
+  // three seconds before the SDK named it: you pressed send on a request you had
+  // written, and the row for it went blank in front of you.
+  const said = draftSubject(draft)
+  const firstLine = said.trim().split("\n", 1)[0] ?? ""
+  // The name if it has one and it still describes what was written, and the
   // first line otherwise — which is what this row showed before naming existed,
   // and what it falls back to the moment a parked request is edited.
   const preview = draftName(draft) ?? firstLine
   const written = draft.text.trim() !== "" || draft.attachments.length > 0
+  /** Sent, and a second or two from becoming a conversation — see `startedRunId`. */
+  const starting = draft.startedRunId !== undefined
   return (
     <div
       className={`group flex w-full items-center gap-2 border px-3 py-1.5 font-sans hover:bg-hover ${
@@ -184,7 +193,7 @@ function UnstartedRow({
         // What was actually parked, in full. The line above is a name a model
         // wrote once the request outgrew the column, so without this there is no
         // way to check it against your own words short of opening the chat.
-        title={draft.text || undefined}
+        title={said || undefined}
         className="flex min-w-0 flex-1 flex-col gap-0.5 text-left"
       >
         <span className="truncate text-[13px]">{preview || "New chat"}</span>
@@ -193,7 +202,11 @@ function UnstartedRow({
               a parked chat is the same list at an earlier age, and a date that
               moves between the two would be a date you have to hunt for. */}
           <span title={`Parked ${fullDate(draft.createdAt)}`}>{when(draft.createdAt)}</span>
-          <span>not sent yet</span>
+          {/* The same lie as the blank title, in the line underneath: a chat
+              whose first turn is in flight has plainly been sent. It says so
+              until the handoff lands and this row becomes the conversation,
+              which is where "has the repo" takes over. */}
+          <span>{starting ? "starting…" : "not sent yet"}</span>
           {draft.attachments.length > 0 && (
             <span>
               {draft.attachments.length} image{draft.attachments.length > 1 ? "s" : ""}
@@ -1647,7 +1660,11 @@ export function ConversationPane({
       // A first turn, from a chat that has no name yet. Written on the unsent
       // record so that walking away from this pane in the seconds before the SDK
       // names the session does not lose the handoff — see `startedRunId`.
-      if (!sessionId && draftId) markDraftSent(draftKey(projectId, draftId), id)
+      //
+      // With the message, because the box it came from was emptied by the press
+      // that sent it and the row in the list has nothing else left to show for
+      // those seconds — see `sentText`.
+      if (!sessionId && draftId) markDraftSent(draftKey(projectId, draftId), id, msg.text)
       return true
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
