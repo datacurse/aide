@@ -643,6 +643,28 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
     await q.setMaxThinkingTokens(on ? null : 0, "summarized")
   }
 
+  /**
+   * Resolved once `q` exists, which is later than it looks.
+   *
+   * `query()` pulls the first value out of `input()` from inside its own call,
+   * synchronously, so the generator's opening lines run BEFORE `const q` has
+   * been assigned. Touching `q` there is a temporal-dead-zone throw, the SDK
+   * turns a generator that threw into an abort of the whole query, and what
+   * comes out the other end is a run that died two seconds in saying "Operation
+   * aborted" with nothing else in its log — no `run.started`, no clue which line
+   * did it. That is measured, not reasoned about: a probe against the real SDK
+   * enters the body with `q` still undefined, and every turn sent with thinking
+   * off failed exactly this way.
+   *
+   * So anything in `input()` that speaks to the query waits for this first. The
+   * control request itself is fine that early — the same probe had the CLI
+   * accept `set_max_thinking_tokens` before a single message had gone in.
+   */
+  let queryCreated!: () => void
+  const queryReady = new Promise<void>((resolve) => {
+    queryCreated = resolve
+  })
+
   // Streaming input mode. `prompt` must be an AsyncIterable for control requests
   // (interrupt) to be available at all.
   //
@@ -650,6 +672,9 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
   // ends after its turn instead of waiting for more input. With it, the stream
   // stays open and the session survives between turns â see the field's comment.
   async function* input(): AsyncGenerator<SDKUserMessage> {
+    // The first line of the generator, and it has to stay the first line: see
+    // `queryReady`. Everything below this point may talk to `q`.
+    await queryReady
     // Before the first message goes in, for the same reason a follow-up's
     // settings are applied before its own: a turn sent first and configured
     // after is a turn that ran under the wrong setting.
@@ -968,6 +993,10 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
       },
     },
   })
+
+  // The generator above has been running since the middle of that call and is
+  // parked on this. See `queryReady`.
+  queryCreated()
 
   opts.onControl?.({
     interrupt: async () => {
