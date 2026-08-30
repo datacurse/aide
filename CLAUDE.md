@@ -95,9 +95,14 @@ Decisions already taken, which are not gaps to fill:
   the browser will not let the finish make a sound. So `hotUpdate` in
   `packages/web/vite-daemon.ts` applies nothing while `busy.chats` is above
   zero, and hands the reload to `packages/web/src/reload.ts`, which takes it
-  once the window has focus and the done alarm has been answered. Looking at the
-  code you loaded with until the turn is over is the price, and it is the cheap
-  half of the trade.
+  once the window has focus, the done alarm has been answered and nothing has
+  been typed for half a minute. That last condition is not politeness: the alarm
+  is silenced by any keydown, so without it the first character of your next
+  prompt was the signal that released the reload which then ate the sentence.
+  Drafts are flushed to IndexedDB and waited on before the page goes, because a
+  `pagehide` transaction is not guaranteed to commit. Looking at the code you
+  loaded with until the turn is over is the price, and it is the cheap half of
+  the trade.
 
 ## Commands
 

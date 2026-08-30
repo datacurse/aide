@@ -219,32 +219,66 @@ function schedule(key: string, row: Draft | null) {
   timer ??= setTimeout(flush, WRITE_DELAY_MS)
 }
 
-function flush() {
+/**
+ * Write the queue out now, and answer when it has actually landed.
+ *
+ * The promise is the point. A transaction opened from `pagehide` is not
+ * guaranteed to commit before the document is torn down, so the backstop below
+ * can lose the last few hundred milliseconds of typing — and aide is the thing
+ * choosing when the reload happens, so it can simply wait instead. See
+ * `flushDrafts` and `reload.ts`.
+ */
+function flush(): Promise<void> {
   if (timer !== null) {
     clearTimeout(timer)
     timer = null
   }
-  if (pending.size === 0) return
+  if (pending.size === 0) return Promise.resolve()
   const batch = [...pending]
   pending.clear()
-  void connect().then((db) => {
-    if (!db) return
-    try {
-      const store = db.transaction(STORE, "readwrite").objectStore(STORE)
-      for (const [key, row] of batch) {
-        if (row) store.put(row)
-        else store.delete(key)
-      }
-    } catch {
-      // A quota refusal, or a connection that went away. Nothing useful to say
-      // about it here — the draft is still in memory for this page.
-    }
-  })
+  return connect().then(
+    (db) =>
+      new Promise<void>((resolve) => {
+        if (!db) {
+          resolve()
+          return
+        }
+        try {
+          const tx = db.transaction(STORE, "readwrite")
+          const store = tx.objectStore(STORE)
+          for (const [key, row] of batch) {
+            if (row) store.put(row)
+            else store.delete(key)
+          }
+          // Settled on any outcome, not only on success. What the caller is
+          // asking is not "did this work" — it is about to reload either way —
+          // but "would waiting any longer help".
+          tx.oncomplete = () => resolve()
+          tx.onerror = () => resolve()
+          tx.onabort = () => resolve()
+        } catch {
+          // A quota refusal, or a connection that went away. Nothing useful to
+          // say about it here — the draft is still in memory for this page.
+          resolve()
+        }
+      }),
+  )
 }
 
-// The reload is the case this whole module exists for, so the last few
-// keystrokes must not still be sitting in the batch when it happens.
-window.addEventListener("pagehide", flush)
+/**
+ * Everything typed is on disk, or waiting longer would not put it there.
+ *
+ * For the one reload aide takes itself. The dev server holds page updates while
+ * a turn is answering and hands the reload over afterwards — which is to say it
+ * lands with a person sitting in front of the box, very possibly mid-word.
+ */
+export const flushDrafts = (): Promise<void> => flush()
+
+// A reload nobody announced — the dev server restarting on its own config, or
+// F5 — is the case this whole module exists for, so the last few keystrokes
+// must not still be sitting in the batch when it happens. Best effort by
+// nature: this is the path `flushDrafts` exists to avoid.
+window.addEventListener("pagehide", () => void flush())
 
 function commit(key: string, row: Draft | null) {
   const next = new Map(cache)
