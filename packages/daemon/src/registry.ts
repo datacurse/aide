@@ -2,7 +2,7 @@ import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { basename, resolve } from "node:path"
-import type { Project, ProjectDoc } from "@aide/protocol"
+import type { Project, ProjectDoc, SshHost } from "@aide/protocol"
 import { EMPTY_PROJECT_DOC } from "@aide/protocol"
 import {
   aideHome,
@@ -12,10 +12,31 @@ import {
   stateDir,
 } from "@aide/protocol/node"
 import { isGitRepo, repoRoot } from "./repo.js"
+import { remoteRepoRoot, scaffoldRemoteState } from "./ssh.js"
 
-/** Stable across re-adds: the same path always yields the same project id. */
-const projectId = (root: string) =>
-  createHash("sha1").update(resolve(root).toLowerCase()).digest("hex").slice(0, 12)
+/**
+ * Stable across re-adds: the same path on the same machine always yields the
+ * same project id.
+ *
+ * The host is part of the hash, and it has to be: `/root/code/app` exists on
+ * more than one machine, and without this those collide into a single registry
+ * entry — opening one would show the other's conversations and commit into the
+ * wrong checkout.
+ *
+ * A LOCAL project hashes exactly as it always did, `host` contributing nothing,
+ * so every id already in `registry.json` keeps its value. That is what makes
+ * this change need no migration; changing the local form would rename every
+ * project on disk and orphan its board entries.
+ *
+ * `resolve()` and `toLowerCase()` are for Windows path spelling and must not be
+ * applied to a remote root — POSIX paths are case-sensitive, and `/root/code`
+ * resolved against this machine becomes `C:\root\code`.
+ */
+export const projectIdFor = (root: string, host?: string) =>
+  createHash("sha1")
+    .update(host ? `${host}\u0000${root}` : resolve(root).toLowerCase())
+    .digest("hex")
+    .slice(0, 12)
 
 export async function listProjects(): Promise<Project[]> {
   try {
@@ -93,6 +114,19 @@ beside a chat.
  * Adding a project is `mkdir .aide`, not an import wizard. That is what makes
  * "works with any repo" real rather than aspirational.
  */
+/**
+ * What a fresh `.aide/` contains, as `[name, content]`.
+ *
+ * Shared with the remote add, which writes the same two files over ssh. A
+ * remote project scaffolded from a second copy of this text would be a second
+ * answer to "what is a project", and the brief is the first thing anybody
+ * reads.
+ */
+export const STATE_SEED: Array<[string, string]> = [
+  ["project.md", PROJECT_DOC],
+  ["README.md", STATE_README],
+]
+
 export async function scaffoldState(root: string): Promise<void> {
   // Directories only where something actually lands. Empty ones are worse than
   // absent ones: they promise a structure that does not exist and quietly shame
@@ -149,7 +183,7 @@ export async function addProject(inputPath: string): Promise<Project> {
   // Normalize to the repo root so adding a subdirectory does not create a second
   // registry entry for the same project.
   const root = (await repoRoot(abs)) ?? abs
-  const id = projectId(root)
+  const id = projectIdFor(root)
 
   const projects = await listProjects()
   const existing = projects.find((p) => p.id === id)
@@ -165,6 +199,50 @@ export async function addProject(inputPath: string): Promise<Project> {
     addedAt: new Date().toISOString(),
   }
   await scaffoldState(root)
+  await saveProjects([...projects, project])
+  return project
+}
+
+/**
+ * Add a project that lives on another machine.
+ *
+ * The same three steps the local add takes — is it a repository, normalize to
+ * its root, scaffold `.aide/` — each done over ssh, because the answers are
+ * facts about the far machine's disk and this one cannot see it.
+ *
+ * The agent is NOT checked for here. A machine with no `aide-agent` on it can
+ * still be registered, browsed and read; what it cannot do is run a turn, and
+ * that refusal comes from `SshRunner` with a sentence naming
+ * `pnpm deploy-agent`. Refusing the add instead would mean you cannot put a
+ * project in the rail until you have deployed to it, which inverts the order
+ * anybody actually works in.
+ */
+export async function addRemoteProject(host: SshHost, inputPath: string): Promise<Project> {
+  const root = await remoteRepoRoot(host, inputPath)
+  if (!root) {
+    throw new Error(
+      `not a git repository: ${inputPath} on ${host.alias} (aide reviews work as a diff, and snapshots the tree before each run, so it needs git)`,
+    )
+  }
+
+  const id = projectIdFor(root, host.alias)
+  const projects = await listProjects()
+  const existing = projects.find((p) => p.id === id)
+  if (existing) {
+    await scaffoldRemoteState(host, root, STATE_SEED)
+    return existing
+  }
+
+  const project: Project = {
+    id,
+    // The directory name, and the host beside it: two machines with a `code`
+    // checkout would otherwise put two identical rows in the rail.
+    name: `${root.split("/").filter(Boolean).pop() ?? root} · ${host.alias}`,
+    root,
+    host: host.alias,
+    addedAt: new Date().toISOString(),
+  }
+  await scaffoldRemoteState(host, root, STATE_SEED)
   await saveProjects([...projects, project])
   return project
 }

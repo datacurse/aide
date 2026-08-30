@@ -1,4 +1,23 @@
 /**
+ * The version of the daemon↔agent message protocol (`ToWorker`/`FromWorker`).
+ *
+ * A remote agent is deployed separately from the daemon that drives it, so the
+ * two WILL be different versions eventually. Skew that half-works is the
+ * dangerous kind — a field silently dropped, a checkpoint written by code that
+ * disagrees about what a turn boundary is — so the version is stated and a
+ * mismatch is refused out loud rather than discovered later.
+ *
+ * Here rather than beside those types in `daemon/src/worker/main.ts`, because
+ * both files that could host it write to a stream the moment they are imported:
+ * `deploy.ts` reading this constant from `stdio.ts` printed `{"type":"ready"}`
+ * onto its own stdout and exited instead of deploying. A version number has to
+ * be importable without starting an agent.
+ *
+ * Bump whenever those message types change shape.
+ */
+export const AGENT_PROTOCOL = 1
+
+/**
  * Conversations.
  *
  * A conversation is a Claude session, and aide did not invent the concept — the

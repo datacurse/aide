@@ -22,7 +22,8 @@ import { execFile } from "node:child_process"
 import { existsSync } from "node:fs"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { createHash } from "node:crypto"
+import { join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 import { chatModeFromSdk } from "@aide/protocol"
@@ -34,6 +35,8 @@ import { parseProjectDoc } from "@aide/protocol/node"
 import { planChecks } from "@aide/protocol"
 import { connectableHosts, parseSshConfig, sshTarget } from "@aide/protocol"
 import { cleanSshError } from "./ssh.js"
+import type { Runner } from "./runner.js"
+import type { FromWorker, ToWorker } from "./worker/main.js"
 import {
   buildGraph,
   commitDetail,
@@ -1338,6 +1341,153 @@ Host tg
   // Anything unrecognised still reaches the person, on one line.
   const other = cleanSshError("ssh: connect to host tg port 22: Connection timed out\n", host)
   check("an unclassified error is passed through", other === "tg: ssh: connect to host tg port 22: Connection timed out")
+}
+
+// ---------------------------------------------------------------------------
+// The runner seam
+// ---------------------------------------------------------------------------
+//
+// `chat.ts` drives its agent through `Runner`, so a project on another machine
+// can put an ssh transport behind the same protocol. What is asserted here is
+// the property that makes that possible and that a refactor could quietly lose:
+// the interface is satisfiable by something that is NOT a child process.
+//
+// This is a compile-time claim as much as a runtime one — if `Runner` ever grows
+// a member only a local `ChildProcess` can provide (a pid, a stdio handle), this
+// object stops type-checking, which is the point at which the seam has closed.
+console.log("\nrunner seam")
+{
+  const outbox: ToWorker[] = []
+  // Typed through a holder rather than a bare `let`: assigning the callback
+  // inside `onMessage` and reading it later narrows a plain local to `never`.
+  const sink: { deliver: ((msg: FromWorker) => void) | null } = { deliver: null }
+  let killed = false
+
+  const fake: Runner = {
+    send: (msg) => outbox.push(msg),
+    onMessage: (fn) => {
+      sink.deliver = fn
+    },
+    onError: () => {},
+    onExit: () => {},
+    kill: () => {
+      killed = true
+    },
+  }
+
+  fake.send({ cmd: "interrupt" })
+  check("a runner needs no process to send", outbox[0]?.cmd === "interrupt")
+
+  // Both directions, because a transport that can only talk is not a seam.
+  const inbox: FromWorker[] = []
+  fake.onMessage((m) => inbox.push(m))
+  sink.deliver?.({ type: "ready" })
+  check("and none to be heard from", inbox[0]?.type === "ready")
+
+  fake.kill()
+  // `kill()` rather than a pid, which is the one thing a remote runner could not
+  // honestly provide: `killTree` is taskkill against a LOCAL process id.
+  check("and it is stopped without a pid", killed)
+}
+
+{
+  // The framing an ssh transport rides on. A pipe is a byte stream, so the one
+  // thing that must hold is that a message survives being cut anywhere — this
+  // is the bug that works on short messages and fails on a pasted screenshot.
+  const frame = (msgs: FromWorker[]) => msgs.map((m) => `${JSON.stringify(m)}\n`).join("")
+  const messages: FromWorker[] = [
+    { type: "ready" },
+    { type: "done", runId: "r1", interrupted: false },
+    // A payload with newlines and quotes IN it, which is what makes the frame
+    // ambiguous if anything but JSON string-escaping is trusted.
+    { type: "event", runId: "r2", body: { type: "assistant.text", text: 'line\none"two', parentToolUseId: null } },
+  ]
+  const wire = frame(messages)
+  check("a newline never appears raw inside a framed message", wire.split("\n").length === 4, `${wire.split("\n").length - 1} lines`)
+
+  // Reassemble it one byte at a time — the worst case a chunked pipe can hand
+  // over, and the one a naive `chunk.split("\n")` fails.
+  const got: FromWorker[] = []
+  let buffer = ""
+  for (const ch of wire) {
+    buffer += ch
+    let cut = buffer.indexOf("\n")
+    while (cut !== -1) {
+      const line = buffer.slice(0, cut).trim()
+      buffer = buffer.slice(cut + 1)
+      if (line) got.push(JSON.parse(line) as FromWorker)
+      cut = buffer.indexOf("\n")
+    }
+  }
+  check("byte-at-a-time delivery reassembles every message", got.length === 3, `${got.length} of 3`)
+  const text = got[2]?.type === "event" && got[2].body.type === "assistant.text" ? got[2].body.text : ""
+  check("and a payload's own newline survives it", text === 'line\none"two', JSON.stringify(text))
+}
+
+// ---------------------------------------------------------------------------
+// Project ids, once a project can live somewhere else
+// ---------------------------------------------------------------------------
+//
+// The id is a content hash of where a project is, and "where" grew a second
+// half. What is asserted is the pair that makes the registry correct: two
+// machines must not collide, and a LOCAL id must not have changed — every entry
+// already in `registry.json` keeps its value, and its board links with it.
+// Batching several reads into one round trip is what makes a remote project's
+// rail usable, and the delimiter is the whole of its correctness. Asserted
+// LOCALLY — `gitBatch` runs the commands in parallel here rather than over ssh —
+// so what is pinned is that both paths answer identically. The remote form's own
+// hazard is that `git status -z` ends in a NUL with no newline, so a delimiter
+// that adds a byte of its own splits the output one byte early and the rail's
+// file list comes back mangled; that is why the remote script uses `printf %s`
+// and not `echo`.
+console.log("\nbatched reads")
+{
+  const { gitBatch } = await import("./git.js")
+  const [branch, statusZ, bogus] = await gitBatch(root, [
+    ["rev-parse", "--abbrev-ref", "HEAD"],
+    ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    ["rev-parse", "--verify", "refs/heads/does-not-exist"],
+  ])
+  check("a batch answers each command in order", (branch ?? "").trim() === "main", (branch ?? "").trim())
+  // The one that must survive a delimiter: NUL-separated, no trailing newline.
+  const named = (statusZ ?? "").split("\0").filter(Boolean)
+  check(
+    "NUL-separated output is not truncated or split early",
+    named.every((entry) => /^.. \S/.test(entry)),
+    named.join(" | ").slice(0, 60),
+  )
+  check(
+    "and it agrees with the same call made alone",
+    named.length === (await repoStatus(root)).length,
+  )
+  // A failing command must not take the batch down with it — the questions are
+  // independent, and "no upstream" must not cost you the branch name.
+  check("a failing command yields empty rather than aborting", (bogus ?? "").trim() === "")
+}
+
+console.log("\nproject identity")
+{
+  const { projectIdFor } = await import("./registry.js")
+
+  const a = projectIdFor("/root/code", "tg")
+  const b = projectIdFor("/root/code", "orangepi")
+  check("the same path on two machines is two projects", a !== b, `${a} vs ${b}`)
+  check("and each is stable", projectIdFor("/root/code", "tg") === a)
+
+  // The local form is unchanged: hostless, resolved, lower-cased. If this ever
+  // fails, every project on disk has been renamed.
+  const local = projectIdFor("C:/Users/loki/code/aide")
+  const expected = createHash("sha1")
+    .update(resolve("C:/Users/loki/code/aide").toLowerCase())
+    .digest("hex")
+    .slice(0, 12)
+  check("a local id is what it always was", local === expected, local)
+  check("and differs from the same path claimed by a host", local !== projectIdFor("C:/Users/loki/code/aide", "tg"))
+
+  // A remote root is NOT resolved against this filesystem — `resolve("/root")`
+  // on Windows is `C:\root` — nor lower-cased, because POSIX paths are
+  // case-sensitive and `/root/Code` is a different directory from `/root/code`.
+  check("a remote path keeps its case", projectIdFor("/root/Code", "tg") !== projectIdFor("/root/code", "tg"))
 }
 
 console.log(`\n${failures === 0 ? "all checks passed" : `${failures} FAILED`}`)

@@ -32,9 +32,14 @@ record. They are all rows in the same list, in that order of urgency.
 | What is left to commit, and the history under it | `packages/web/src/panes/Pending.tsx` |
 | Where the graph's lines go, and the SVG that draws them | `packages/web/src/graph.ts`, `packages/web/src/GitGraph.tsx` |
 | Branch, history and lanes, read off the repo | `packages/daemon/src/repo.ts` |
+| Which machine a git call lands on, and batching them | `packages/daemon/src/git.ts` |
 | The folder dialog behind `add`, and why it is the daemon's | `packages/daemon/src/picker.ts` |
 | The machines in `~/.aide/ssh_config`, and walking one | `packages/protocol/src/ssh.ts`, `packages/daemon/src/ssh.ts` |
 | One agent per project, the lock, warm sessions, a turn run inside a commit | `packages/daemon/src/chat.ts` |
+| Where a run's agent executes: a fork here, or `aide-agent` over ssh | `packages/daemon/src/runner.ts` |
+| The agent loop itself, with no opinion about its transport | `packages/daemon/src/worker/loop.ts` |
+| That loop bound to IPC, and to a pipe | `packages/daemon/src/worker/main.ts`, `worker/stdio.ts` |
+| Putting `aide-agent` on a machine — `pnpm deploy-agent <host>` | `packages/daemon/src/deploy.ts` |
 | The SDK call, the system prompt, permissions | `packages/daemon/src/agent.ts` |
 | Snapshots and turn boundaries under `refs/aide/` | `packages/daemon/src/checkpoint.ts` |
 | What is uncommitted, what a conversation changed | `packages/daemon/src/changes.ts` |
@@ -59,20 +64,72 @@ Decisions already taken, which are not gaps to fill:
   many there are — so it means the same thing tomorrow. Numbering rows 1..30 from
   the top of the page is the obvious cheap version and is wrong: it renumbers
   every commit in the project every time you make one.
-- **A machine list, and no remote runs yet.** `~/.aide/ssh_config` is aide's own
+- **The lane talks to a `Runner`, not to a child process.** `chat.ts` never
+  called the SDK — it forks `worker/main.ts` and exchanges `ToWorker` /
+  `FromWorker` messages with it, and those are plain objects through one
+  `process.send`, with no handles. So the protocol was already serializable and
+  the only thing missing was permission to put something else behind it.
+  `runner.ts` names that seam: `send`, `onMessage`, `onError`, `onExit`, `kill`.
+  `LocalRunner` is the same fork doing the same thing, and a remote project
+  would speak the same messages over `ssh <host> aide-agent --stdio`. The
+  interface is the small surface `chat.ts` actually uses rather than a
+  `ChildProcess` with the unused parts left in, because every member has to be
+  one a remote implementation can honestly provide — `kill()` and not a pid,
+  since `killTree` is `taskkill` against a LOCAL process id. `pnpm smoke`
+  asserts a non-process object still satisfies it, which is the check that
+  fails the moment the seam closes again. See `.aide/specs/0003`.
+- **One agent loop, two transports.** `worker/loop.ts` holds it and knows
+  nothing about how it is spoken to; `worker/main.ts` binds it to `process.send`
+  and `worker/stdio.ts` binds it to newline-framed JSON on a pipe. Two
+  implementations would drift, and the drift would surface as a remote
+  conversation rendering differently from a local one. `stdio.ts` reassigns
+  `console.log` to stderr, because stdout IS the protocol and one stray log
+  corrupts the stream — silently, as prose in the middle of a JSON line.
+- **`pnpm deploy-agent <host>` ships it, and `npm install` finishes the job.**
+  Not a bundle: the SDK resolves a native binary through optional dependencies,
+  so the far side installs regardless, and bundling would mean adding a bundler
+  to a package with four dependencies. The protocol package is placed under
+  `node_modules/` AFTER that install, because npm prunes what it does not know
+  about. A remote agent reports `protocol` on `ready` and `SshRunner` refuses a
+  mismatch before the first turn — verified end to end against a real host,
+  including a model turn that cost $0.08.
+- **A project can live on another machine.** `~/.aide/ssh_config` is aide's own
   file in OpenSSH's format — not `~/.ssh/config`, which aide never writes and
   only partly understands (no `Match`, no `ProxyJump`, no `Include`, no
   `%`-tokens; a picker that silently disagreed with `ssh` would be worse than a
   smaller one that says so). The `ssh` button lists those machines, walks them,
-  and marks which directories are repositories. It then REFUSES the add, in front
-  of the person who pressed it, because a run spawns the Agent SDK's `claude`
-  binary for this platform with `cwd` set to the project root and every git call
-  is `execFile("git", ["-C", root])` — a remote root would be read as a local
-  path and fail at the first checkpoint. Registering it anyway would put a row in
-  the rail that cannot run, and the reason would surface as a path error that
-  reads as a bug in aide. What the rest would take is written out at the foot of
-  `daemon/src/ssh.ts`; the short version is that it is an aide agent running on
-  the far machine, not a flag on this one.
+  marks which directories are repositories, and adds one: `Project.host` names
+  the machine and `root` is a path on IT, not here.
+- **git goes where the files are, decided by `RepoRef`.** Every git call already
+  took the root as its first argument, so making THAT carry the host routes
+  `repo.ts`, `changes.ts`, `checkpoint.ts` and the verify commands to the right
+  machine without any of them knowing there is more than one. A bare string
+  still compiles and still means "here", which is what kept the local path — and
+  `pnpm smoke` — untouched. `repoOf(project)` is what callers pass; passing
+  `project.root` for a remote project is the mistake that produced "cannot
+  change to '/root/code/…'" in the rail.
+- **A remote read is batched, because a connection costs 1.4s.** Windows OpenSSH
+  cannot multiplex (no Unix sockets), so the cost is per CONNECTION and the only
+  fix is fewer of them. `gitBatch` runs several independent reads down one ssh
+  call: `overview` went 9.8s → 1.75s against `tg`, and `pending` — which the
+  always-visible rail polls — halved. The delimiter uses `printf %s` and not
+  `echo`, because `git status -z` ends in a NUL with no newline: a separator
+  that contributes a byte of its own splits that output one byte early, and the
+  rail's file list comes back mangled. `pnpm smoke` pins it.
+- **A project's id hashes the host as well as the path.** `/root/code/app`
+  exists on more than one machine, and without the host those collide into a
+  single registry entry — you would open one and see the other's conversations.
+  A LOCAL project hashes exactly as it always did, so every id already in
+  `registry.json` keeps its value and its board links: `pnpm smoke` asserts that
+  local form byte-for-byte, because changing it would silently rename every
+  project on disk. A remote root is not `resolve()`d or lower-cased either —
+  `resolve("/root")` on Windows is `C:\root`, and POSIX paths are case-sensitive.
+- **Adding a remote project does not require an agent on it.** The add checks
+  it is a repository and scaffolds `.aide/`, both over ssh; it does not check
+  for `aide-agent`. A machine can be browsed and registered before it has been
+  deployed to, and the refusal for a missing or mismatched agent comes from
+  `SshRunner` at the first turn, naming `pnpm deploy-agent <host>`. Refusing the
+  add instead would invert the order anybody works in.
 - **No capability file.** There was a model-maintained `.aide/spec.md`; it cost
   more wall-clock than the rest of a commit, nothing read it, and it corrupted
   itself. What the project does is discoverable by reading the code, and what it
@@ -164,7 +221,11 @@ CI=true pnpm typecheck     # all three packages
 CI=true pnpm smoke         # git plumbing + shell policy, against a throwaway repo
 CI=true pnpm smoke:queue   # chat lane, lock and checkpoints, with a stub worker
 CI=true pnpm build         # the web bundle
+pnpm deploy-agent <host>   # put aide-agent on a machine in ~/.aide/ssh_config
 ```
+
+`deploy-agent` talks to another machine and is not part of the checks — it is
+run by hand when the agent protocol or anything it ships has changed.
 
 `CI=true` is set for you in the run environment; it is written here because pnpm
 otherwise stops to ask before purging a modules directory and nobody is there to

@@ -19,10 +19,16 @@
  * runs a command on a machine somewhere else — and because a remote listing has
  * a failure mode the local dialog does not have: it can hang.
  */
-import { execFile } from "node:child_process"
+import { execFile, spawn } from "node:child_process"
 import { readFile, writeFile, mkdir } from "node:fs/promises"
 import type { SshHost, SshListing } from "@aide/protocol"
-import { SSH_CONFIG_TEMPLATE, parseSshConfig, connectableHosts, sshTarget } from "@aide/protocol"
+import {
+  SSH_CONFIG_TEMPLATE,
+  STATE_DIR,
+  parseSshConfig,
+  connectableHosts,
+  sshTarget,
+} from "@aide/protocol"
 import { aideHome, sshConfigPath } from "@aide/protocol/node"
 
 /**
@@ -249,6 +255,80 @@ export async function listRemoteDirectories(
     .map((name) => ({ name, isRepo: repos.has(name) }))
 
   return { host: host.alias, path: absolute, directories }
+}
+
+/**
+ * The repo root at or above a remote path, and whether there is one at all.
+ *
+ * `--show-toplevel` rather than testing for a `.git` directory, for the same
+ * reason `addProject` does it locally: adding a subdirectory must land the same
+ * registry entry as adding the root, or one project becomes two.
+ *
+ * Returns null when the path is not in a repository, which the caller turns
+ * into the same refusal a local non-repo gets.
+ */
+export async function remoteRepoRoot(host: SshHost, path: string): Promise<string | null> {
+  try {
+    const out = await ssh(host, [
+      "git",
+      "-C",
+      shellQuote(path),
+      "rev-parse",
+      "--show-toplevel",
+    ])
+    return out.trim().split(/\r?\n/)[0]?.trim() || null
+  } catch {
+    // A non-repository exits non-zero, which is an answer rather than a fault.
+    // A genuinely broken connection has already been reported by the listing
+    // that got us here.
+    return null
+  }
+}
+
+/**
+ * `mkdir .aide` on the far side, and the same two seed files a local add writes.
+ *
+ * The content comes from `registry.ts` rather than being duplicated here: a
+ * remote project whose `project.md` differed from a local one would be a second
+ * source of truth for what a project is, and the scaffold is the first thing
+ * anybody reads.
+ *
+ * Written through stdin, so a document full of quotes and backticks never has
+ * to survive a shell. `test -f ||` keeps it non-destructive — a project already
+ * carrying a brief must not have it overwritten by being re-added.
+ */
+export async function scaffoldRemoteState(
+  host: SshHost,
+  root: string,
+  files: Array<[name: string, content: string]>,
+): Promise<void> {
+  const dir = `${root}/${STATE_DIR}`
+  await ssh(host, ["mkdir", "-p", shellQuote(dir)])
+  for (const [name, content] of files) {
+    const path = shellQuote(`${dir}/${name}`)
+    await sshWithInput(host, `test -f ${path} || cat > ${path}`, content)
+  }
+}
+
+/** One ssh call with a body on stdin. `execFile` cannot supply one. */
+function sshWithInput(host: SshHost, remoteCommand: string, input: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("ssh", sshArgs(host, ["sh", "-c", shellQuote(remoteCommand)]), {
+      windowsHide: true,
+      stdio: ["pipe", "ignore", "pipe"],
+    })
+    let stderr = ""
+    child.stderr?.on("data", (b: Buffer) => {
+      stderr += b.toString()
+    })
+    child.on("error", reject)
+    child.on("exit", (code) =>
+      code === 0
+        ? resolve()
+        : reject(new Error(cleanSshError(stderr.trim() || `ssh exited ${code}`, host))),
+    )
+    child.stdin?.end(input)
+  })
 }
 
 /**

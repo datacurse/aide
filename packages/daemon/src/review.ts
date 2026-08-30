@@ -4,6 +4,7 @@ import { commitRun, recentSubjects, treeChanges, withSessionTrailer } from "./ch
 import { readCheckpoint } from "./checkpoint.js"
 import type { HeldTurnOutcome } from "./chat.js"
 import { CONFIG } from "./config.js"
+import { repoOf } from "./git.js"
 import { draftCommitMessage } from "./helper.js"
 import { runChecks, type CheckOutcome } from "./verify.js"
 
@@ -62,7 +63,7 @@ export async function conversationBaseline(
   project: Project,
   sessionId: string,
 ): Promise<{ checkpoint: string } | null> {
-  const found = await readCheckpoint(project.root, sessionId)
+  const found = await readCheckpoint(repoOf(project), sessionId)
   if (!found) return null
   return { checkpoint: found.sha }
 }
@@ -199,7 +200,7 @@ export async function commitWorkingTree(
   emit({ type: "commit.step", label: "reading what is uncommitted" })
   // One pass for the patch, the stat and the paths — `treeChanges` stages into a
   // scratch index to answer all three, and that staging is the expensive part.
-  let changes = await treeChanges(project.root)
+  let changes = await treeChanges(repoOf(project))
   if (!changes.diff.trim()) throw new Error("there is nothing uncommitted in this project")
 
   // BEFORE the drafting, which is the only part of a commit that costs money.
@@ -253,7 +254,7 @@ export async function commitWorkingTree(
     // it would check the old paths, draft a message from the old diff, and stage
     // a list that does not include the file the fix created.
     emit({ type: "commit.step", label: "reading what is uncommitted, after the fix" })
-    changes = await treeChanges(project.root)
+    changes = await treeChanges(repoOf(project))
     if (!changes.diff.trim()) {
       throw new Error("the fix left nothing uncommitted — nothing was committed")
     }
@@ -266,7 +267,7 @@ export async function commitWorkingTree(
     prompt: "",
     diffStat: changes.stat,
     diff: changes.diff,
-    recentSubjects: await recentSubjects(project.root),
+    recentSubjects: await recentSubjects(repoOf(project)),
     // Streamed, so this step is watched rather than waited out.
     onText: (text) => opts.delta({ kind: "text", text }),
   })
@@ -350,7 +351,7 @@ async function verifyTree(
   }
   if (plan.run.length === 0) return null
 
-  const { failed } = await runChecks(plan.run.map((c) => c.command), opts.project.root, {
+  const { failed } = await runChecks(plan.run.map((c) => c.command), repoOf(opts.project), {
     stopped: opts.stopped,
     // Both halves, so the transcript can draw the check while it runs rather
     // than only once it is over. A commit spends most of its wall clock in here.
@@ -391,7 +392,7 @@ export interface CommitTreeOptions {
  */
 export async function commitTree(opts: CommitTreeOptions): Promise<string> {
   return await commitRun(
-    opts.project.root,
+    repoOf(opts.project),
     opts.paths,
     withSessionTrailer(opts.message, opts.sessionId),
   )

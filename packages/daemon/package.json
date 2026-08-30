@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "deploy-agent": "tsx src/deploy.ts",
     "probe": "tsx src/probe.ts",
     "smoke": "tsx src/smoke.ts",
     "smoke:queue": "tsx src/smoke-queue.ts",

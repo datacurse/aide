@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "pnpm --filter @aide/web dev",
+    "deploy-agent": "pnpm --filter @aide/daemon deploy-agent",
     "probe": "pnpm --filter @aide/daemon probe",
     "smoke": "pnpm --filter @aide/daemon smoke",
     "smoke:queue": "pnpm --filter @aide/daemon smoke:queue",

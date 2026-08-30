@@ -1,6 +1,11 @@
 import { spawn } from "node:child_process"
+import { sshConfigPath } from "@aide/protocol/node"
 import { CONFIG } from "./config.js"
+import { refHost, refRoot, type RepoRef } from "./git.js"
 import { killTree } from "./proc.js"
+
+/** See `gitCommand` in `git.ts`: ssh re-parses the joined argv with a shell. */
+const shellQuote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`
 
 /**
  * Running a project's own checks, so a commit is measured against something
@@ -75,16 +80,42 @@ function tail(text: string): string {
  */
 export function runCheck(
   command: string,
-  root: string,
+  root: RepoRef,
   timeoutMs = CHECK_TIMEOUT_MS,
 ): { done: Promise<CheckOutcome>; stop: () => void } {
   const startedAt = Date.now()
-  const child = spawn(command, {
-    cwd: root,
-    shell: true,
-    windowsHide: true,
-    env: { ...process.env, ...CONFIG.runEnv },
-  })
+  const host = refHost(root)
+  // A remote project's checks run on the remote machine, for the same reason its
+  // git does: `pnpm typecheck` is a statement about the tree it runs in, and
+  // running it here would either fail outright or — worse — pass against this
+  // repository and report a green gate for code nobody checked.
+  //
+  // `cd` and then the command, so a relative path in a check means what it means
+  // locally. The env goes as a prefix rather than through ssh's `SendEnv`, which
+  // needs the far sshd to have opted in; see `gitCommand`.
+  const child = host
+    ? spawn(
+        "ssh",
+        [
+          "-o",
+          "BatchMode=yes",
+          "-F",
+          sshConfigPath(),
+          host,
+          [
+            `cd ${shellQuote(refRoot(root))} &&`,
+            ...Object.entries(CONFIG.runEnv).map(([k, v]) => `${k}=${shellQuote(v)}`),
+            command,
+          ].join(" "),
+        ],
+        { windowsHide: true },
+      )
+    : spawn(command, {
+        cwd: refRoot(root),
+        shell: true,
+        windowsHide: true,
+        env: { ...process.env, ...CONFIG.runEnv },
+      })
 
   let out = ""
   // One buffer for both streams rather than two: a compiler writes errors to
@@ -156,7 +187,7 @@ export interface VerifyOutcome {
  */
 export async function runChecks(
   commands: readonly string[],
-  root: string,
+  root: RepoRef,
   opts: {
     /**
      * About to spawn this one. Called after the stop check, so a run that is

@@ -156,6 +156,12 @@ export const api = {
    */
   sshList: (host: string, path: string) =>
     call<SshListing>("/api/ssh/list", { method: "POST", body: JSON.stringify({ host, path }) }),
+  /** Register a repository that lives on one of those machines. */
+  addRemoteProject: (host: string, path: string) =>
+    call<Project>("/api/ssh/projects", {
+      method: "POST",
+      body: JSON.stringify({ host, path }),
+    }),
   removeProject: (id: string) => call<void>(`/api/projects/${id}`, { method: "DELETE" }),
 
   events: (runId: string, fromSeq = 0) =>

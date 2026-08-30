@@ -15,11 +15,22 @@
 export interface Project {
   id: string
   name: string
-  /** Absolute path to the git repo root. */
+  /** Absolute path to the git repo root, ON ITS OWN MACHINE. */
   root: string
+  /**
+   * The machine it lives on: an alias in `~/.aide/ssh_config`.
+   *
+   * Absent means this one, which is what every project written before remote
+   * ones existed means — so the registry needs no migration and a local project
+   * keeps exactly the shape it had.
+   */
+  host?: string
   /** ISO 8601. */
   addedAt: string
 }
+
+/** Where a project's files are. `null` is this machine. */
+export const projectHost = (project: Project): string | null => project.host ?? null
 
 /**
  * What the machine's own folder dialog came back with.

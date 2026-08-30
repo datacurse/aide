@@ -1,4 +1,3 @@
-import { fork, type ChildProcess } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { fileURLToPath } from "node:url"
 import type {
@@ -11,6 +10,7 @@ import type {
   RunEventBody,
   RunStatus,
 } from "@aide/protocol"
+import { sshConfigPath } from "@aide/protocol/node"
 import type { FollowUpTurn, RunAgentOptions } from "./agent.js"
 import {
   adoptCheckpoint,
@@ -22,14 +22,24 @@ import {
 } from "./checkpoint.js"
 import { CONFIG } from "./config.js"
 import type { EventLog } from "./eventlog.js"
-import { git, gitOr } from "./git.js"
-import { killTree, relayWorkerOutput } from "./proc.js"
+import { git, gitOr, refRoot, repoOf, type RepoRef } from "./git.js"
 import { readProjectDoc } from "./registry.js"
+import { LocalRunner, SshRunner, type Runner } from "./runner.js"
 import { currentSourceId, staleSince } from "./source.js"
 import type { FromWorker, ToWorker } from "./worker/main.js"
 
 const WORKER =
   process.env["AIDE_WORKER"] ?? fileURLToPath(new URL("./worker/main.ts", import.meta.url))
+
+/**
+ * Where `pnpm deploy-agent` puts the agent on a remote machine.
+ *
+ * An absolute path with `~` expanded by the remote shell. NOT a bare name:
+ * `ssh host <command>` gets no login shell, so `~/.local/bin` and friends are
+ * not on PATH — a lesson from `claude` itself, which is installed there on `tg`
+ * and is "not found" over ssh while working when typed by hand.
+ */
+const REMOTE_AGENT = process.env["AIDE_REMOTE_AGENT"] ?? "$HOME/.aide/agent/aide-agent"
 
 /**
  * Chat turns, and the lock that keeps them to one at a time.
@@ -185,10 +195,23 @@ interface TurnRecord extends Omit<ChatTurn, "blocked"> {
  * request when its setting actually changed.
  */
 interface SessionWorker {
-  child: ChildProcess
+  /**
+   * Where this session's agent is running, and how to talk to it.
+   *
+   * A `Runner` rather than a `ChildProcess` so that the lane below is agnostic
+   * about which machine that is — see `runner.ts`. Everything in this file
+   * treats it as a mailbox with a kill switch, which is all it ever needed.
+   */
+  runner: Runner
   projectId: string
-  /** The project root, which is also where the agent runs. */
-  root: string
+  /**
+   * The project's repository, which is also where the agent runs.
+   *
+   * A `RepoRef` rather than a path, so the checkpoints this file takes go to the
+   * machine holding the files. A bare root here would be a Linux path handed to
+   * Windows git for every remote turn.
+   */
+  root: RepoRef
   /** null until the SDK's init message names it. */
   sessionId: string | null
   mode: ChatMode
@@ -315,7 +338,11 @@ export class ChatLane {
     for (const worker of this.#workers) {
       if (worker.sessionId !== opts.sessionId) continue
       if (worker.closing || worker.turn) return null
-      if (worker.projectId !== opts.project.id || worker.root !== opts.project.root) return null
+      // `refRoot`, because `worker.root` is now a ref and comparing an object
+      // to a string is always false — every warm session would be discarded and
+      // every message would pay a cold start.
+      if (worker.projectId !== opts.project.id || refRoot(worker.root) !== opts.project.root)
+        return null
       if (worker.projectDoc !== projectDoc) return null
       return worker
     }
@@ -728,7 +755,7 @@ export class ChatLane {
     worker.effort = opts.effort
     worker.thinking = opts.thinking
 
-    worker.child.send({ cmd: "turn", turn } satisfies ToWorker)
+    worker.runner.send({ cmd: "turn", turn } satisfies ToWorker)
   }
 
   /**
@@ -834,15 +861,22 @@ export class ChatLane {
       ...(opts.sessionId ? { resume: opts.sessionId } : {}),
     }
 
-    const child = fork(WORKER, [], {
-      execArgv: ["--import", "tsx"],
-      stdio: ["ignore", "pipe", "pipe", "ipc"],
-    })
+    // The one line that decides which machine this conversation runs on.
+    // Everything below is identical either way — the lock, the turn record, the
+    // event handlers — because both sides of this speak the same protocol.
+    const runner: Runner = project.host
+      ? new SshRunner({
+          host: project.host,
+          configPath: sshConfigPath(),
+          agentPath: REMOTE_AGENT,
+          runId,
+        })
+      : new LocalRunner(WORKER, runId)
 
     const worker: SessionWorker = {
-      child,
+      runner,
       projectId: project.id,
-      root: project.root,
+      root: repoOf(project),
       sessionId: opts.sessionId,
       mode: opts.mode,
       effort: opts.effort,
@@ -861,16 +895,13 @@ export class ChatLane {
     record.worker = worker
     worker.turn = record
 
-    // Forward the worker's own output. Without this the pipes opened above are
-    // never drained: everything the worker or the SDK writes is swallowed, and a
-    // chatty child eventually BLOCKS on a full pipe buffer (64KB on Windows)
-    // with no indication why. Prefixed because several workers share this stream.
-    relayWorkerOutput(child, runId)
+    // Draining the worker's stdout and stderr is `LocalRunner`'s job now, since
+    // it is the thing that opened those pipes — and a remote runner has no such
+    // pipes to drain.
 
-    child.on("message", (raw: unknown) => {
-      const msg = raw as FromWorker
+    runner.onMessage((msg) => {
       if (msg.type === "ready") {
-        child.send({ cmd: "start", job } satisfies ToWorker)
+        runner.send({ cmd: "start", job } satisfies ToWorker)
         return
       }
       if (msg.type === "closed") {
@@ -971,11 +1002,11 @@ export class ChatLane {
       }
     })
 
-    child.on("error", (err) => {
+    runner.onError((err) => {
       this.#retire(worker, `worker error: ${err.message}`)
     })
 
-    child.on("exit", (code, signal) => {
+    runner.onExit((code, signal) => {
       this.#retire(
         worker,
         `the turn ended without a result (code ${code}, signal ${signal ?? "none"})`,
@@ -1093,12 +1124,12 @@ export class ChatLane {
       worker.idle = null
       if (worker.turn) return
       worker.closing = true
-      worker.child.send({ cmd: "close" } satisfies ToWorker)
+      worker.runner.send({ cmd: "close" } satisfies ToWorker)
       // The close is cooperative and the worker exits on its own; this is the
       // backstop for one that does not, so an evicted session cannot leak a
       // process for the life of the daemon.
       setTimeout(() => {
-        if (this.#workers.has(worker)) killTree(worker.child)
+        if (this.#workers.has(worker)) worker.runner.kill()
       }, this.#closeGraceMs).unref?.()
     }, this.#idleMs)
     // A warm session must never be the reason the daemon cannot exit.
@@ -1142,7 +1173,7 @@ export class ChatLane {
     // A turn still installing dependencies has no worker and no pending calls,
     // so the guard above already returned. `?.` covers the ordering rather than
     // a real case.
-    record.worker?.child.send({ cmd: "permission", requestId, allowed } satisfies ToWorker)
+    record.worker?.runner.send({ cmd: "permission", requestId, allowed } satisfies ToWorker)
     this.log.append(runId, {
       type: "permission.resolved",
       requestId,
@@ -1173,7 +1204,7 @@ export class ChatLane {
     // it starts one. Nor does a held run, unless it is part way through the fix
     // `turnUnderHold` gave it — in which case this is what stops the agent, and
     // the flag above is what stops the commit that was waiting on it.
-    record.worker?.child.send({ cmd: "interrupt" } satisfies ToWorker)
+    record.worker?.runner.send({ cmd: "interrupt" } satisfies ToWorker)
     return true
   }
 
@@ -1188,8 +1219,8 @@ export class ChatLane {
       worker.closing = true
       if (worker.idle) clearTimeout(worker.idle)
       worker.idle = null
-      worker.child.send({ cmd: "interrupt" } satisfies ToWorker)
-      killTree(worker.child)
+      worker.runner.send({ cmd: "interrupt" } satisfies ToWorker)
+      worker.runner.kill()
     }
     this.#workers.clear()
     this.#turns.clear()

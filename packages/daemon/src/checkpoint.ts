@@ -1,4 +1,4 @@
-import { git, gitOr, withWorkingTreeIndex } from "./git.js"
+import { git, gitOr, withWorkingTreeIndex, type RepoRef } from "./git.js"
 
 /**
  * A snapshot of the working tree, taken before an agent is allowed to touch it.
@@ -72,7 +72,7 @@ export function checkpointRef(key: string): string {
  * — a project added to aide before its first commit — so it snapshots parentless
  * rather than refusing.
  */
-export async function takeCheckpoint(root: string, key: string): Promise<Checkpoint> {
+export async function takeCheckpoint(root: RepoRef, key: string): Promise<Checkpoint> {
   const ref = checkpointRef(key)
 
   const tree = await withWorkingTreeIndex(root, async (gitTemp) =>
@@ -96,7 +96,7 @@ export async function takeCheckpoint(root: string, key: string): Promise<Checkpo
   return { sha, ref }
 }
 
-export async function readCheckpoint(root: string, key: string): Promise<Checkpoint | null> {
+export async function readCheckpoint(root: RepoRef, key: string): Promise<Checkpoint | null> {
   let ref: string
   try {
     ref = checkpointRef(key)
@@ -123,7 +123,7 @@ export async function readCheckpoint(root: string, key: string): Promise<Checkpo
  * message's work and silently drop everything the earlier turns wrote.
  */
 export async function adoptCheckpoint(
-  root: string,
+  root: RepoRef,
   fromKey: string,
   toKey: string,
 ): Promise<Checkpoint | null> {
@@ -139,7 +139,7 @@ export async function adoptCheckpoint(
 }
 
 /** Deleting the ref is all it takes: the commit object becomes unreachable. */
-export async function dropCheckpoint(root: string, key: string): Promise<void> {
+export async function dropCheckpoint(root: RepoRef, key: string): Promise<void> {
   const found = await readCheckpoint(root, key)
   if (!found) return
   await gitOr(null, async () => {
@@ -196,7 +196,7 @@ export function turnRef(session: string, n: number): string {
 
 /** Every turn boundary a conversation has, oldest first. */
 export async function listTurnCheckpoints(
-  root: string,
+  root: RepoRef,
   session: string,
 ): Promise<TurnCheckpoint[]> {
   if (!isKey(session)) return []
@@ -231,7 +231,7 @@ export async function listTurnCheckpoints(
  * can actually be returned to.
  */
 export async function takeTurnCheckpoint(
-  root: string,
+  root: RepoRef,
   session: string,
 ): Promise<TurnCheckpoint | null> {
   const turns = await listTurnCheckpoints(root, session)
@@ -275,7 +275,7 @@ export async function takeTurnCheckpoint(
  * process on the path that holds the lock.
  */
 async function baselineOf(
-  root: string,
+  root: RepoRef,
   session: string,
 ): Promise<{ sha: string; tree: string } | null> {
   const ref = checkpointRef(session)

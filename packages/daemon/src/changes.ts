@@ -1,7 +1,7 @@
 import { access, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { git, gitOr, withWorkingTreeIndex } from "./git.js"
+import { git, gitOr, refHost, refRoot, withWorkingTreeIndex, type RepoRef } from "./git.js"
 
 /**
  * What is uncommitted, what a run changed, and committing either.
@@ -68,7 +68,7 @@ export interface TreeChanges {
  * commit then reports nothing to do. It is a legible refusal rather than a wrong
  * commit, and undoing it is the `git add` the human was already halfway through.
  */
-export async function treeChanges(root: string): Promise<TreeChanges> {
+export async function treeChanges(root: RepoRef): Promise<TreeChanges> {
   // Resolved to a sha rather than passed as the name `HEAD`, and omitted
   // entirely when it does not resolve. `diff --cached` with no revision is
   // git's own spelling of "against the empty tree", which is the only baseline
@@ -123,7 +123,7 @@ export interface RunChanges extends TreeChanges {
  * One pass for the patch, the stat and the paths: each is a read of the same
  * staged tree, and the `add -A` behind it is the expensive part.
  */
-export async function runChanges(root: string, checkpoint: string): Promise<RunChanges> {
+export async function runChanges(root: RepoRef, checkpoint: string): Promise<RunChanges> {
   const { diff, stat, paths } = await withWorkingTreeIndex(root, async (gitTemp) => ({
     // The trailing `--` is not a leftover: it tells git the argument before it
     // is a revision, so a file whose name happens to look like the checkpoint
@@ -159,7 +159,7 @@ const splitZ = (out: string): string[] => out.split("\0").filter(Boolean)
  * `Fix the parser` are both right, neither is guessable from the diff, and both
  * are obvious from the log.
  */
-export async function recentSubjects(root: string, n = 10): Promise<string[]> {
+export async function recentSubjects(root: RepoRef, n = 10): Promise<string[]> {
   try {
     const out = await git(root, ["log", `-n${n}`, "--format=%s"])
     return out.split("\n").map((l) => l.trim()).filter(Boolean)
@@ -193,7 +193,7 @@ export async function recentSubjects(root: string, n = 10): Promise<string[]> {
  * should reject it here too — that is the hook doing its job.
  */
 export async function commitRun(
-  root: string,
+  root: RepoRef,
   paths: readonly string[],
   message: string,
 ): Promise<string> {
@@ -211,6 +211,15 @@ export async function commitRun(
   const inHead = await gitOr(new Set<string>(), () =>
     matching(root, paths, ["ls-tree", "-r", "-z", "--name-only", "HEAD"]),
   )
+  // "is it on disk", asked of the machine that HAS the disk. Locally this is a
+  // `stat` per path; remotely a `stat` here would be answering about a path that
+  // does not exist on this machine and would call every file deleted. One git
+  // call answers it for the whole list, and `--others` plus `--cached` is
+  // exactly "tracked, or present and untracked" — which is what being on disk
+  // means to the staging decision below.
+  const onDisk = refHost(root)
+    ? await matching(root, paths, ["ls-files", "-z", "--cached", "--others"])
+    : null
 
   const stageable: string[] = []
   const committable: string[] = []
@@ -220,7 +229,8 @@ export async function commitRun(
     // and `add -A` is what turns that into a staged one. A path in neither is
     // one the run removed with `git rm`: the deletion is already staged exactly
     // right, and `add` would only fatal over it.
-    const staged = inIndex.has(path) || (await exists(join(root, path)))
+    const staged =
+      inIndex.has(path) || (onDisk ? onDisk.has(path) : await exists(join(refRoot(root), path)))
     if (staged) stageable.push(`:(top,literal)${path}`)
     // `commit` reaches one step further back: it can record a path that is gone
     // from the index and the worktree, as long as HEAD still has it to delete.
@@ -262,7 +272,7 @@ const exists = (path: string) => access(path).then(() => true, () => false)
  * long command line, and Windows caps one at about 32k characters.
  */
 async function matching(
-  root: string,
+  root: RepoRef,
   paths: readonly string[],
   lister: readonly string[],
 ): Promise<Set<string>> {
@@ -323,6 +333,6 @@ function appendTrailers(message: string, entries: readonly [string, string][]): 
 }
 
 /** The branch checked out in the project's working directory. */
-export async function currentBranch(root: string): Promise<string> {
+export async function currentBranch(root: RepoRef): Promise<string> {
   return (await git(root, ["rev-parse", "--abbrev-ref", "HEAD"])).trim()
 }

@@ -542,20 +542,16 @@ export function App() {
       {remote && (
         <RemotePicker
           onCancel={() => setRemote(false)}
-          onPick={(host, path) => {
+          onPick={async (host, path) => {
             setRemote(false)
-            // Refused HERE, in front of the person who just pressed it, rather
-            // than by registering the project and letting it fail at the first
-            // turn. A row in the rail that cannot run is worse than no row: the
-            // reason would arrive as a checkpoint error naming a path that does
-            // not exist on this machine, which reads as a bug in aide.
-            //
-            // The picker itself is finished and real — the machines, the walk,
-            // the `git` marks — and this is the one step behind it. See
-            // `addRemoteProject` in daemon/src/ssh.ts for what it needs.
-            setError(
-              `aide can browse ${host.alias} but cannot run a project there yet: every run spawns the agent locally and shells out to \`git -C\`, so ${path} would be read as a path on this machine. The machine list and the walk are done; running over ssh is not.`,
-            )
+            setError(null)
+            try {
+              const added = await api.addRemoteProject(host.alias, path)
+              navigate({ projectId: added.id })
+              await refresh()
+            } catch (err) {
+              setError(err instanceof Error ? err.message : String(err))
+            }
           }}
         />
       )}

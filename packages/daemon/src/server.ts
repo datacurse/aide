@@ -28,8 +28,16 @@ import { currentBranch, runChanges } from "./changes.js"
 import { ChatLane } from "./chat.js"
 import { CONFIG } from "./config.js"
 import { EventLog } from "./eventlog.js"
+import { repoOf } from "./git.js"
 import { nameChat } from "./helper.js"
-import { addProject, getProject, listProjects, readProjectDoc, removeProject } from "./registry.js"
+import {
+  addProject,
+  addRemoteProject,
+  getProject,
+  listProjects,
+  readProjectDoc,
+  removeProject,
+} from "./registry.js"
 import { pickFolder } from "./picker.js"
 import { listRemoteDirectories, listSshHosts } from "./ssh.js"
 import { conversationProfile } from "./profile.js"
@@ -314,6 +322,29 @@ app.post("/api/ssh/list", async (req, reply): Promise<SshListing | { message: st
   }
 })
 
+/**
+ * Add a repository that lives on one of those machines.
+ *
+ * Separate from `POST /api/projects`, which takes a local path and resolves it
+ * against this filesystem. Folding the two together would mean a body with a
+ * `host` on it silently changing what `path` means, and the failure of getting
+ * that wrong is a remote path read as a local one — the exact confusion the
+ * picker used to refuse outright.
+ */
+app.post("/api/ssh/projects", async (req, reply) => {
+  const { host, path } = (req.body ?? {}) as { host?: string; path?: string }
+  if (!host || !path) {
+    return reply.code(400).send({ message: "body must include { host, path }" })
+  }
+  const known = (await listSshHosts()).find((h) => h.alias === host)
+  if (!known) return reply.code(400).send({ message: `no host named ${host} in ${sshConfigPath()}` })
+  try {
+    return await addRemoteProject(known, path)
+  } catch (err) {
+    return reply.code(400).send({ message: err instanceof Error ? err.message : String(err) })
+  }
+})
+
 app.delete("/api/projects/:id", async (req, reply) => {
   const { id } = req.params as { id: string }
   await removeProject(id)
@@ -344,7 +375,7 @@ app.get("/api/projects/:id/branch", async (req, reply) => {
   const project = await getProject(id)
   if (!project) return reply.code(404).send(notFound(`no project ${id}`))
   try {
-    return { branch: await currentBranch(project.root) }
+    return { branch: await currentBranch(repoOf(project)) }
   } catch {
     return { branch: null }
   }
@@ -380,8 +411,8 @@ app.get("/api/projects/:id/git", async (req, reply) => {
   const n = Math.min(Math.max(Number(limit) || DEFAULT_LOG, 1), MAX_LOG)
   try {
     return {
-      overview: await repo.overview(project.root),
-      log: await repo.log(project.root, n),
+      overview: await repo.overview(repoOf(project)),
+      log: await repo.log(repoOf(project), n),
     }
   } catch (err) {
     // A project whose directory was moved or deleted is the common case here,
@@ -408,7 +439,7 @@ app.get("/api/projects/:id/git/pending", async (req, reply) => {
   const project = await getProject(id)
   if (!project) return reply.code(404).send(notFound(`no project ${id}`))
   try {
-    return await repo.pending(project.root)
+    return await repo.pending(repoOf(project))
   } catch (err) {
     return reply.code(502).send({
       message: `could not read ${project.root}: ${err instanceof Error ? err.message : String(err)}`,
@@ -421,7 +452,7 @@ app.get("/api/projects/:id/git/working", async (req, reply) => {
   const project = await getProject(id)
   if (!project) return reply.code(404).send(notFound(`no project ${id}`))
   try {
-    return await repo.workingTree(project.root)
+    return await repo.workingTree(repoOf(project))
   } catch (err) {
     return reply.code(502).send({
       message: `could not read ${project.root}: ${err instanceof Error ? err.message : String(err)}`,
@@ -437,7 +468,7 @@ app.get("/api/projects/:id/git/commits/:sha", async (req, reply) => {
   // a sha" and "no commit by that name" is the one a stuck UI needs.
   if (!repo.isSha(sha)) return reply.code(400).send({ message: `${sha} is not a commit sha` })
 
-  const found = await repo.commitDetail(project.root, sha)
+  const found = await repo.commitDetail(repoOf(project), sha)
   if (!found) return reply.code(404).send(notFound(`no commit ${sha} in ${project.name}`))
   return found
 })
@@ -529,7 +560,7 @@ app.get("/api/projects/:id/conversations/:sessionId/diff", async (req, reply) =>
   const found = await conversationBaseline(project, sessionId)
   if (!found) return reply.code(409).send({ message: "this conversation has no checkpoint" })
 
-  const changes = await runChanges(project.root, found.checkpoint)
+  const changes = await runChanges(repoOf(project), found.checkpoint)
   return {
     root: project.root,
     diff: changes.diff,
@@ -733,7 +764,7 @@ app.post("/api/projects/:id/chat", async (req, reply) => {
    * lecture about committing.
    */
   if (!body.sessionId) {
-    const outstanding = await repo.pending(project.root).catch(() => null)
+    const outstanding = await repo.pending(repoOf(project)).catch(() => null)
     if (outstanding && outstanding.files.length > 0) {
       const n = outstanding.files.length
       return reply.code(409).send({

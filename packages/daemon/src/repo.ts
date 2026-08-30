@@ -13,7 +13,12 @@ import type {
   GitRef,
   GitWorkingTree,
 } from "@aide/protocol"
-import { git, gitDiffing, gitOr } from "./git.js"
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
+import { sshConfigPath } from "@aide/protocol/node"
+import { git, gitBatch, gitDiffing, gitOr, refHost, refRoot, type RepoRef } from "./git.js"
+
+const execFileAsync = promisify(execFile)
 
 /**
  * Reading a project's own repository — branch, history, and whatever is sitting
@@ -36,7 +41,46 @@ import { git, gitDiffing, gitOr } from "./git.js"
 // Is there a repo here at all
 // ---------------------------------------------------------------------------
 
-export async function isGitRepo(root: string): Promise<boolean> {
+/**
+ * How big a file is, on whichever machine holds it. Null when it is gone.
+ *
+ * Remotely this is `git hash-object`, which reports the blob size without
+ * transferring the file — the question is only ever "is this too big to inline",
+ * so moving a 40MB file across the network to answer it would be absurd.
+ */
+async function fileSize(root: RepoRef, path: string): Promise<number | null> {
+  const host = refHost(root)
+  if (!host) {
+    try {
+      return (await stat(join(refRoot(root), path))).size
+    } catch {
+      return null
+    }
+  }
+  // `git hash-object -w` would write an object into the repository to measure a
+  // file, which is a side effect on somebody's tree for a display decision.
+  // `wc -c` is a read, and it is the same shell this file already reaches the
+  // far machine through.
+  const out = await remoteFileSize(host, `${refRoot(root)}/${path}`)
+  return out
+}
+
+/** `wc -c` over ssh. Null for a file that is not there. */
+async function remoteFileSize(host: string, path: string): Promise<number | null> {
+  const quoted = `'${path.replace(/'/g, `'\\''`)}'`
+  const out = await gitOr("", async () => {
+    const { stdout } = await execFileAsync(
+      "ssh",
+      ["-o", "BatchMode=yes", "-F", sshConfigPath(), host, `wc -c < ${quoted}`],
+      { windowsHide: true },
+    )
+    return stdout
+  })
+  const n = Number(out.trim())
+  return Number.isFinite(n) ? n : null
+}
+
+export async function isGitRepo(root: RepoRef): Promise<boolean> {
   try {
     const out = await git(root, ["rev-parse", "--is-inside-work-tree"])
     return out.trim() === "true"
@@ -58,35 +102,39 @@ export async function repoRoot(dir: string): Promise<string | null> {
 // Overview
 // ---------------------------------------------------------------------------
 
-export async function overview(root: string): Promise<GitOverview> {
-  // "HEAD" rather than a name is git's way of saying detached, and a detached
-  // checkout is a real state a project can be in — mid-bisect, mid-rebase — not
-  // an error to hide.
-  const named = await gitOr("HEAD", async () =>
-    (await git(root, ["rev-parse", "--abbrev-ref", "HEAD"])).trim(),
-  )
-  const branch = named === "HEAD" || named === "" ? null : named
-
-  // Fails in a repo with no commits yet, which is exactly what `unborn` means.
-  const head = await gitOr<string | null>(null, async () =>
-    (await git(root, ["rev-parse", "--short", "HEAD"])).trim(),
-  )
-
-  const upstream = await gitOr<string | null>(null, async () =>
-    (await git(root, ["rev-parse", "--abbrev-ref", "@{upstream}"])).trim(),
-  )
-
+export async function overview(root: RepoRef): Promise<GitOverview> {
+  // Four independent questions, so one round trip rather than four. See
+  // `gitBatch` — on a remote project the difference is about four and a half
+  // seconds every time this pane refreshes.
+  //
   // `--left-right --count` answers "ahead<tab>behind" in one call. Asked for
   // directly rather than read off `git status --branch`'s header, because that
   // header drops the counts entirely when they are zero, so its absence means
   // both "in step" and "no upstream" and the two are not the same thing.
-  const [ahead, behind] = await gitOr<[number, number]>([0, 0], async () => {
-    const out = await git(root, ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
-    const [a, b] = out.trim().split(/\s+/)
-    return [Number(a) || 0, Number(b) || 0]
-  })
+  const [namedOut, headOut, upstreamOut, countsOut] = await gitBatch(root, [
+    ["rev-parse", "--abbrev-ref", "HEAD"],
+    ["rev-parse", "--short", "HEAD"],
+    ["rev-parse", "--abbrev-ref", "@{upstream}"],
+    ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+  ])
 
-  return { root, branch, head, upstream, ahead, behind, unborn: head === null }
+  // "HEAD" rather than a name is git's way of saying detached, and a detached
+  // checkout is a real state a project can be in — mid-bisect, mid-rebase — not
+  // an error to hide.
+  const named = (namedOut ?? "").trim() || "HEAD"
+  const branch = named === "HEAD" ? null : named
+
+  // Empty in a repo with no commits yet, which is exactly what `unborn` means.
+  const head = (headOut ?? "").trim() || null
+  const upstream = (upstreamOut ?? "").trim() || null
+
+  const [a, b] = (countsOut ?? "").trim().split(/\s+/)
+  const ahead = Number(a) || 0
+  const behind = Number(b) || 0
+
+  // The path alone: `GitOverview.root` goes to the browser, which shows it as a
+  // location and has no use for the transport.
+  return { root: refRoot(root), branch, head, upstream, ahead, behind, unborn: head === null }
 }
 
 // ---------------------------------------------------------------------------
@@ -144,7 +192,7 @@ export function parseStatus(z: string): GitFileChange[] {
   return files
 }
 
-export async function status(root: string): Promise<GitFileChange[]> {
+export async function status(root: RepoRef): Promise<GitFileChange[]> {
   // `--untracked-files=all` so new files are listed one by one. The default
   // collapses them into a bare directory name, which cannot be diffed and reads
   // in the UI as one mystery entry instead of the six files it stands for.
@@ -167,14 +215,22 @@ export async function status(root: string): Promise<GitFileChange[]> {
  * is polled from the always-visible rail, and three extra round trips per beat
  * to learn ahead/behind counts nothing here shows would be paid on every beat.
  */
-export async function pending(root: string): Promise<GitPending> {
-  const named = await gitOr("HEAD", async () =>
-    (await git(root, ["rev-parse", "--abbrev-ref", "HEAD"])).trim(),
-  )
-  const z = await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+export async function pending(root: RepoRef): Promise<GitPending> {
+  // Both in one round trip. This is THE polled call — the rail is always on
+  // screen — so on a remote project the saving is 1.4s on every beat, which is
+  // the difference between a rail that lags behind the tree and one that does
+  // not.
+  const [namedOut, z] = await gitBatch(root, [
+    ["rev-parse", "--abbrev-ref", "HEAD"],
+    // `--untracked-files=all` so new files are listed one by one. The default
+    // collapses them into a bare directory name, which cannot be diffed and
+    // reads in the UI as one mystery entry instead of the six files it is.
+    ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+  ])
+  const named = (namedOut ?? "").trim() || "HEAD"
   return {
-    branch: named === "HEAD" || named === "" ? null : named,
-    files: parseStatus(z),
+    branch: named === "HEAD" ? null : named,
+    files: parseStatus(z ?? ""),
   }
 }
 
@@ -186,7 +242,7 @@ export async function pending(root: string): Promise<GitPending> {
 const UNTRACKED_FILE_LIMIT = 50
 const UNTRACKED_BYTE_LIMIT = 512 * 1024
 
-export async function workingTree(root: string): Promise<GitWorkingTree> {
+export async function workingTree(root: RepoRef): Promise<GitWorkingTree> {
   const files = await status(root)
   const view = await overview(root)
 
@@ -208,10 +264,12 @@ export async function workingTree(root: string): Promise<GitWorkingTree> {
       omitted.push({ path: f.path, why: `over ${UNTRACKED_FILE_LIMIT} new files` })
       continue
     }
-    let size = 0
-    try {
-      size = (await stat(join(root, f.path))).size
-    } catch {
+    // The size decides whether this file is inlined, so it has to be read on
+    // the machine holding it. `stat` here would be measuring a path that does
+    // not exist on this one, and every untracked file in a remote project would
+    // be reported as having disappeared.
+    const size = await fileSize(root, f.path)
+    if (size === null) {
       // Gone between the status call and this one. Not an error, just gone.
       omitted.push({ path: f.path, why: "disappeared while reading" })
       continue
@@ -426,7 +484,7 @@ export function buildGraph(commits: GitCommit[]): { graph: GitGraphRow[]; lanes:
  * asked for, and the second is bounded by the page so a ten-thousand-commit repo
  * does not send its entire history down the wire to number thirty rows.
  */
-async function firstParentNumbers(root: string, limit: number): Promise<Record<string, number>> {
+async function firstParentNumbers(root: RepoRef, limit: number): Promise<Record<string, number>> {
   const counted = await gitOr("", () =>
     git(root, ["rev-list", "--count", "--first-parent", "HEAD"]),
   )
@@ -448,7 +506,7 @@ async function firstParentNumbers(root: string, limit: number): Promise<Record<s
   return numbers
 }
 
-export async function log(root: string, limit: number): Promise<GitLog> {
+export async function log(root: RepoRef, limit: number): Promise<GitLog> {
   // `--topo-order` because the default is date order, and date order interleaves
   // two branches by when someone happened to commit — drawing a line that
   // crosses itself for no reason a reader can see. `--branches` because a graph
@@ -496,7 +554,7 @@ export async function log(root: string, limit: number): Promise<GitLog> {
  */
 export const isSha = (v: string): boolean => /^[0-9a-f]{4,40}$/i.test(v)
 
-export async function commitDetail(root: string, sha: string): Promise<GitCommitDetail | null> {
+export async function commitDetail(root: RepoRef, sha: string): Promise<GitCommitDetail | null> {
   if (!isSha(sha)) return null
 
   const line = await gitOr("", () => git(root, ["log", "-1", "--decorate=full", FORMAT, sha]))
