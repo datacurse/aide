@@ -1685,6 +1685,14 @@ export function ConversationPane({
   return (
     <section className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-editor">
       <PaneHeader title={title}>
+        {/* What is left of the footer, in a bar that was already on screen. The
+            rest of that row said things something else was already saying —
+            "working…" beside the working bar, the kind beside the row in the
+            list that carries the same label, and a path that is the project's
+            root by definition and now lives once, in the projects rail. */}
+        {view && (
+          <span className="font-sans text-[11px] text-fg-dim">{view.totalMessages} messages</span>
+        )}
         {/* Only for a conversation that has actually run. A chat with no
             session id has no event log to measure, and offering the button
             anyway would answer every press with the same empty document. */}
@@ -1851,18 +1859,6 @@ export function ConversationPane({
           }}
         />
       )}
-
-      <footer className="flex h-[22px] shrink-0 items-center gap-4 border-t border-line bg-chrome px-3 font-sans text-[11px] text-fg-muted">
-        {/* Same rule as the row: only when it is NOT a chat. See `ChatRow`. */}
-        {summary && summary.kind !== "chat" && (
-          <span className={`shrink-0 ${kindColor(summary)}`}>{kindLabel(summary)}</span>
-        )}
-        {view && <span>{view.totalMessages} messages</span>}
-        {busy && <span className="text-info">working…</span>}
-        <span className="ml-auto min-w-0 truncate text-fg-dim" title={summary?.cwd}>
-          {summary?.cwd ?? "runs in the project root"}
-        </span>
-      </footer>
     </section>
   )
 }

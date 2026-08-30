@@ -351,32 +351,51 @@ export function App() {
                 key={p.id}
                 type="button"
                 onClick={() => navigate({ projectId: p.id })}
+                // Every row, so the answer is a hover away without opening the
+                // project. The line below is for the one you are working in.
+                title={p.root}
                 // The same frame the chat list draws, because two lists side by
                 // side that disagree about what "selected" looks like read as
                 // one of them being broken. It also gets the same thing out of
                 // the way here: the holder's name is `text-info`, and on a
                 // filled navy row that was blue text on a blue plate.
-                className={`flex w-full items-center gap-2 border px-3 py-[3px] text-left font-sans text-[13px] hover:bg-hover ${
+                className={`flex w-full flex-col border px-3 py-[3px] text-left font-sans text-[13px] hover:bg-hover ${
                   p.id === projectId ? `${SELECTED} text-fg` : "border-transparent text-fg-muted"
                 }`}
               >
-                <span
-                  className={`inline-block size-1.5 shrink-0 rounded-full ${
-                    p.holder ? "bg-info animate-pulse" : "bg-fg-dim"
-                  }`}
-                />
-                <span className="flex-1 truncate">{p.name}</span>
-                {/* Which conversation has the repo, not how many do — one
-                    project runs one agent, so a count would be a boolean
-                    wearing a number's clothes. The name is what you need
-                    when you are wondering what is in your way. */}
-                {p.holder && (
+                <span className="flex w-full items-center gap-2">
                   <span
-                    className="max-w-[8rem] truncate text-[10px] text-info"
-                    title={`"${p.holder.title}" has this checkout`}
-                  >
-                    {p.holder.title}
-                  </span>
+                    className={`inline-block size-1.5 shrink-0 rounded-full ${
+                      p.holder ? "bg-info animate-pulse" : "bg-fg-dim"
+                    }`}
+                  />
+                  <span className="flex-1 truncate">{p.name}</span>
+                  {/* Which conversation has the repo, not how many do — one
+                      project runs one agent, so a count would be a boolean
+                      wearing a number's clothes. The name is what you need
+                      when you are wondering what is in your way. */}
+                  {p.holder && (
+                    <span
+                      className="max-w-[8rem] truncate text-[10px] text-info"
+                      title={`"${p.holder.title}" has this checkout`}
+                    >
+                      {p.holder.title}
+                    </span>
+                  )}
+                </span>
+                {/* Where the work happens, which is the project root and nothing
+                    else — every run and every chat is in it, so it belongs to
+                    the project rather than to a conversation. It used to be a
+                    22px bar along the foot of the transcript, and for a chat
+                    that had not run yet it could not even say the path: it read
+                    "runs in the project root". A row of window height for one
+                    line of text that is the same for every chat in a project is
+                    the same trade the title bar lost.
+
+                    Only under the selected row. On all of them the rail is a
+                    list of paths you have to read past to find a name. */}
+                {p.id === projectId && (
+                  <span className="w-full truncate pl-[14px] text-[10px] text-fg-dim">{p.root}</span>
                 )}
               </button>
             ))
