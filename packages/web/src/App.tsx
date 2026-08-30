@@ -8,7 +8,7 @@ import { useKeyed } from "./useKeyed.js"
 import { useRemembered } from "./useRemembered.js"
 import { ConversationList, ConversationPane } from "./panes/Conversations.js"
 import { PendingRail } from "./panes/Pending.js"
-import { Button, Empty, PaneHeader } from "./ui.js"
+import { Button, Empty, PaneHeader, SELECTED } from "./ui.js"
 
 /** While anything is in flight the lists need to move on their own. */
 const POLL_MS = 1500
@@ -341,8 +341,13 @@ export function App() {
                 key={p.id}
                 type="button"
                 onClick={() => navigate({ projectId: p.id })}
-                className={`flex w-full items-center gap-2 px-3 py-[3px] text-left font-sans text-[13px] ${
-                  p.id === projectId ? "bg-active text-white" : "text-fg-muted hover:bg-hover"
+                // The same frame the chat list draws, because two lists side by
+                // side that disagree about what "selected" looks like read as
+                // one of them being broken. It also gets the same thing out of
+                // the way here: the holder's name is `text-info`, and on a
+                // filled navy row that was blue text on a blue plate.
+                className={`flex w-full items-center gap-2 border px-3 py-[3px] text-left font-sans text-[13px] hover:bg-hover ${
+                  p.id === projectId ? `${SELECTED} text-fg` : "border-transparent text-fg-muted"
                 }`}
               >
                 <span

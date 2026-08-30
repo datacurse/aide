@@ -30,7 +30,7 @@ import { ArrowDown, Check, Lock, Play, X } from "../icons.js"
 import { draftName, useAutoNames } from "../naming.js"
 import { ProfileOverlay } from "../Profile.js"
 import { WorkingBar } from "../Working.js"
-import { Button, Empty, LOCKED, PaneHeader } from "../ui.js"
+import { Button, Empty, LOCKED, PaneHeader, SELECTED } from "../ui.js"
 import { useKeyed } from "../useKeyed.js"
 import { useRunStream } from "../useRunStream.js"
 import { useAutoGrow } from "../useAutoGrow.js"
@@ -174,8 +174,8 @@ function UnstartedRow({
   const written = draft.text.trim() !== "" || draft.attachments.length > 0
   return (
     <div
-      className={`group flex w-full items-center gap-2 px-3 py-1.5 font-sans ${
-        selected ? "bg-active text-white" : "text-fg-muted hover:bg-hover"
+      className={`group flex w-full items-center gap-2 border px-3 py-1.5 font-sans hover:bg-hover ${
+        selected ? `${SELECTED} text-fg` : "border-transparent text-fg-muted"
       }`}
     >
       <button
@@ -503,6 +503,7 @@ function ChatRow({
   chat,
   status,
   heldSince,
+  ranLast,
   selected,
   onOpen,
   onToggleDone,
@@ -516,6 +517,8 @@ function ChatRow({
   status: ChatStatus
   /** When the run holding the repo started, if this row is the one holding it. */
   heldSince: number | null
+  /** This is where the project's most recent run happened — see `newest`. */
+  ranLast: boolean
   selected: boolean
   onOpen: () => void
   onToggleDone: () => void
@@ -524,11 +527,23 @@ function ChatRow({
   const spend = chat.spend
   // Dim enough to stay behind the title, but not on the row you have selected:
   // fg-dim on the selection blue is the one place it stops being readable.
-  const meta = selected ? "text-white/70" : "text-fg-dim"
+  const meta = selected || ranLast ? "text-fg-muted" : "text-fg-dim"
   return (
     <div
-      className={`group flex w-full items-center gap-2 px-3 py-1.5 font-sans ${
-        selected ? "bg-active text-white" : "text-fg-muted hover:bg-hover"
+      // Two marks that mean different things, so they are drawn in different
+      // languages rather than in two shades of the same one — see `SELECTED`.
+      //
+      // The gold is a wash that fades out across the row rather than a filled
+      // block: it reads as light falling on the row, which is what lets it be
+      // the loudest thing in the list without being mistaken for where you are.
+      className={`group flex w-full items-center gap-2 border px-3 py-1.5 font-sans hover:bg-hover ${
+        selected ? SELECTED : "border-transparent"
+      } ${
+        ranLast
+          ? "bg-linear-to-r from-found/50 via-found/20 to-transparent text-fg hover:from-found/65 hover:via-found/30"
+          : selected
+            ? "text-fg"
+            : "text-fg-muted"
       }`}
     >
       <button
@@ -907,6 +922,36 @@ export function ConversationList({
    */
   const holdingSession = holder?.sessionId ?? null
   const holderBlocked = holder?.blocked ?? false
+  const running = holder !== null
+
+  /**
+   * The chat the project's most recent run happened in.
+   *
+   * The one row you almost always want next, and the list is deliberately no
+   * help in finding it: `sortChats` orders by when a chat STARTED and is
+   * emphatic about not reordering on activity, so the conversation that just
+   * answered you is wherever you first parked it — three screens down, beside
+   * whatever else you started that morning. Until this, the only thing pointing
+   * at it was the "has the repo" badge, which goes out with the run: the mark
+   * disappeared at exactly the moment there was finally something to read.
+   *
+   * A run in flight wins over the dates, and that is not a preference — a
+   * session file is only rewritten when a turn ENDS, so for the length of a turn
+   * the newest `lastModified` in the list belongs to whichever chat spoke
+   * BEFORE this one, and the mark would spend every run sitting one row away
+   * from the conversation actually working.
+   *
+   * A holder with no session id yet is a brand new chat in its first seconds,
+   * and it lights nothing: the row it will become does not exist in this list,
+   * and falling back to the dates would light the conversation it just
+   * displaced instead.
+   */
+  const newest = useMemo(() => {
+    if (running) return holdingSession
+    let best: ConversationRow | null = null
+    for (const c of items ?? []) if (!best || c.lastModified > best.lastModified) best = c
+    return best?.sessionId ?? null
+  }, [items, running, holdingSession])
 
   /**
    * Every row this project has, in one order: newest first, whatever each one is
@@ -976,6 +1021,7 @@ export function ConversationList({
         chat={row.chat}
         status={row.status}
         heldSince={row.chat.sessionId === holdingSession ? (holder?.startedAt ?? null) : null}
+        ranLast={row.chat.sessionId === newest}
         selected={row.chat.sessionId === selected}
         onOpen={() => onSelect(row.chat.sessionId)}
         onToggleDone={() => toggleDone(row.chat)}

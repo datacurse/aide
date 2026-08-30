@@ -19,6 +19,32 @@ import { Lock } from "./icons.js"
  */
 export const LOCKED = "cursor-not-allowed bg-diff-del-fg/15 text-diff-del-fg"
 
+/**
+ * How the row you have open is drawn, in every list there is: a frame, not a
+ * fill. `list.focusOutline`, which is the key VS Code draws this with.
+ *
+ * A filled plate is a second background, and a row is not a blank surface —
+ * every colour it carries was picked against the list's near-black. Over the
+ * selection navy they all came apart at once: the red padlock rang against it,
+ * the green tick and the blue "has the repo" stopped reading (blue text on a
+ * blue plate), and the grey button plates turned to smudges. The fix was six
+ * selected-only variants that repainted each of them white — a second palette,
+ * maintained forever, so that one row could have a background. A frame leaves
+ * every one of those colours on the surface it was chosen for.
+ *
+ * It also lets the marks compose rather than fight. The row that ran last is
+ * often the row you are in, and as two fills that was a contest one of them had
+ * to win; as a wash inside a frame it is simply both facts at once.
+ *
+ * Hover keeps the grey wash it always had, and that is now the whole difference
+ * between them: hover fills, selection frames. Two languages, so neither can be
+ * mistaken for the other as the pointer crosses the list.
+ *
+ * The 1px is paid for by every row — `border border-transparent` on the ones
+ * that are not selected — or the column of titles steps sideways as you move.
+ */
+export const SELECTED = "border-accent"
+
 export function Button({
   children,
   onClick,
