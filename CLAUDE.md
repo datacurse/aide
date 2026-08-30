@@ -90,11 +90,19 @@ Decisions already taken, which are not gaps to fill:
   typed. Re-adding a mode that asks means re-opening that.
 - **Thinking is a toggle, and the log remembers which way it was.** The struck-
   through word beside the mode picker sends the turn with extended thinking off.
-  It goes through the SDK's flag-settings layer (`alwaysThinkingEnabled`) rather
-  than `query`'s `thinking` option, because the option has no mid-session twin:
-  a warm session started with it disabled could never be talked back out of it,
-  so the toggle would work on a conversation's first message and silently do
-  nothing on every one after. It is an experiment about speed against accuracy,
+  It goes through `setMaxThinkingTokens` — 0 for off, null for back to the
+  session default — rather than `query`'s `thinking` option, because the option
+  is fixed for the life of the query: a warm session started with it disabled
+  could never be talked back out of it, so the toggle would work on a
+  conversation's first message and do nothing on every one after. The obvious
+  third route is the one that was tried first, and is why this is written down:
+  `alwaysThinkingEnabled` in the flag-settings layer is read nowhere that
+  matters. The CLI's `apply_flag_settings` handler takes `effortLevel` and
+  `ultracode` and drops the rest on the floor, and the spawn-time `settings`
+  copy is only consulted as the fallback under `--thinking`, which `agent.ts`
+  always sends. Both halves of the toggle were no-ops, and the turn logged
+  itself "no thinking" and thought anyway. It is an experiment about speed
+  against accuracy,
   which is why `user.message` carries `thinking: false` when it was off and
   nothing when it was on, and the profile marks the turns that did not think.
   Absent has to keep meaning "thought" — every log written before the toggle

@@ -129,7 +129,8 @@ export interface RunAgentOptions {
  * `mode`, `effort`, `thinking` and `model` are per-turn choices in the composer
  * but per-query options in the SDK, so a session that outlives a turn has to
  * apply them as control requests before the message goes in. All of them have one:
- * `setPermissionMode`, `applyFlagSettings` and `setModel` â which is what makes
+ * `setPermissionMode`, `applyFlagSettings`, `setMaxThinkingTokens` and
+ * `setModel` â which is what makes
  * keeping the session open possible without freezing the toolbar.
  *
  * Each is present only when it CHANGED — see `#followUp` in chat.ts — which is
@@ -611,6 +612,37 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
     } as SDKUserMessage
   }
 
+  /**
+   * Thinking, on or off, for the turn that is about to go out.
+   *
+   * A control request rather than the flag-settings layer, because that layer is
+   * not read for this key at all. The CLI's `apply_flag_settings` handler takes
+   * `effortLevel` and `ultracode` and drops everything else on the floor, then
+   * answers ok — so a follow-up asking for `alwaysThinkingEnabled: false` was
+   * accepted and ignored. Spawn-time `settings` ARE read for it, but only as the
+   * fallback under `--thinking`, which the `thinking` option below always sends,
+   * so the first turn of a session ignored it too. The toggle was doing nothing,
+   * in both halves, while the log beside it said "no thinking".
+   *
+   * 0 turns thinking off for the rest of the session; null puts it back to
+   * whatever the query was opened with. That is why the `thinking` option stays
+   * `adaptive` even for a chat whose first turn is sent with thinking off — it
+   * is the thing "back on" aims at, and a query opened `disabled` could never be
+   * talked out of it.
+   *
+   * Deprecated in the SDK in favour of that option, and used anyway: the option
+   * is fixed for the life of the query and a warm session outlives many turns,
+   * so it is this or nothing.
+   *
+   * The display is passed on every call rather than left to the session, because
+   * omitting it keeps whichever display override the session last had — and
+   * landing back on the default is thinking blocks with no text in them, which
+   * is the whole reason the option names one.
+   */
+  async function setThinking(on: boolean): Promise<void> {
+    await q.setMaxThinkingTokens(on ? null : 0, "summarized")
+  }
+
   // Streaming input mode. `prompt` must be an AsyncIterable for control requests
   // (interrupt) to be available at all.
   //
@@ -618,6 +650,10 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
   // ends after its turn instead of waiting for more input. With it, the stream
   // stays open and the session survives between turns â see the field's comment.
   async function* input(): AsyncGenerator<SDKUserMessage> {
+    // Before the first message goes in, for the same reason a follow-up's
+    // settings are applied before its own: a turn sent first and configured
+    // after is a turn that ran under the wrong setting.
+    if (opts.thinking === false) await setThinking(false)
     opts.onTurnStart?.(opts.runId)
     yield userMessage(request, opts.attachments)
     if (!opts.followUps) return
@@ -634,14 +670,7 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
       if (turn.effort) await q.applyFlagSettings({ effortLevel: turn.effort })
       // `!== undefined`, because the value being sent at all is what says it
       // changed, and the value that changed to is `false` half the time.
-      //
-      // Merged into the same flag layer `chatSettings` opened the query with,
-      // top-level key by top-level key — so a session driven on Auto keeps the
-      // `permissions` rule that lets it run a command without a model call in
-      // front of it. That is the same bargain `effortLevel` above already makes.
-      if (turn.thinking !== undefined) {
-        await q.applyFlagSettings({ alwaysThinkingEnabled: turn.thinking })
-      }
+      if (turn.thinking !== undefined) await setThinking(turn.thinking)
       // Per turn. Each message re-enters plan mode, so an approval carried over
       // from the last one would hand this message a session that never planned
       // and never asks — a third mode, granted by accident.
@@ -728,18 +757,12 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
   /**
    * The flag-settings layer this query opens under, or null for none.
    *
-   * One object rather than two spreads, because `settings` is a single option
-   * and the second spread would have silently replaced the first. Empty is
-   * null: passing `{}` would open the layer with nothing in it, which is not
-   * the same as not opening it.
+   * One key deep, and it used to be two: thinking rode here as
+   * `alwaysThinkingEnabled` until it turned out nothing downstream read it. See
+   * `setThinking`. Empty is null: passing `{}` would open the layer with nothing
+   * in it, which is not the same as not opening it.
    */
-  const layer: Settings = {
-    ...(opts.chatMode === "auto" ? fastBashSettings(opts.deniedBash) : {}),
-    // Only when it is off. `true` here would pin thinking on in the flag layer,
-    // above the user's own settings — which is a decision aide has no business
-    // taking on behalf of a machine whose CLI may have been told otherwise.
-    ...(opts.thinking === false ? { alwaysThinkingEnabled: false } : {}),
-  }
+  const layer: Settings = opts.chatMode === "auto" ? fastBashSettings(opts.deniedBash) : {}
   const chatSettings = Object.keys(layer).length ? layer : null
 
   const q = query({
@@ -770,13 +793,6 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
       // the query, which is exactly why an approved plan being carried out is
       // decided in `canUseTool` rather than here — the rule cannot be granted
       // late, and granting it early breaks the plan.
-      //
-      // Thinking rides in the same layer rather than on the `thinking` query
-      // option beside it, and that is the whole reason `chatSettings` exists.
-      // The query option has no mid-session twin, so a warm session started with
-      // thinking disabled could never be talked back out of it — the toggle
-      // would work on the first message of a conversation and silently do
-      // nothing on every one after.
       ...(chatSettings ? { settings: chatSettings } : {}),
       ...(opts.effort ? { effort: opts.effort } : {}),
       // Append rather than fork: a chat keeps one stable session id, the way it
@@ -862,6 +878,10 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
       // so a UI that renders thinking shows nothing at all and the model looks
       // like it is stalling before it answers. Display costs nothing: the
       // thinking happens and is billed identically either way.
+      //
+      // The same on every query, including one whose first turn is sent with
+      // thinking off. This is the session default, and turning thinking back on
+      // is expressed as "back to the default" — see `setThinking`.
       thinking: { type: "adaptive", display: "summarized" },
       // Only when someone is watching. Partial messages are thousands of events
       // per turn, and a headless task has nobody to show them to.
