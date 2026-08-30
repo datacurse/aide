@@ -3,6 +3,7 @@ import { MAX_ATTACHMENT_BYTES, readAsAttachment } from "./attachments.js"
 import { readDraft, saveDraft, useDraft } from "./drafts.js"
 import { Lightning, Lock, X } from "./icons.js"
 import { LOCKED } from "./ui.js"
+import { TYPING_KEY } from "./typing.js"
 import { useAutoGrow } from "./useAutoGrow.js"
 import { useRemembered } from "./useRemembered.js"
 import {
@@ -166,6 +167,41 @@ function ThinkingToggle({ on, onToggle }: { on: boolean; onToggle: () => void })
 }
 
 /**
+ * The reply revealed at a pace, or as fast as it arrives.
+ *
+ * Beside the thinking toggle, and shaped like it, because they are the same kind
+ * of switch — one word, flipped for a message and meant to be put back. It is
+ * the odd one out in this row all the same, and knowingly: everything else here
+ * changes what the turn DOES, and this changes only how you watch it. It sits
+ * here because this is where a person already goes to change how a turn feels,
+ * and a preferences screen for one word would be a worse answer than the
+ * inconsistency.
+ *
+ * Not struck through when off. Thinking off is a capability withheld and reads
+ * correctly as an absence; typing off is the plain behaviour aide has always
+ * had, and striking it out would frame the default as a deprivation.
+ */
+function TypingToggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-pressed={on}
+      title={
+        on
+          ? "The reply is revealed at a readable pace instead of in the bursts it arrives in. Click for raw speed."
+          : "The reply appears as fast as it arrives. Click to have it typed out instead."
+      }
+      className={`rounded px-1.5 py-0.5 text-[11px] hover:bg-hover ${
+        on ? "text-fg-muted hover:text-fg" : "text-fg-dim hover:text-fg-muted"
+      }`}
+    >
+      typing
+    </button>
+  )
+}
+
+/**
  * The message bar.
  *
  * Modelled on the Claude Code extension's, because that is the shape the work
@@ -271,6 +307,12 @@ export function Composer({
    * nothing looks identical to one that was not allowed to.
    */
   const [thinking, setThinking] = useRemembered<boolean>("aide.chat.thinking", true, isBool)
+  /**
+   * Unlike the three above, this one is not sent anywhere. It is read by the
+   * transcript, out of the same key, which is why it is not in `onSend`'s
+   * message — a turn that ran while it was on is not a turn that differs.
+   */
+  const [typewriter, setTypewriter] = useRemembered<boolean>(TYPING_KEY, false, isBool)
   /**
    * The mode this particular conversation was last driven at, which beats the
    * remembered preference while it is open — a chat you were running on Auto in
@@ -465,6 +507,7 @@ export function Composer({
       <div className="mt-1.5 flex items-center gap-3">
         <ModePicker mode={mode} effort={effort} onMode={chooseMode} onEffort={setEffort} />
         <ThinkingToggle on={thinking} onToggle={() => setThinking(!thinking)} />
+        <TypingToggle on={typewriter} onToggle={() => setTypewriter(!typewriter)} />
         <ContextMeter usage={usage} />
         <div className="ml-auto flex items-center gap-2">
           {busy ? (

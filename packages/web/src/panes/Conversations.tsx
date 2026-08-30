@@ -33,8 +33,10 @@ import { ProfileOverlay } from "../Profile.js"
 import { WorkingBar } from "../Working.js"
 import { Button, Empty, heldBy, LOCKED, PaneHeader, SELECTED } from "../ui.js"
 import { useKeyed } from "../useKeyed.js"
+import { useRemembered } from "../useRemembered.js"
 import { useRunStream } from "../useRunStream.js"
 import { useAutoGrow } from "../useAutoGrow.js"
+import { TYPING_KEY, useTyped } from "../typing.js"
 import { CommitMessageDraft, Transcript, type LiveText } from "./Transcript.js"
 
 /**
@@ -1513,12 +1515,47 @@ export function ConversationPane({
    * `LiveText`. A commit run is the exception: it streams a commit message, not
    * a reply, and that has its own box below.
    */
+  /**
+   * Whether the reply is revealed at a pace or dumped as it arrives.
+   *
+   * Remembered, and read here rather than passed down from the composer: the
+   * transcript is what it acts on, and threading it through the box that sends
+   * the turn would tie a preference about reading to the thing that does the
+   * writing. The switch lives in the composer's control row because that is
+   * where the other two per-turn toggles are, and it writes the same key.
+   */
+  const [typewriter] = useRemembered<boolean>(
+    TYPING_KEY,
+    false,
+    (v): v is boolean => typeof v === "boolean",
+  )
+  /**
+   * Both blocks paced, and paced separately.
+   *
+   * One hook each rather than one over the pair, because they do not advance
+   * together: thinking finishes and stands still while the reply is still being
+   * written, and a shared clock would drag the finished one along behind the
+   * live one. Called unconditionally — a hook cannot sit behind the `busy`
+   * check below, and there is nothing to pace when the strings are empty
+   * anyway.
+   */
+  const typedText = useTyped(draft.text, typewriter)
+  const typedThinking = useTyped(draft.thinking, typewriter)
+  /**
+   * Gated on the RAW text, not the revealed prefix.
+   *
+   * `useTyped` starts at zero for a block it has not begun revealing, so gating
+   * on its output would hold the whole live row back for the first frames of
+   * every message — and, worse, tear it down again between blocks each time the
+   * prefix passed back through empty. What has arrived decides whether there is
+   * a live row; the pacing only decides how much of it is drawn.
+   */
   const typing = useMemo<LiveText | null>(
     () =>
       busy && runId && draftingCommit === null && (draft.text || draft.thinking)
-        ? { runId, thinking: draft.thinking, text: draft.text }
+        ? { runId, thinking: typedThinking, text: typedText }
         : null,
-    [busy, runId, draftingCommit, draft.text, draft.thinking],
+    [busy, runId, draftingCommit, draft.text, draft.thinking, typedText, typedThinking],
   )
 
   const scroller = useRef<HTMLDivElement>(null)
