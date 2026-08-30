@@ -50,6 +50,14 @@ interface ToolLine {
   nested: boolean
   ok: boolean | null
   summary: string
+  /**
+   * When the call went out, by the daemon's clock — the same trick `VerifyLine`
+   * plays, and sound for the same reason: aide is loopback-only, so there is no
+   * skew between that stamp and the browser's `Date.now()`.
+   */
+  startedAt: number
+  /** Null while it is still running; the row counts up from `startedAt` instead. */
+  ms: number | null
 }
 /**
  * The snapshot taken before the agent was let near the working tree.
@@ -284,6 +292,8 @@ function toLines(events: RunEvent[], live?: LiveText | null): Line[] {
           nested: !!e.parentToolUseId,
           ok: null,
           summary: "",
+          startedAt: e.ts,
+          ms: null,
         }
         byToolId.set(e.toolUseId, line)
         lines.push(line)
@@ -294,6 +304,12 @@ function toLines(events: RunEvent[], live?: LiveText | null): Line[] {
         if (line) {
           line.ok = e.ok
           line.summary = e.summary
+          // Subtracted from the two stamps rather than carried on the event: the
+          // SDK reports a tool result, not a timing, so the daemon has nothing to
+          // put in such a field that this does not already say. Guarded because a
+          // replayed session file can pair an end with a start it did not see,
+          // and `ts - 0` would print the row as fifty-six years old.
+          if (line.startedAt > 0) line.ms = Math.max(0, e.ts - line.startedAt)
         }
         break
       }
@@ -510,15 +526,34 @@ function describeInput(name: string, input: unknown): string {
   return ""
 }
 
+/**
+ * How long something took, in the units a reader of that duration wants.
+ *
+ * Shared by the two kinds of row that time something — a tool call and a check —
+ * because a transcript where 1.4s and 1400ms both appear reads as two different
+ * measurements of two different things.
+ */
+function took(ms: number): string {
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`
+}
+
+/**
+ * Not shown on every row: the great majority of tool calls are a Read or an Edit
+ * that lands in single-digit milliseconds, and a duration against each of those
+ * is a column of noise you have to look past to find the Bash that took a minute.
+ * Above the threshold it is the most useful thing on the line.
+ */
+const SLOW_TOOL_MS = 2000
+
 function ToolRow({ line }: { line: ToolLine }) {
-  const mark =
-    line.ok === null ? (
-      <CaretRight className={`${MARK} text-info`} />
-    ) : line.ok ? (
-      <Check className={`${MARK} text-ok`} />
-    ) : (
-      <X className={`${MARK} text-err`} />
-    )
+  const running = line.ok === null
+  const mark = running ? (
+    <CaretRight className={`${MARK} text-info`} />
+  ) : line.ok ? (
+    <Check className={`${MARK} text-ok`} />
+  ) : (
+    <X className={`${MARK} text-err`} />
+  )
   const [open, setOpen] = useState(false)
 
   return (
@@ -535,6 +570,16 @@ function ToolRow({ line }: { line: ToolLine }) {
         <span className="min-w-0 truncate text-syn-string">
           {describeInput(line.name, line.input)}
         </span>
+        {/* The same counter a running check gets, for the same reason: a tool row
+            has appeared the moment the call went out since `tool.start` has been
+            on the wire, but nothing on it moved — so a Bash that hangs for a
+            minute and a Read that returns instantly were the same picture, and
+            the only thing on screen that was going anywhere was the one bar at
+            the bottom of the pane naming the tool. */}
+        {running
+          ? line.startedAt > 0 && <RunningFor since={line.startedAt} />
+          : line.ms !== null &&
+            line.ms >= SLOW_TOOL_MS && <span className="shrink-0 text-fg-dim">{took(line.ms)}</span>}
       </div>
       {open && (
         <pre className="mt-1 mb-2 max-h-64 overflow-auto rounded-sm bg-chrome p-2 text-[11px] leading-relaxed whitespace-pre-wrap text-fg-muted">
@@ -876,13 +921,13 @@ function StaleRow({ supervised }: { supervised: boolean }) {
  * away would be hiding the answer to the question the whole gate exists to ask.
  */
 /**
- * Seconds since a check started, ticking.
+ * Seconds since a call or a check started, ticking.
  *
- * A number that moves is the cheapest possible proof the commit has not wedged
- * — the same job `WorkingBar` does for a turn, needed again here because a check
- * is the one thing in a commit that can run for half a minute with nothing else
- * on screen changing. Its own component so the interval exists only while a
- * check is actually running.
+ * A number that moves is the cheapest possible proof the run has not wedged —
+ * the same job `WorkingBar` does for a turn, needed again per row because the
+ * bar names only the one call in flight, and a transcript is read by scrolling
+ * back through the rows above it. Its own component so the interval exists only
+ * while something is actually running, and unmounts with the row that settles.
  */
 function RunningFor({ since }: { since: number }) {
   const [now, setNow] = useState(() => Date.now())
@@ -907,8 +952,7 @@ function VerifyRow({ line }: { line: VerifyLine }) {
    */
   const [override, setOverride] = useState<boolean | null>(null)
   const open = override ?? line.ok === false
-  const seconds =
-    line.ms === null ? "" : line.ms >= 1000 ? `${(line.ms / 1000).toFixed(1)}s` : `${line.ms}ms`
+  const seconds = line.ms === null ? "" : took(line.ms)
   return (
     <div>
       <div
