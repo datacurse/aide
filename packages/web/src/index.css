@@ -19,11 +19,14 @@
   --color-raised: #3c3c3c; /* button.secondaryHoverBackground */
   --color-hover: #2a2d2e; /* list.hoverBackground */
   --color-active: #04395e; /* list.activeSelectionBackground */
-  /* The row holding the newest output. `editor.findMatchBackground` is the one
-     key in the theme whose job is already this: the thing you went looking for,
-     lit so that you stop looking. Warm, which is the point — it has to be told
-     apart at a glance from the cold blue of the row you have selected. */
-  --color-found: #9e6a03; /* editor.findMatchBackground */
+  /* The row holding the newest output: the thing you went looking for, marked so
+     that you stop looking. Warm, which is the point — it has to be told apart at
+     a glance from the cold blue of the row you have selected.
+     This was `editor.findMatchBackground` (#9e6a03) when the mark was a wash
+     across the whole row. It is a 10px ring in the chat list's indicator column
+     now, and a background colour drawn as a 10px ring on near-black is a smudge
+     you have to hunt for — so this is the theme's warm FOREGROUND instead. */
+  --color-found: #cca700; /* list.warningForeground, editorWarning.foreground */
   --color-line: #2b2b2b; /* editorGroup.border */
   --color-line-soft: #313131; /* panel.border */
 
