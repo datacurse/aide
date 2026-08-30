@@ -51,6 +51,15 @@ export interface RunSummary {
   /** The human's message, verbatim. This is the thing being asked about. */
   prompt: string
   images: number
+  /**
+   * False when this turn was sent with thinking off.
+   *
+   * True for every turn logged before the toggle existed, which is what the
+   * absent field means — see `user.message` in the protocol. It is here because
+   * the toggle is an experiment: judging it means telling a turn that thought
+   * from one that did not, months later, off a log.
+   */
+  thinking: boolean
   startedAt: number
   endedAt: number
   wallMs: number
@@ -190,6 +199,7 @@ export function summarizeRun(runId: string, events: RunEvent[]): RunSummary {
     runId,
     prompt: "",
     images: 0,
+    thinking: true,
     startedAt: events[0]?.ts ?? 0,
     endedAt: events.at(-1)?.ts ?? 0,
     wallMs: 0,
@@ -234,6 +244,7 @@ export function summarizeRun(runId: string, events: RunEvent[]): RunSummary {
         if (!summary.prompt) {
           summary.prompt = e.text
           summary.images = e.images?.length ?? 0
+          summary.thinking = e.thinking !== false
         }
         break
       case "assistant.start":
@@ -446,6 +457,15 @@ function render(opts: { project: Project; sessionId: string; runs: RunSummary[] 
     out.push(`| waiting on the API | ${dur(Math.max(0, modelMs - generatingMs))} |`)
   }
   out.push(`| tools | ${dur(toolMs)} over ${plural(calls.length, "call")} |`)
+  // Next to the durations it changes the meaning of, not in a footnote. A
+  // conversation driven with thinking off is fast for a reason, and a reader
+  // comparing this document against another one has to be told which.
+  const unthought = runs.filter((r) => !r.thinking).length
+  if (unthought) {
+    out.push(
+      `| thinking | off for ${unthought} of ${plural(runs.length, "turn")} — the toggle in the composer |`,
+    )
+  }
   if (asks) {
     out.push(`| waiting on you | ${dur(blockedMs)} over ${plural(asks, "permission prompt")} |`)
   }
@@ -600,6 +620,9 @@ function render(opts: { project: Project; sessionId: string; runs: RunSummary[] 
       plural(run.calls.length, "call"),
       money(run.costUsd),
       plural(run.steps, "model step"),
+      // Only when it is off. Saying "thinking" on every other turn would put a
+      // word on 99% of the rows in exchange for the 1% it is about.
+      ...(run.thinking ? [] : ["no thinking"]),
     ]
     out.push(`### ${i + 1} · ${bits.join(" · ")}`)
     out.push("")

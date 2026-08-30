@@ -73,7 +73,8 @@ export function App() {
    *
    * One press has to do two things that live in different components — open the
    * chat, which is a navigation, and send it, which only the composer can do
-   * because only it knows the mode and the effort. This is the half-beat between
+   * because only it knows the mode, the effort and whether the model may think.
+   * This is the half-beat between
    * them, and the composer clears it the moment it has acted.
    */
   const [autoSend, setAutoSend] = useState<string | null>(null)

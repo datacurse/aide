@@ -180,9 +180,9 @@ interface TurnRecord extends Omit<ChatTurn, "blocked"> {
 /**
  * A live SDK session and the process holding it.
  *
- * `mode`, `effort` and `model` are what the session was last told, not what the
- * composer currently shows: a follow-up only spends a control request when its
- * setting actually changed.
+ * `mode`, `effort`, `thinking` and `model` are what the session was last told,
+ * not what the composer currently shows: a follow-up only spends a control
+ * request when its setting actually changed.
  */
 interface SessionWorker {
   child: ChildProcess
@@ -193,6 +193,7 @@ interface SessionWorker {
   sessionId: string | null
   mode: ChatMode
   effort: EffortLevel
+  thinking: boolean
   model: string
   /**
    * The project brief this session's system prompt was built from. A brief that
@@ -216,6 +217,14 @@ export interface SendOptions {
   attachments: Attachment[]
   mode: ChatMode
   effort: EffortLevel
+  /**
+   * Whether the model may think before it answers.
+   *
+   * Not optional, unlike the SDK's own version of this: every caller in here
+   * sends a turn a human is waiting on, and a default hidden behind `?? true`
+   * is one the compiler stops asking anybody about.
+   */
+  thinking: boolean
 }
 
 export class ChatLane {
@@ -372,6 +381,11 @@ export class ChatLane {
         // Omitted rather than empty, so a turn with no screenshots logs the same
         // line it always did.
         ...(images.length ? { images } : {}),
+        // Written only when thinking was OFF, for the same reason: every log in
+        // `~/.aide/runs` predates the toggle, and a turn that says nothing about
+        // thinking is a turn that thought. This is the only record of it — the
+        // profile is where the toggle gets judged, and it reads this line.
+        ...(opts.thinking ? {} : { thinking: false }),
       })
 
       // AWAITED, before anything can write. This is the one ordering constraint
@@ -619,6 +633,11 @@ export class ChatLane {
       // as long as it waited.
       mode: "auto",
       effort: opts.effort,
+      // On, and not a choice anybody gets to make either. The toggle is a thing
+      // you flip for a small ask you can read the answer to; this turn is the
+      // one nobody reads before it runs, it gets exactly one attempt, and what
+      // it is being handed is a check that already failed once.
+      thinking: true,
     }
 
     // The warm session if there is one, and that is not only for the ~1.4s: a
@@ -703,9 +722,11 @@ export class ChatLane {
       ...(opts.attachments.length ? { attachments: opts.attachments } : {}),
       ...(opts.mode !== worker.mode ? { mode: opts.mode } : {}),
       ...(opts.effort !== worker.effort ? { effort: opts.effort } : {}),
+      ...(opts.thinking !== worker.thinking ? { thinking: opts.thinking } : {}),
     }
     worker.mode = opts.mode
     worker.effort = opts.effort
+    worker.thinking = opts.thinking
 
     worker.child.send({ cmd: "turn", turn } satisfies ToWorker)
   }
@@ -807,6 +828,7 @@ export class ChatLane {
       ...(CONFIG.chatMaxBudgetUsd ? { maxBudgetUsd: CONFIG.chatMaxBudgetUsd } : {}),
       chatMode: opts.mode,
       effort: opts.effort,
+      thinking: opts.thinking,
       attachments: opts.attachments,
       trackContext: true,
       ...(opts.sessionId ? { resume: opts.sessionId } : {}),
@@ -824,6 +846,7 @@ export class ChatLane {
       sessionId: opts.sessionId,
       mode: opts.mode,
       effort: opts.effort,
+      thinking: opts.thinking,
       model: CONFIG.taskModel,
       projectDoc,
       turn: null,

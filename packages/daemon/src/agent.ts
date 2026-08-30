@@ -68,6 +68,14 @@ export interface RunAgentOptions {
   /** Omitted for task runs, which stay on the fail-closed `dontAsk`. */
   chatMode?: ChatMode
   effort?: EffortLevel
+  /**
+   * Whether the model may think before it answers. Omitted means yes.
+   *
+   * Separate from `effort`, which only says how HARD to think, and never says
+   * not to. Off is a real answer to a small ask — rename this, add that line —
+   * where the thinking is most of the wall clock and none of the work.
+   */
+  thinking?: boolean
   /** Images pasted into the composer, sent as content blocks alongside the text. */
   attachments?: Attachment[]
   /**
@@ -118,11 +126,15 @@ export interface RunAgentOptions {
 /**
  * A message pushed into a conversation that is already open.
  *
- * `mode`, `effort` and `model` are per-turn choices in the composer but
- * per-query options in the SDK, so a session that outlives a turn has to apply
- * them as control requests before the message goes in. All three have one:
+ * `mode`, `effort`, `thinking` and `model` are per-turn choices in the composer
+ * but per-query options in the SDK, so a session that outlives a turn has to
+ * apply them as control requests before the message goes in. All of them have one:
  * `setPermissionMode`, `applyFlagSettings` and `setModel` â which is what makes
  * keeping the session open possible without freezing the toolbar.
+ *
+ * Each is present only when it CHANGED — see `#followUp` in chat.ts — which is
+ * why `thinking` is optional rather than a plain boolean: undefined means "leave
+ * the session as it is", not "on".
  */
 export interface FollowUpTurn {
   runId: string
@@ -130,6 +142,7 @@ export interface FollowUpTurn {
   attachments?: Attachment[]
   mode?: ChatMode
   effort?: EffortLevel
+  thinking?: boolean
   model?: string
 }
 
@@ -619,6 +632,16 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
       }
       if (turn.model) await q.setModel(turn.model)
       if (turn.effort) await q.applyFlagSettings({ effortLevel: turn.effort })
+      // `!== undefined`, because the value being sent at all is what says it
+      // changed, and the value that changed to is `false` half the time.
+      //
+      // Merged into the same flag layer `chatSettings` opened the query with,
+      // top-level key by top-level key — so a session driven on Auto keeps the
+      // `permissions` rule that lets it run a command without a model call in
+      // front of it. That is the same bargain `effortLevel` above already makes.
+      if (turn.thinking !== undefined) {
+        await q.applyFlagSettings({ alwaysThinkingEnabled: turn.thinking })
+      }
       // Per turn. Each message re-enters plan mode, so an approval carried over
       // from the last one would hand this message a session that never planned
       // and never asks — a third mode, granted by accident.
@@ -702,6 +725,23 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
     event.modelUsage = modelUsage
   }
 
+  /**
+   * The flag-settings layer this query opens under, or null for none.
+   *
+   * One object rather than two spreads, because `settings` is a single option
+   * and the second spread would have silently replaced the first. Empty is
+   * null: passing `{}` would open the layer with nothing in it, which is not
+   * the same as not opening it.
+   */
+  const layer: Settings = {
+    ...(opts.chatMode === "auto" ? fastBashSettings(opts.deniedBash) : {}),
+    // Only when it is off. `true` here would pin thinking on in the flag layer,
+    // above the user's own settings — which is a decision aide has no business
+    // taking on behalf of a machine whose CLI may have been told otherwise.
+    ...(opts.thinking === false ? { alwaysThinkingEnabled: false } : {}),
+  }
+  const chatSettings = Object.keys(layer).length ? layer : null
+
   const q = query({
     prompt: input(),
     options: {
@@ -730,7 +770,14 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
       // the query, which is exactly why an approved plan being carried out is
       // decided in `canUseTool` rather than here — the rule cannot be granted
       // late, and granting it early breaks the plan.
-      ...(opts.chatMode === "auto" ? { settings: fastBashSettings(opts.deniedBash) } : {}),
+      //
+      // Thinking rides in the same layer rather than on the `thinking` query
+      // option beside it, and that is the whole reason `chatSettings` exists.
+      // The query option has no mid-session twin, so a warm session started with
+      // thinking disabled could never be talked back out of it — the toggle
+      // would work on the first message of a conversation and silently do
+      // nothing on every one after.
+      ...(chatSettings ? { settings: chatSettings } : {}),
       ...(opts.effort ? { effort: opts.effort } : {}),
       // Append rather than fork: a chat keeps one stable session id, the way it
       // does in the CLI. See the field's comment for why forking is wrong here.

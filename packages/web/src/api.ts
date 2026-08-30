@@ -188,6 +188,8 @@ export const api = {
       attachments: Attachment[]
       mode: ChatMode
       effort: EffortLevel
+      /** False sends the turn with extended thinking switched off. */
+      thinking: boolean
     },
   ) =>
     call<{ runId: string }>(`/api/projects/${projectId}/chat`, {

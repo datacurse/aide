@@ -654,6 +654,7 @@ app.post("/api/projects/:id/chat", async (req, reply) => {
     attachments?: Attachment[]
     mode?: string
     effort?: string
+    thinking?: boolean
   }
   if (!body.text?.trim() && !body.attachments?.length) {
     return reply.code(400).send({ message: "nothing to send" })
@@ -713,6 +714,11 @@ app.post("/api/projects/:id/chat", async (req, reply) => {
   const effort = (EFFORT_LEVELS as readonly string[]).includes(body.effort ?? "")
     ? (body.effort as EffortLevel)
     : "high"
+  // Only an explicit `false` turns it off. A page that has not reloaded since
+  // the toggle existed sends nothing, and the answer for it is the behaviour it
+  // has always had — thinking on — rather than a silent downgrade of every turn
+  // sent from an old tab.
+  const thinking = body.thinking !== false
 
   try {
     const runId = await chat.send({
@@ -722,6 +728,7 @@ app.post("/api/projects/:id/chat", async (req, reply) => {
       attachments: body.attachments ?? [],
       mode,
       effort,
+      thinking,
     })
     return { runId }
   } catch (err) {

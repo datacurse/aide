@@ -22,6 +22,7 @@ const isChatMode = (v: unknown): v is ChatMode =>
   typeof v === "string" && (CHAT_MODES as readonly string[]).includes(v)
 const isEffort = (v: unknown): v is EffortLevel =>
   typeof v === "string" && (EFFORT_LEVELS as readonly string[]).includes(v)
+const isBool = (v: unknown): v is boolean => typeof v === "boolean"
 
 /**
  * The one message typed often enough to be worth a button of its own.
@@ -133,6 +134,38 @@ function ModePicker({
 }
 
 /**
+ * Thinking, on or off, in the one word it costs.
+ *
+ * Beside the mode picker rather than inside it, and struck through rather than
+ * merely dimmed, because this is a switch you flip for one message and mean to
+ * put back — a state hidden behind a menu is one you forget you left on, and
+ * every fast answer after that is a fast answer you cannot account for.
+ *
+ * Italic, like a thought in the transcript, but in the bar's own colours rather
+ * than the transcript's green: in a row of grey controls a coloured word reads
+ * as a status somebody is telling you about, not as a switch you can press.
+ */
+function ThinkingToggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-pressed={on}
+      title={
+        on
+          ? "Thinking is on. Turn it off for a small ask, where the thinking is most of the wait and none of the work"
+          : "Thinking is off — faster, and worse at anything it has to work out. The profile records which turns ran this way"
+      }
+      className={`rounded px-1.5 py-0.5 text-[11px] italic hover:bg-hover ${
+        on ? "text-fg-muted hover:text-fg" : "text-fg-dim line-through hover:text-fg-muted"
+      }`}
+    >
+      thinking
+    </button>
+  )
+}
+
+/**
  * The message bar.
  *
  * Modelled on the Claude Code extension's, because that is the shape the work
@@ -190,9 +223,9 @@ export function Composer({
    *
    * Set by the ▶ on a parked chat, which is one press for "open this and start
    * it". The send lives here rather than in the row because everything a turn
-   * needs besides the text — the mode, the effort, the plan-then-Auto switch —
-   * is remembered in this component, and a second copy of that in the list
-   * would be the one that silently disagreed.
+   * needs besides the text — the mode, the effort, whether it may think — is
+   * remembered in this component, and a second copy of that in the list would
+   * be the one that silently disagreed.
    */
   autoSend: boolean
   /** The press has been acted on. Called whether or not the box could send. */
@@ -206,6 +239,7 @@ export function Composer({
     attachments: Attachment[]
     mode: ChatMode
     effort: EffortLevel
+    thinking: boolean
   }) => Promise<boolean>
   onInterrupt: () => void
 }) {
@@ -227,6 +261,16 @@ export function Composer({
   // back here, which is the right answer: "manual" is not a mode any more.
   const [preferred, setPreferred] = useRemembered<ChatMode>("aide.chat.mode", "auto", isChatMode)
   const [effort, setEffort] = useRemembered<EffortLevel>("aide.chat.effort", "high", isEffort)
+  /**
+   * Remembered like the other two, and NOT inherited from the conversation.
+   *
+   * There is nowhere to inherit it from: the session store stamps every user
+   * turn with the mode it was sent under, which is what `inheritedMode` reads,
+   * and it says nothing about thinking. Guessing from whether the last turn
+   * produced a thought would be worse than not — a turn that thought about
+   * nothing looks identical to one that was not allowed to.
+   */
+  const [thinking, setThinking] = useRemembered<boolean>("aide.chat.thinking", true, isBool)
   /**
    * The mode this particular conversation was last driven at, which beats the
    * remembered preference while it is open — a chat you were running on Auto in
@@ -261,7 +305,7 @@ export function Composer({
   const send = () => {
     if (!canSend) return
     const outgoing = { text: text.trim(), attachments }
-    void onSend({ ...outgoing, mode, effort }).then((started) => {
+    void onSend({ ...outgoing, mode, effort, thinking }).then((started) => {
       // A refused turn must not also swallow what it refused. The daemon turns
       // a chat away while another one has the repo, and with ▶ on a parked
       // chat the thing being cleared is the whole of a parked idea — one press
@@ -293,7 +337,7 @@ export function Composer({
   const canProceed = !busy && !blocked && text.trim().length === 0 && attachments.length === 0
   const proceed = () => {
     if (!canProceed) return
-    void onSend({ text: PROCEED, attachments: [], mode, effort })
+    void onSend({ text: PROCEED, attachments: [], mode, effort, thinking })
     setNote(null)
   }
 
@@ -308,8 +352,8 @@ export function Composer({
    * The ref is not belt and braces: StrictMode mounts effects twice, and
    * without it every ▶ would send the same message twice in development.
    *
-   * No dependency array, deliberately. `send` closes over the box, the mode and
-   * the effort, so a list of dependencies would either be all of them — which is
+   * No dependency array, deliberately. `send` closes over the box, the mode,
+   * the effort and the thinking toggle, so a list would either be all of them — which is
    * every render anyway — or a stale closure sending last render's message.
    */
   const acted = useRef(false)
@@ -420,6 +464,7 @@ export function Composer({
 
       <div className="mt-1.5 flex items-center gap-3">
         <ModePicker mode={mode} effort={effort} onMode={chooseMode} onEffort={setEffort} />
+        <ThinkingToggle on={thinking} onToggle={() => setThinking(!thinking)} />
         <ContextMeter usage={usage} />
         <div className="ml-auto flex items-center gap-2">
           {busy ? (

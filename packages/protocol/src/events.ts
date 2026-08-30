@@ -163,8 +163,15 @@ export type RunEventBody =
    * `images` is what was pasted alongside the text. Absent rather than empty
    * when there were none: every transcript written before attachments existed
    * is that case, and the reader has to keep working on them.
+   *
+   * `thinking` is written ONLY when the turn was sent with thinking off, and is
+   * absent otherwise — so every log written before the toggle existed reads as
+   * thinking on, which is what it was. Recorded at all because the toggle is an
+   * experiment: it exists to be judged later, from the profile, against turns
+   * that thought. A profile that could not say which turns those were would make
+   * the comparison it is being kept for impossible.
    */
-  | { type: "user.message"; text: string; images?: MessageImage[] }
+  | { type: "user.message"; text: string; images?: MessageImage[]; thinking?: boolean }
   /**
    * The API began an assistant message. Carries nothing to draw.
    *

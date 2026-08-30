@@ -1651,6 +1651,7 @@ export function ConversationPane({
     attachments: Attachment[]
     mode: ChatMode
     effort: EffortLevel
+    thinking: boolean
   }): Promise<boolean> => {
     if (!projectId) return false
     setError(null)

@@ -88,6 +88,18 @@ Decisions already taken, which are not gaps to fill:
 - **Two modes: Plan and Auto.** Manual and Edit-automatically are gone. Nothing
   aide runs may need a human mid-turn, because the fix above is a turn nobody
   typed. Re-adding a mode that asks means re-opening that.
+- **Thinking is a toggle, and the log remembers which way it was.** The struck-
+  through word beside the mode picker sends the turn with extended thinking off.
+  It goes through the SDK's flag-settings layer (`alwaysThinkingEnabled`) rather
+  than `query`'s `thinking` option, because the option has no mid-session twin:
+  a warm session started with it disabled could never be talked back out of it,
+  so the toggle would work on a conversation's first message and silently do
+  nothing on every one after. It is an experiment about speed against accuracy,
+  which is why `user.message` carries `thinking: false` when it was off and
+  nothing when it was on, and the profile marks the turns that did not think.
+  Absent has to keep meaning "thought" — every log written before the toggle
+  existed is that case. The one turn that never gets it is the commit gate's
+  single repair attempt: nobody reads that one before it runs.
 - **The page does not hot-update while a turn is in flight.** A run in this repo
   rewrites the modules the page is running, and a module Fast Refresh cannot
   swap in reloads the browser out from under the turn you are watching — taking

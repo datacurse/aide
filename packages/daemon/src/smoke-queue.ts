@@ -92,6 +92,7 @@ const say = (sessionId: string | null, text: string) =>
     attachments: [],
     mode: "auto",
     effort: "medium",
+    thinking: true,
   })
 
 const turnsOf = (runId: string): number => {
@@ -265,6 +266,7 @@ const e1 = await evicting.send({
   attachments: [],
   mode: "auto",
   effort: "medium",
+  thinking: true,
 })
 await wait(TURN_MS)
 check("warm right after the turn", evicting.liveSessions() === 1, `${evicting.liveSessions()}`)
@@ -301,6 +303,7 @@ console.log("\nthe lock — one agent has the repo")
     attachments: [],
     mode: "auto",
     effort: "medium",
+    thinking: true,
   })
 
   // Mid-turn: the lock is held and says by whom.
@@ -316,6 +319,7 @@ console.log("\nthe lock — one agent has the repo")
       attachments: [],
       mode: "auto",
       effort: "medium",
+      thinking: true,
     })
   } catch (err) {
     refusal = err instanceof Error ? err.message : String(err)
@@ -347,6 +351,7 @@ console.log("\nthe lock — one agent has the repo")
       attachments: [],
       mode: "auto",
       effort: "medium",
+      thinking: true,
     }),
     locked.send({
       project,
@@ -355,6 +360,7 @@ console.log("\nthe lock — one agent has the repo")
       attachments: [],
       mode: "auto",
       effort: "medium",
+      thinking: true,
     }),
   ])
   const admitted = both.filter((r) => r.status === "fulfilled").length
@@ -408,12 +414,30 @@ console.log("\nthe lock — one agent has the repo")
     attachments: [],
     mode: "auto",
     effort: "medium",
+    // The one turn here sent with thinking off, so the two assertions below can
+    // read the record the profile is going to be judged from.
+    thinking: false,
   })
   await wait(TURN_MS)
   check(
     "a follow-up does not re-checkpoint",
     !log.read(secondRun).some((e) => e.type === "checkpoint.taken"),
     "the baseline is the conversation, not the turn",
+  )
+  // The composer's toggle leaves no other trace: the SDK's session file stamps a
+  // turn with its permission mode and says nothing about thinking, so if this
+  // line is not written the experiment cannot be scored afterwards.
+  const asked = log.read(secondRun).find((e) => e.type === "user.message")
+  check(
+    "a turn sent with thinking off says so in its log",
+    asked?.type === "user.message" && asked.thinking === false,
+    `${asked?.type === "user.message" ? String(asked.thinking) : "(no message)"}`,
+  )
+  const thought = log.read(firstRun).find((e) => e.type === "user.message")
+  check(
+    "and an ordinary turn carries nothing",
+    thought?.type === "user.message" && thought.thinking === undefined,
+    "every log written before the toggle existed is a turn that thought; absent has to keep meaning that",
   )
   check(
     "and the original baseline still stands",
