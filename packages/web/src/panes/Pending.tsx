@@ -151,13 +151,13 @@ export function PendingRail({
   const files = pending?.files ?? []
   return (
     <aside className="flex w-64 shrink-0 flex-col border-l border-line bg-chrome">
-      <PaneHeader title="uncommitted">
-        {files.length > 0 && (
-          <span className="rounded-sm bg-warn/15 px-1.5 py-0.5 font-sans text-[10px] text-warn">
-            {files.length}
-          </span>
-        )}
-      </PaneHeader>
+      {/* No count in the header. The sentence two rows down says "9 files
+          uncommitted on main" — a badge saying 9 beside it is the same number
+          twice, close enough together to read as two different facts you have
+          to reconcile. The sentence wins because it is the copy that also names
+          the branch and what to do about it; the badge could only ever be the
+          number. */}
+      <PaneHeader title="uncommitted" />
 
       {error && (
         <div className="shrink-0 border-b border-line px-3 py-1 font-sans text-[11px] text-err">
