@@ -163,6 +163,14 @@ Decisions already taken, which are not gaps to fill:
   `pnpm smoke` — untouched. `repoOf(project)` is what callers pass; passing
   `project.root` for a remote project is the mistake that produced "cannot
   change to '/root/code/…'" in the rail.
+- **A remote git call has a timeout; a local one does not.** Local git either
+  answers or fails. A network can do neither, and `execFile` then waits forever
+  — which wedged `games42_mono` for an hour: a commit hung on its first git call
+  (Windows git against a Linux path, before `RepoRef` existed), held the
+  project's lock, and could not be cleared from the UI because `interrupt` sets
+  a flag the stuck `await` never reaches. 90s, and the message names the host
+  and the subcommand rather than surfacing as an empty string. The lesson is the
+  brief's: a gate whose precondition can hang has no release.
 - **A remote read is batched, because a connection costs 1.4s.** Windows OpenSSH
   cannot multiplex (no Unix sockets), so the cost is per CONNECTION and the only
   fix is fewer of them. `gitBatch` runs several independent reads down one ssh

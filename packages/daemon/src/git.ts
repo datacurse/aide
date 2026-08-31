@@ -12,6 +12,23 @@ const run = promisify(execFile)
 export const GIT_OPTS = { maxBuffer: 32 * 1024 * 1024, windowsHide: true } as const
 
 /**
+ * How long a REMOTE git call may take before it is given up on.
+ *
+ * Local git has no timeout and needs none: it either answers or fails, and a
+ * repository on this disk cannot stop responding halfway. A network can, and
+ * when it does `execFile` waits forever — which is not a hypothetical. A commit
+ * on a remote project ran `git` against a path that did not exist on this
+ * machine, hung on the first call, and held that project's lock for an hour with
+ * one line in its log and no way to clear it from the UI: `interrupt` sets a
+ * flag the stuck `await` never reaches.
+ *
+ * Generous, because a `git add -A` over ssh on a large tree is genuinely slow —
+ * but finite, because the failure it prevents is a project wedged until the
+ * daemon is restarted. A gate whose precondition can hang is not a gate.
+ */
+const REMOTE_GIT_TIMEOUT_MS = 90_000
+
+/**
  * Where a repository is: a path, and optionally the machine holding it.
  *
  * Every git call in aide already took the root as its first argument, so making
@@ -54,6 +71,13 @@ export const repoOf = (project: { root: string; host?: string }): RepoRef =>
  * the wrong directory instead of failing.
  */
 const shellQuote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`
+
+/**
+ * `GIT_OPTS`, plus a timeout when the call goes over a network. See
+ * `REMOTE_GIT_TIMEOUT_MS`. Local calls are left exactly as they were.
+ */
+const withRemoteTimeout = <T extends object>(ref: RepoRef, opts: T): T =>
+  refHost(ref) ? { ...opts, timeout: REMOTE_GIT_TIMEOUT_MS } : opts
 
 /**
  * The command for a git call, local or remote.
@@ -123,7 +147,7 @@ export async function gitBatch(root: RepoRef, commands: string[][]): Promise<str
   const { stdout } = await run(
     "ssh",
     ["-o", "BatchMode=yes", "-F", sshConfigPath(), refHost(root)!, script],
-    GIT_OPTS,
+    withRemoteTimeout(root, GIT_OPTS),
   ).catch(() => ({ stdout: "" }))
 
   // Each section is exactly what its command wrote, because the delimiter
@@ -151,10 +175,18 @@ export async function git(
     // merged only for a local one: inheriting this machine's environment on the
     // far side would be meaningless and occasionally wrong.
     const opts = env && !refHost(cwd) ? { ...GIT_OPTS, env: { ...process.env, ...env } } : GIT_OPTS
-    const { stdout } = await run(file, argv, opts)
+    const { stdout } = await run(file, argv, withRemoteTimeout(cwd, opts))
     return stdout
   } catch (err) {
-    const e = err as { stderr?: string; stdout?: string; message?: string }
+    const e = err as { stderr?: string; stdout?: string; message?: string; killed?: boolean }
+    // A killed process is the timeout above, and it has no stderr of its own —
+    // without this it surfaces as an empty message, which is the least useful
+    // thing a wedged pane can say.
+    if (e.killed && refHost(cwd)) {
+      throw new Error(
+        `${refHost(cwd)} did not answer \`git ${args[0]}\` within ${REMOTE_GIT_TIMEOUT_MS / 1000}s`,
+      )
+    }
     const detail = `${e.stderr ?? ""}${e.stdout ?? ""}`.trim()
     throw new Error(detail || e.message || `git ${args[0]} failed`)
   }
@@ -306,7 +338,7 @@ async function realIndexPath(root: RepoRef): Promise<string | null> {
 export async function gitDiffing(cwd: RepoRef, args: string[]): Promise<string> {
   const [file, argv] = gitCommand(cwd, args)
   try {
-    const { stdout } = await run(file, argv, GIT_OPTS)
+    const { stdout } = await run(file, argv, withRemoteTimeout(cwd, GIT_OPTS))
     return stdout
   } catch (err) {
     const e = err as { code?: number; stdout?: string; stderr?: string; message?: string }
