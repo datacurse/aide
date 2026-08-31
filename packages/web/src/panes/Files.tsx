@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import type { GitFileState, GitTree, GitTreeEntry } from "@aide/protocol"
 import { api } from "../api.js"
-import { CaretRight, File, Folder } from "../icons.js"
+import { lookOf } from "../filetypes.js"
+import { CaretRight, Folder } from "../icons.js"
 import { useKeyed } from "../useKeyed.js"
 
 /**
@@ -405,13 +406,33 @@ function Row({
   const tone = entry.state ? STATE_STYLE[entry.state] : marked ? "text-warn" : "text-fg-muted"
 
   if (entry.kind === "file") {
+    const look = lookOf(entry.name)
     return (
       <div
-        style={{ paddingLeft: pad + 16 }}
+        // A file has no caret, so its badge starts in the column a sibling
+        // folder spends on one. Both rows then run caret-or-badge, gap, icon-
+        // width, gap, name — and the names land on the same x at every depth,
+        // which is the whole reason a tree is readable at a glance.
+        style={{ paddingLeft: pad }}
         title={`${entry.path}${entry.state ? ` · ${STATE_LABEL[entry.state]}` : ""}`}
         className={`flex items-center gap-1.5 py-[3px] pr-3 font-sans text-[12px] ${tone}`}
       >
-        <File className="size-3 shrink-0 text-fg-dim" />
+        {/* What kind of file this is — see `filetypes.ts`. The icon carries the
+            class of thing (code, config, prose, a picture) and its colour
+            carries the language, because at 12px a per-language glyph is a
+            smudge told apart by position while a colour is legible at a glance.
+
+            Boxed to 30px, which is not a taste: a folder row spends caret(12) +
+            gap(6) + icon(12) before its name, so a file name lands on the same x
+            as the folder name above it. Change either and the column goes
+            ragged. */}
+        <span
+          className="flex shrink-0 justify-end"
+          style={{ width: 30 }}
+          aria-hidden="true"
+        >
+          <look.Icon className={`size-3.5 ${look.tone}`} />
+        </span>
         <span className="min-w-0 flex-1 truncate">{entry.name}</span>
       </div>
     )

@@ -31,6 +31,7 @@ record. They are all rows in the same list, in that order of urgency.
 | An event log rendered as a conversation | `packages/web/src/panes/Transcript.tsx` |
 | What is left to commit, and the two readings under it | `packages/web/src/panes/Pending.tsx` |
 | The project's files, one directory at a time | `packages/web/src/panes/Files.tsx` |
+| What kind of file a name is, and its colour | `packages/web/src/filetypes.ts` |
 | Where the graph's lines go, and the SVG that draws them | `packages/web/src/graph.ts`, `packages/web/src/GitGraph.tsx` |
 | Branch, history and lanes, read off the repo | `packages/daemon/src/repo.ts` |
 | Which machine a git call lands on, and batching them | `packages/daemon/src/git.ts` |
@@ -84,6 +85,23 @@ Decisions already taken, which are not gaps to fill:
   slash putting `src2/`'s files under `src`, a deleted file left as a row that
   opens nothing, a rename showing under both names, and a collapsed folder that
   fails to mark a change three levels below it.
+- **File icons are drawn, not installed, and there are eight of them.** A pack
+  (Seti, Material, vscode-icons) is a few thousand SVGs plus a font or sprite
+  sheet, which is the trade `icons.tsx` already refused for Phosphor — so these
+  are Phosphor paths copied verbatim into that same file, and the cost is the
+  eight shapes actually used. Eight rather than one per language because of what
+  survives 12px in a 16rem column: a pack spends thousands of glyphs separating
+  TypeScript from JavaScript from CoffeeScript, and at that size they are three
+  blue-ish smudges told apart by position. What the eye resolves is the CLASS —
+  code, config, prose, picture, package, stylesheet, database, shell — so there
+  is one distinguishable icon per answer and colour carries the language. The
+  colours are the syntax palette already in `index.css`, so nothing is a new
+  language to learn: TypeScript takes the blue VS Code gives types, JavaScript
+  the yellow it gives functions. The icon box is 30px because a folder row
+  spends caret(12) + gap(6) + icon(12) before its name; change either and file
+  and folder names stop landing on the same x. A malformed path renders as
+  nothing in the right colour and the right box — indistinguishable from a blank
+  column — so `d` attributes are worth checking rather than eyeballing.
 - **A remote tree prefetches one level down; a local one does not.** Measured
   against `tg`: a bare `ssh echo hi` is 1.44s, one directory is 1.52s, and all
   EIGHT of that repo's top-level directories in the same connection is 1.55s for
