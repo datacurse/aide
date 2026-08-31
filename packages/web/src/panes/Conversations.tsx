@@ -448,9 +448,19 @@ function CaptureBox({ projectId }: { projectId: string }) {
 function RunDial({ since }: { since: number | null }) {
   return (
     <>
-      {/* Concentric with the 36px square, inset by a pixel so the arc reads as
-          the button's own edge lit up rather than a hoop dropped over it. */}
-      <span className="pointer-events-none absolute -inset-px animate-spin rounded-sm border-2 border-info/70 border-t-transparent border-r-transparent" />
+      {/*
+        `rounded-full`, and this is the whole bug that made the first version a
+        propeller. A SQUARE that spins does not stay inside its own box: every
+        corner sweeps a circle of radius half the diagonal, so a 38px rounded-rect
+        traced a ~54px arc swinging well outside the 36px button and past the row.
+        Only a circle is invariant under rotation, so only a circle can spin in
+        place. `inset-0.5` keeps that circle inscribed in the square rather than
+        touching its corners.
+
+        The tick underneath is `hidden` rather than transparent, so this is
+        centred by the flex row on its own — see `DoneCheck`.
+      */}
+      <span className="pointer-events-none absolute inset-0.5 animate-spin rounded-full border-2 border-info/70 border-t-transparent border-r-transparent" />
       <Held since={since} />
     </>
   )
@@ -490,11 +500,12 @@ function Held({ since }: { since: number | null }) {
   if (since === null) return null
   const s = Math.max(0, Math.round((now - since) / 1000))
   return (
-    // 11px, not the 9px this started at. 9px inside a 36px square is a speck
-    // with a wide moat around it — the arc reads and the number does not, which
-    // wastes the whole reason the count sits in the middle rather than out on
-    // the meta line. `12m` is the widest string it can hold and it clears the
-    // square's inner width at this size; the next step up does not.
+    // 11px, not the 9px this started at. 9px inside the ring is a speck with a
+    // wide moat around it — the arc reads and the number does not, which wastes
+    // the whole reason the count sits in the middle rather than out on the meta
+    // line. `12m` is the widest string it can hold: the ring is a ~32px circle
+    // inscribed in the 36px square, leaving ~26px of clear width inside its
+    // 2px stroke, and three characters at this size sit just inside that.
     <span className="text-[11px] leading-none font-semibold tabular-nums text-info">
       {s < 60 ? s : `${Math.floor(s / 60)}m`}
     </span>
@@ -586,10 +597,12 @@ function DoneCheck({
               "border-line-soft text-transparent group-hover:text-fg-muted hover:border-fg-muted"
       }`}
     >
-      {/* Hidden under the dial rather than unmounted: a run ends and the tick
-          has to be in the same place it was, at the same size, or the column
-          twitches every time a turn finishes. */}
-      <Check className={`size-5 ${working ? "opacity-0" : ""}`} />
+      {/* `hidden`, not `opacity-0`. An invisible tick is still a 20px flex item,
+          so the row centred the PAIR of it and the elapsed count — which put the
+          number visibly right of the dial it is supposed to sit in the middle of.
+          The square's own size is fixed either way, so taking the tick out of the
+          layout costs nothing and is what lets the digits centre. */}
+      <Check className={`size-5 ${working ? "hidden" : ""}`} />
       {working && <RunDial since={heldSince} />}
     </button>
   )
