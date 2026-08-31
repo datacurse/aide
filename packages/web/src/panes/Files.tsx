@@ -212,24 +212,37 @@ export function FileTree({
   )
 
   /**
-   * Everything that should be on screen but has not been read yet.
+   * Everything that should be on screen but has not been read yet, encoded so
+   * the effect below can compare it by value rather than by array identity.
    *
    * The root, always — it is the one row you did not click for. And every folder
    * left open from before, because the open set outlives this component while
    * its contents do not: without this, coming back from the history finds three
    * folders with turned carets and nothing under any of them.
    *
-   * Joined into a string so the effect below compares by value. A fresh array
-   * every render would re-run it every render, which is a fetch loop.
+   * JSON, and NOT a joined string, because the repository root's path is the
+   * empty string and every separator scheme makes that ambiguous. Joining with a
+   * newline was the first version and it deadlocked the whole pane: a list
+   * holding only the root — which is EVERY fresh mount — joins to `""`, the
+   * guard below read that as "nothing wanted" and returned, and the one fetch
+   * this view depends on was never made. It looked exactly like a slow network,
+   * on local and remote projects alike, which is how it survived two rounds of
+   * being stared at.
+   *
+   * `JSON.stringify([""])` is `'[""]'` and `JSON.stringify([])` is `'[]'` —
+   * different values, so "just the root" can no longer be read as "nothing to
+   * do", and a path containing any character at all round-trips.
    */
-  const wanted = ["", ...(open ?? [])].filter((path) => !loaded?.has(path)).join("\n")
+  const wanted = JSON.stringify(["", ...(open ?? [])].filter((path) => !loaded?.has(path)))
+
   useEffect(() => {
-    if (!wanted) return
+    const paths = JSON.parse(wanted) as string[]
+    if (paths.length === 0) return
     // `failed` is consulted HERE rather than inside `read`, so that a click can
     // still retry one — see `toggle`. Skipping it in `read` would make the
     // failure permanent for the life of the mount, which is the mistake the
     // in-flight guard used to make for every path, successful or not.
-    for (const path of wanted.split("\n")) {
+    for (const path of paths) {
       if (!failed.current.has(path)) void read(path)
     }
     // `read` is stable per project and `wanted` is what decides this. Depending
