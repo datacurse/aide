@@ -447,6 +447,43 @@ app.get("/api/projects/:id/git/pending", async (req, reply) => {
   }
 })
 
+/**
+ * One directory of the working tree, for the rail's file view.
+ *
+ * A query parameter rather than a wildcard route, because the thing being named
+ * is a path with slashes in it and Fastify would otherwise need `*` — which
+ * makes the empty string, meaning the repository root, the one value the route
+ * cannot express.
+ *
+ * Answered one level at a time. See `GitTree`: the alternative reads every path
+ * in the repository to draw the twenty rows you can see, and does it again down
+ * a 1.4s ssh connection for a remote project.
+ */
+app.get("/api/projects/:id/git/tree", async (req, reply) => {
+  const { id } = req.params as { id: string }
+  const { path } = req.query as { path?: string }
+  const project = await getProject(id)
+  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
+
+  // This value comes from the URL and ends up as a git argument, so the same
+  // rule `isSha` enforces for commits applies: a path that starts with a dash
+  // reaches `ls-tree` as a FLAG rather than as a directory, and git is very
+  // willing to run programs it has been told to. `..` is refused for the
+  // ordinary reason — the tree of a project is the project.
+  const dir = (path ?? "").replace(/\\/g, "/")
+  if (dir.startsWith("-") || dir.split("/").includes("..")) {
+    return reply.code(400).send({ message: `${dir} is not a path inside this project` })
+  }
+
+  try {
+    return await repo.tree(repoOf(project), dir)
+  } catch (err) {
+    return reply.code(502).send({
+      message: `could not read ${project.root}: ${err instanceof Error ? err.message : String(err)}`,
+    })
+  }
+})
+
 app.get("/api/projects/:id/git/working", async (req, reply) => {
   const { id } = req.params as { id: string }
   const project = await getProject(id)

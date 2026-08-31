@@ -188,6 +188,68 @@ export interface GitPending {
   files: GitFileChange[]
 }
 
+/**
+ * One entry in a directory of the working tree.
+ *
+ * `state` is the file's own status when git has one for it, so the tree and the
+ * uncommitted list above it colour the same file the same way — two lists on one
+ * rail disagreeing about whether a file is modified reads as one of them being
+ * broken. Null for the overwhelming majority, which are unchanged.
+ *
+ * A directory carries `dirty` instead: whether anything under it is uncommitted,
+ * at any depth. That is what makes a collapsed tree worth looking at — the point
+ * of the mark is to tell you which folder to open, and a folder that only knew
+ * about its immediate children would go unmarked over a change three levels
+ * down.
+ */
+export interface GitTreeEntry {
+  /** Just this entry's own name — the path is assembled by whoever asked. */
+  name: string
+  /** Repo-relative, forward slashes, as git prints them. */
+  path: string
+  kind: "file" | "directory"
+  /** The file's working-tree status, or null when it is committed and unchanged. */
+  state: GitFileState | null
+  /** Directories only: something under here is uncommitted. */
+  dirty: boolean
+}
+
+/**
+ * What is in one directory of the working tree.
+ *
+ * One level at a time, and that is the whole design: a tree that fetched itself
+ * whole would read every path in the repository to draw twenty rows, and on a
+ * remote project it would do it down a connection that costs 1.4s. What a
+ * collapsed folder costs is one request, when you open it.
+ *
+ * Read through git rather than off the filesystem, which buys three things at
+ * once: `.gitignore` is honoured without aide having to parse it, `node_modules`
+ * never appears, and the same call works unchanged on a project that lives on
+ * another machine — see `RepoRef`.
+ */
+export interface GitTree {
+  /** The directory this lists, repo-relative. Empty string for the root. */
+  path: string
+  /** Directories first, then files, each A–Z — the order VS Code shows. */
+  entries: GitTreeEntry[]
+  /**
+   * The contents of each subdirectory above, one level deep — sent unasked so
+   * the first expand costs nothing.
+   *
+   * Only for a project on another machine, and the asymmetry is the point: there
+   * a read costs an ssh HANDSHAKE (~1.4s) rather than a read (~80ms), so the
+   * cheapest second directory is the one fetched inside the connection that is
+   * already open. Locally it is empty, because there is no handshake to amortise
+   * and this would be work done on spec.
+   *
+   * Keyed by full path, so a client merges it straight into whatever it caches
+   * directories under. Empty for a directory with no subdirectories, and absent
+   * keys simply mean "not prefetched" — never "empty directory", which is what
+   * makes it safe to ignore entirely.
+   */
+  children: Record<string, GitTreeEntry[]>
+}
+
 export interface GitWorkingTree {
   /**
    * Carried along because the working tree cannot be described without it —

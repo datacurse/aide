@@ -156,3 +156,39 @@ export function Minus({ className }: IconProps) {
     />
   )
 }
+
+/**
+ * Whether a folder in the tree is open, as one icon that turns.
+ *
+ * `caret-right`, rotated 90° by the call site, rather than Phosphor's separate
+ * `caret-down`. Two paths would be two shapes swapping at the moment of a click,
+ * and a rotation is the one thing here that can be animated into a state change
+ * rather than replaced by it.
+ */
+export function CaretRight({ className }: IconProps) {
+  return (
+    <Icon
+      className={className}
+      d="M181.66,133.66l-80,80a8,8,0,0,1-11.32-11.32L164.69,128,90.34,53.66a8,8,0,0,1,11.32-11.32l80,80A8,8,0,0,1,181.66,133.66Z"
+    />
+  )
+}
+
+export function Folder({ className }: IconProps) {
+  return (
+    <Icon
+      className={className}
+      d="M216,72H131.31L104,44.69A15.86,15.86,0,0,0,92.69,40H40A16,16,0,0,0,24,56V200.62A15.4,15.4,0,0,0,39.38,216H216.89A15.13,15.13,0,0,0,232,200.89V88A16,16,0,0,0,216,72ZM40,56H92.69l16,16H40ZM216,200H40V88H216Z"
+    />
+  )
+}
+
+/** `file`, for a leaf. Deliberately not `file-text`: at 12px the ruled lines fill it in. */
+export function File({ className }: IconProps) {
+  return (
+    <Icon
+      className={className}
+      d="M213.66,82.34l-56-56A8,8,0,0,0,152,24H56A16,16,0,0,0,40,40V216a16,16,0,0,0,16,16H200a16,16,0,0,0,16-16V88A8,8,0,0,0,213.66,82.34ZM160,51.31,188.69,80H160ZM200,216H56V40h88V88a8,8,0,0,0,8,8h48V216Z"
+    />
+  )
+}

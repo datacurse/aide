@@ -11,6 +11,8 @@ import type {
   GitOverview,
   GitPending,
   GitRef,
+  GitTree,
+  GitTreeEntry,
   GitWorkingTree,
 } from "@aide/protocol"
 import { execFile } from "node:child_process"
@@ -292,6 +294,182 @@ export async function workingTree(root: RepoRef): Promise<GitWorkingTree> {
   }
 
   return { overview: view, files, diff: parts.join("\n"), omitted }
+}
+
+// ---------------------------------------------------------------------------
+// The tree of files
+// ---------------------------------------------------------------------------
+
+/**
+ * Which of a file's two status halves the tree shows.
+ *
+ * The working-tree half when there is one, exactly as the uncommitted list above
+ * it chooses — see `PendingRow`. Same rule in both places on purpose: one file
+ * marked "added" in one list and "modified" in the other, on the same rail, is
+ * two lists that appear to disagree about the same fact.
+ */
+const shownState = (f: GitFileChange): GitFileState => f.unstaged ?? f.staged ?? "unknown"
+
+/**
+ * One directory of the working tree, from `ls-tree` plus `status`.
+ *
+ * Pure, and separate from the call that fetches its inputs, because everything
+ * here that can be wrong is wrong quietly: a prefix compared without its
+ * trailing slash makes `src2/` a child of `src`, and a deleted file that git
+ * still lists in HEAD's tree would otherwise show as an ordinary row. `pnpm
+ * smoke` reaches this directly.
+ *
+ * Three sources rather than one, and each covers what the others cannot:
+ *
+ * - `ls-tree` is what is COMMITTED here, which is most of the repository and is
+ *   the only one of the three that is cheap to ask for one directory at a time.
+ * - `status` adds what is not committed — an untracked file exists on disk and
+ *   in no tree — and marks everything it names.
+ * - and `status` again, over the whole repo, is what lets a COLLAPSED directory
+ *   say that something under it changed. That is the mark you actually navigate
+ *   by, and nothing local to this directory knows it.
+ *
+ * A path that git reports as deleted is dropped rather than drawn struck
+ * through. It is in HEAD's tree and not on disk, and a file tree whose rows are
+ * things you can open must not offer one that is not there.
+ */
+export function buildTree(
+  path: string,
+  lsTree: string,
+  changes: GitFileChange[],
+): GitTreeEntry[] {
+  // Normalised once, with the trailing slash, so `startsWith` cannot match a
+  // sibling whose name merely begins the same way — `src/` never matches
+  // `src2/foo.ts`. The root is the empty prefix, which matches everything, which
+  // is correct.
+  const prefix = path ? `${path.replace(/\/+$/, "")}/` : ""
+
+  const state = new Map<string, GitFileState>()
+  const deleted = new Set<string>()
+  // Every directory with something uncommitted anywhere beneath it. Built by
+  // walking each changed path's ancestors, so `a/b/c.ts` marks `a/b` and `a`.
+  const dirty = new Set<string>()
+  for (const change of changes) {
+    const shown = shownState(change)
+    state.set(change.path, shown)
+    if (shown === "deleted") deleted.add(change.path)
+    // A rename leaves its old path behind, and git names it in the same entry
+    // rather than as a deletion of its own — without this, the file appears
+    // under both names and one of them cannot be opened.
+    if (change.from) deleted.add(change.from)
+    for (let cut = change.path.indexOf("/"); cut !== -1; cut = change.path.indexOf("/", cut + 1)) {
+      dirty.add(change.path.slice(0, cut))
+    }
+  }
+
+  const entries = new Map<string, GitTreeEntry>()
+  const add = (name: string, kind: "file" | "directory") => {
+    const full = `${prefix}${name}`
+    if (kind === "file" && deleted.has(full)) return
+    // First writer wins, so a name in both `ls-tree` and `status` — a tracked
+    // file that has been edited — keeps one row rather than two.
+    if (entries.has(full)) return
+    entries.set(full, {
+      name,
+      path: full,
+      kind,
+      state: kind === "file" ? (state.get(full) ?? null) : null,
+      dirty: kind === "directory" ? dirty.has(full) : false,
+    })
+  }
+
+  // `ls-tree` without `-r` already lists exactly one level, and marks a
+  // directory with the `tree` type — so there is no name-splitting to do here
+  // and no chance of mistaking a file with a slash in its name for a folder.
+  for (const line of lsTree.split("\0")) {
+    if (!line) continue
+    // `<mode> <type> <object>\t<path>` — the tab is the only safe split, since
+    // a path may contain spaces.
+    const tab = line.indexOf("\t")
+    if (tab === -1) continue
+    const type = line.slice(0, tab).split(/\s+/)[1]
+    const full = line.slice(tab + 1)
+    const name = full.slice(prefix.length)
+    if (!name) continue
+    add(name, type === "tree" ? "directory" : "file")
+  }
+
+  // Untracked work, which is in no tree and therefore in nothing above. A new
+  // file two levels down contributes the DIRECTORY that holds it, not itself —
+  // that folder is untracked too, so `ls-tree` has never heard of it either.
+  for (const change of changes) {
+    if (!change.path.startsWith(prefix)) continue
+    const rest = change.path.slice(prefix.length)
+    if (!rest) continue
+    const cut = rest.indexOf("/")
+    if (cut === -1) add(rest, "file")
+    else add(rest.slice(0, cut), "directory")
+  }
+
+  // Directories first, then A–Z within each group, case-insensitively: the order
+  // VS Code's explorer uses, and the one that makes a folder findable by where
+  // it is rather than by reading every row.
+  return [...entries.values()].sort((a, b) => {
+    if (a.kind !== b.kind) return a.kind === "directory" ? -1 : 1
+    return a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
+  })
+}
+
+/**
+ * One directory of the working tree, wherever the repository is.
+ *
+ * Every read in ONE round trip, and on a remote project that is the only number
+ * that matters. Measured against `tg`: `ssh echo hi` is 1.44s, this whole call
+ * is 1.55s. The handshake is the cost and the git is a rounding error, because
+ * Windows OpenSSH cannot multiplex — which is why the shape here is "ask for
+ * everything you might want while the door is open" rather than "ask for the
+ * least".
+ *
+ * `status` is the whole repository rather than this directory, because that is
+ * what a COLLAPSED folder's dirty mark is made of — a directory's own listing
+ * cannot know about a change three levels below it. It is read once and reused
+ * for the prefetched children too, since it already describes them.
+ */
+export async function tree(root: RepoRef, path: string): Promise<GitTree> {
+  // Trailing slash, because `ls-tree HEAD src` prints the DIRECTORY `src` as one
+  // entry, and `ls-tree HEAD src/` prints what is inside it. One character, and
+  // without it every folder opens to show only itself.
+  const clean = path.replace(/^\/+|\/+$/g, "")
+  const [lsTree, z] = await gitBatch(root, [
+    ["ls-tree", "-z", "HEAD", clean ? `${clean}/` : "."],
+    ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+  ])
+  const changes = parseStatus(z ?? "")
+  const entries = buildTree(clean, lsTree ?? "", changes)
+
+  // A remote project pays for the CONNECTION, not for the reading: `ls-tree` on
+  // a directory is ~80ms and the ssh handshake around it is 1.4s, because
+  // Windows OpenSSH cannot multiplex. So the second round trip — the one you
+  // spend opening the first folder — is bought here instead, inside the
+  // connection that is already open, and the expand it pays for is instant.
+  //
+  // One level deep and no further. Two would be most of the repository read to
+  // draw rows nobody has asked for, which is the whole-tree fetch this design
+  // exists to avoid; one is bounded by the directories on screen.
+  //
+  // Local projects skip it: there is no handshake to amortise, each read is
+  // ~30ms, and prefetching would be work done on the chance it is wanted.
+  const children: Record<string, GitTreeEntry[]> = {}
+  const dirs = entries.filter((e) => e.kind === "directory")
+  if (refHost(root) && dirs.length > 0) {
+    const inner = await gitBatch(
+      root,
+      dirs.map((d) => ["ls-tree", "-z", "HEAD", `${d.path}/`]),
+    )
+    dirs.forEach((d, i) => {
+      // The SAME status output, reused rather than re-read. It is the whole
+      // repository's, so it already describes every one of these directories —
+      // asking again per child would be the expensive call git makes, repeated.
+      children[d.path] = buildTree(d.path, inner[i] ?? "", changes)
+    })
+  }
+
+  return { path: clean, entries, children }
 }
 
 // ---------------------------------------------------------------------------

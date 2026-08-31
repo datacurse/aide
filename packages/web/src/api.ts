@@ -8,6 +8,7 @@ import type {
   FolderPick,
   GitHistory,
   GitPending,
+  GitTree,
   Health,
   PlanUsage,
   Profile,
@@ -22,6 +23,7 @@ export type {
   FolderPick,
   GitHistory,
   GitPending,
+  GitTree,
   Health,
   PlanUsage,
   Profile,
@@ -274,4 +276,15 @@ export const api = {
    */
   gitHistory: (projectId: string, limit: number) =>
     call<GitHistory>(`/api/projects/${projectId}/git?limit=${limit}`),
+
+  /**
+   * What is in one directory of the working tree.
+   *
+   * On a press — opening a folder — and never on a beat. A tree that polled
+   * would be one `ls-tree` per open directory per tick to redraw rows that move
+   * only when somebody adds a file, and the mark that DOES move on every
+   * keystroke is already on the rail above it.
+   */
+  gitTree: (projectId: string, path: string) =>
+    call<GitTree>(`/api/projects/${projectId}/git/tree?path=${encodeURIComponent(path)}`),
 }

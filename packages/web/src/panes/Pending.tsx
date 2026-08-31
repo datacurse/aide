@@ -14,23 +14,34 @@ import { GraphCell, ROW_H, graphWidth } from "../GitGraph.js"
 import { ArrowDown, ArrowUp, Tag } from "../icons.js"
 import { Button, Empty, PaneHeader } from "../ui.js"
 import { useKeyed } from "../useKeyed.js"
+import { useRemembered } from "../useRemembered.js"
+import { FileTree } from "./Files.js"
 
 /**
- * What the project has left to commit, and the history it will land on.
+ * What the project has left to commit, and what else is worth knowing about the
+ * repository it will land in.
  *
- * The rail is two readings of one repository, stacked in the order you ask them
- * in: what is not committed yet, then what already is. It was only ever the
- * first, and the second was missing in a way that is easy to state — nothing on
- * screen said which commit was the last one, so "am I looking at a clean tree on
- * top of my work, or on top of somebody else's" had no answer without a
- * terminal.
+ * The rail is fixed on top and switchable underneath. The top is what is not
+ * committed yet, and it is never a click away because it decides what you are
+ * ALLOWED to do next — a new conversation is refused while it has anything in
+ * it, and a status you had to select a tab to read would meet you as a refusal
+ * before it met you as a reason.
  *
- * What is still not here is a repository BROWSER. Nothing in the history is a
- * link: no commit view, no file tree, no diff of an old change. Reading a diff
- * belongs to the conversation that produced it, where there is a description and
- * a checkpoint to measure it against — a second, project-shaped copy of the same
- * change would be one more place to look and no more review. Orientation is a
- * cheaper thing than that, and it is all this half is for.
+ * Underneath, two readings you pick between. The history answers "where am I":
+ * it was missing once, and the gap is easy to state — nothing on screen said
+ * which commit was the last one, so "clean on top of my work, or clean on top of
+ * somebody else's" had no answer without a terminal. The tree answers "what is
+ * here", which is the other half of arriving in a project you have not opened
+ * for a week.
+ *
+ * What neither is, is a repository BROWSER. Nothing in the history opens: no
+ * commit view, no file tree of an old commit, no diff of a change that already
+ * landed. Reading a diff belongs to the conversation that produced it, where
+ * there is a description and a checkpoint to measure it against — a second,
+ * project-shaped copy of the same change would be one more place to look and no
+ * more review. The tree is not a hole in that rule, because it draws a different
+ * object: the working tree as it is NOW, the one every run edits and the button
+ * above it commits. See `Files.tsx`.
  *
  * There is still no staging and no discard either: a commit here is the whole of
  * what is uncommitted, and anything narrower would be a second review with no
@@ -213,10 +224,115 @@ export function PendingRail({
             </>
           )}
 
-          <History projectId={projectId} />
+          <Lower projectId={projectId} />
         </>
       )}
     </aside>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// The lower half, and which reading of the repo it is showing
+// ---------------------------------------------------------------------------
+
+/** Which reading of the repository the rail's lower half is showing. */
+type Lens = "history" | "files"
+
+/**
+ * Remembered across reloads, and across projects.
+ *
+ * Across projects deliberately, unlike everything else in this rail: this is not
+ * a fact about a repository, it is which question you are currently asking of
+ * them. Someone reading code wants the tree in the next project too, and a
+ * half that reset to the history on every switch would be a preference you had
+ * to re-state all day.
+ */
+const LENS_KEY = "aide.rail.lens"
+
+/**
+ * The rail's lower half: the history, or the files, one at a time.
+ *
+ * Two readings of the same repository, sharing one half rather than stacking,
+ * because they answer the same kind of question — where am I, what is here —
+ * and splitting the rail three ways would leave each of them too few rows to be
+ * worth reading. The upper half is not in the switch: what is uncommitted
+ * decides what you are ALLOWED to do next, so it is never a click away.
+ */
+function Lower({ projectId }: { projectId: string }) {
+  const [lens, setLens] = useRemembered<Lens>(
+    LENS_KEY,
+    "history",
+    (v): v is Lens => v === "history" || v === "files",
+  )
+  // Which folders are open, held ABOVE the tab that draws them, because that tab
+  // is unmounted whenever you look at the history — see the note on the switch
+  // below. Keyed by project, like every other reading in this rail: a folder you
+  // opened in one repository must not decide what is open in the next.
+  const openFolders = useKeyed<ReadonlySet<string>>(projectId)
+
+  return (
+    <section className="flex min-h-0 flex-1 flex-col border-t border-line">
+      <div className="flex h-7 shrink-0 items-center gap-2 px-3">
+        <Tab now={lens} me="history" onPick={setLens} title="Where HEAD is, and the commits behind it.">
+          history
+        </Tab>
+        <Tab now={lens} me="files" onPick={setLens} title="The project's files as they are on disk right now, read through git — so what it ignores never appears.">
+          files
+        </Tab>
+      </div>
+
+      {/* One at a time, and the hidden one is UNMOUNTED rather than hidden with
+          a class. The history polls every four seconds — on a remote project
+          that is a fresh ssh connection each time, at 1.4s apiece — and a pane
+          nobody is looking at must not go on paying for itself.
+
+          The price is that each half re-reads on the way back in, which is one
+          request against a poll that would have run for as long as you were
+          looking elsewhere. What must NOT be paid that way is the set of folders
+          you have open — three clicks to get somewhere, undone by a glance at
+          the history — so that one piece is held here, where it outlives both. */}
+      {lens === "history" ? (
+        <History projectId={projectId} />
+      ) : (
+        <FileTree projectId={projectId} openFolders={openFolders} />
+      )}
+    </section>
+  )
+}
+
+/**
+ * One of the two lenses.
+ *
+ * A word rather than an icon, and underlined rather than boxed: this sits where
+ * a pane heading was, and it has to keep reading as a heading that happens to
+ * have two states. Buttons here would make the rail's quietest row its loudest.
+ */
+function Tab({
+  now,
+  me,
+  onPick,
+  title,
+  children,
+}: {
+  now: Lens
+  me: Lens
+  onPick: (lens: Lens) => void
+  title: string
+  children: React.ReactNode
+}) {
+  const on = now === me
+  return (
+    <button
+      type="button"
+      onClick={() => onPick(me)}
+      title={title}
+      aria-pressed={on}
+      className={`shrink-0 cursor-pointer font-sans text-[11px] font-semibold tracking-wide uppercase underline-offset-4 transition-colors outline-none focus-visible:underline ${
+        on ? "text-fg-muted underline" : "text-fg-dim hover:text-fg-muted"
+      }`}
+    >
+      {children}
+    </button>
   )
 }
 
@@ -349,13 +465,16 @@ function History({ projectId }: { projectId: string }) {
   }, [projectId, page, rememberHistory, rememberError])
 
   return (
-    <section className="flex min-h-0 flex-1 flex-col border-t border-line">
-      <div className="flex h-7 shrink-0 items-center gap-2 px-3">
-        <h3 className="shrink-0 font-sans text-[11px] font-semibold tracking-wide text-fg-muted uppercase">
-          history
-        </h3>
-        {history && <Upstream overview={history.overview} />}
-      </div>
+    <>
+      {/* Where the branch stands, drawn INSIDE the history rather than up in the
+          row of tabs. It is a fact about this reading of the repo — on the files
+          tab it would be an answer to a question nobody asked, in the one slot
+          the tree needs for its own. */}
+      {history && (
+        <div className="flex h-5 shrink-0 items-center px-3">
+          <Upstream overview={history.overview} />
+        </div>
+      )}
 
       {/* A failed poll never blanks the page behind it: this refreshes against a
           repo an agent may be writing into, so one hiccup taking the history
@@ -381,7 +500,7 @@ function History({ projectId }: { projectId: string }) {
           }
         />
       )}
-    </section>
+    </>
   )
 }
 

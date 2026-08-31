@@ -39,6 +39,7 @@ import type { Runner } from "./runner.js"
 import type { FromWorker, ToWorker } from "./worker/main.js"
 import {
   buildGraph,
+  buildTree,
   commitDetail,
   isSha,
   log as readLog,
@@ -46,6 +47,7 @@ import {
   parseStatus,
   pending,
   status as repoStatus,
+  tree as readTree,
   workingTree,
 } from "./repo.js"
 import {
@@ -1100,6 +1102,118 @@ console.log("\nthe drawn graph")
     "an unrelated tip must not push the graph one column further right forever",
   )
   check("so the whole page is two lanes wide", synth.lanes === 2, `${synth.lanes}`)
+}
+
+console.log("\nthe tree of files")
+{
+  // The rail's other reading of the repo. Everything here fails QUIETLY if it
+  // fails: a prefix compared without its slash puts one directory's files under
+  // another's name, a deleted file stays in the list as a row that opens
+  // nothing, and a folder that knows only about its own children goes unmarked
+  // over a change three levels down. None of those look wrong on screen.
+
+  // `-z` output, as `ls-tree` really writes it: `<mode> <type> <sha>\t<path>`.
+  const entry = (type: string, path: string) => `100644 ${type} ${"0".repeat(40)}\t${path}`
+  const lsTree = [
+    entry("tree", "src"),
+    // The sibling whose name BEGINS with the directory under test. This is the
+    // one that catches a prefix compared as `src` rather than as `src/`.
+    entry("tree", "src2"),
+    entry("blob", "README.md"),
+  ].join("\0")
+
+  const rootLevel = buildTree("", lsTree, [
+    { path: "src/deep/new.ts", from: null, code: "??", staged: null, unstaged: "untracked" },
+  ])
+  check(
+    "directories come before files",
+    rootLevel.map((e) => e.kind).join(",") === "directory,directory,file",
+    rootLevel.map((e) => `${e.name}:${e.kind}`).join(" "),
+  )
+  check(
+    "a folder is marked from a change any depth below it",
+    rootLevel.find((e) => e.name === "src")?.dirty === true,
+    "the mark is what you navigate by, so it cannot stop at the first level",
+  )
+  check(
+    "and a folder whose name merely starts the same is not",
+    rootLevel.find((e) => e.name === "src2")?.dirty === false,
+    "src/ vs src — the slash is the whole check",
+  )
+
+  const inner = buildTree("src", entry("blob", "src/app.ts"), [
+    { path: "src/app.ts", from: null, code: " M", staged: null, unstaged: "modified" },
+    { path: "src/deep/new.ts", from: null, code: "??", staged: null, unstaged: "untracked" },
+  ])
+  check(
+    "a file carries its own status",
+    inner.find((e) => e.name === "app.ts")?.state === "modified",
+    "so the tree and the list above it colour one file one way",
+  )
+  check(
+    "an untracked file two levels down contributes its directory",
+    inner.find((e) => e.name === "deep")?.kind === "directory",
+    "`ls-tree` has never heard of an untracked folder, so nothing else would list it",
+  )
+  check(
+    "and that directory is not also listed as a file",
+    inner.filter((e) => e.name === "deep").length === 1,
+    `${inner.map((e) => e.name).join(",")}`,
+  )
+
+  const gone = buildTree("", entry("blob", "old.ts"), [
+    { path: "old.ts", from: null, code: " D", staged: null, unstaged: "deleted" },
+  ])
+  check(
+    "a deleted file is not in the tree",
+    gone.length === 0,
+    "it is in HEAD and not on disk; a row that opens nothing is worse than no row",
+  )
+
+  const moved = buildTree("", [entry("blob", "was.ts"), entry("blob", "now.ts")].join("\0"), [
+    { path: "now.ts", from: "was.ts", code: "R ", staged: "renamed", unstaged: null },
+  ])
+  check(
+    "a rename leaves its old name behind",
+    moved.map((e) => e.name).join(",") === "now.ts",
+    `${moved.map((e) => e.name).join(",")} — git names both in one entry, so the old one has to be dropped by hand`,
+  )
+
+  // And against the real repository, which is what says the flags above are the
+  // ones git actually wants — a `ls-tree HEAD src` without its trailing slash
+  // returns the directory itself and every folder opens to show only itself.
+  await mkdir(join(root, "nested"), { recursive: true })
+  await writeFile(join(root, "nested", "leaf.ts"), "export const leaf = 1\n", "utf8")
+  await git(root, ["add", "-A"])
+  await git(root, ["commit", "-m", "Add a nested file"])
+
+  const top = await readTree(root, "")
+  check("reads the root", top.entries.some((e) => e.name === "README.md"), top.entries.map((e) => e.name).join(","))
+  check("finds the directory", top.entries.some((e) => e.name === "nested" && e.kind === "directory"))
+  check(
+    "the root lists no nested paths",
+    top.entries.every((e) => !e.path.includes("/")),
+    "one level at a time is the whole design",
+  )
+
+  const sub = await readTree(root, "nested")
+  check(
+    "opens a directory to its contents, not to itself",
+    sub.entries.length === 1 && sub.entries[0]?.name === "leaf.ts",
+    `${sub.entries.map((e) => e.name).join(",")} — without the trailing slash ls-tree answers with the folder`,
+  )
+  check("and the path it reports is the full one", sub.entries[0]?.path === "nested/leaf.ts")
+
+  // A LOCAL project prefetches nothing, and that asymmetry is worth pinning
+  // because it is invisible: the feature it turns off is a latency fix for a
+  // 1.4s ssh handshake, and here a read is ~30ms. Prefetching locally would be
+  // an `ls-tree` per directory on screen, every time, bought on the chance
+  // somebody expands one.
+  check(
+    "a local read prefetches nothing",
+    Object.keys(top.children).length === 0,
+    "there is no handshake to amortise, so this would be work done on spec",
+  )
 }
 
 // ---------------------------------------------------------------------------

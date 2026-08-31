@@ -29,7 +29,8 @@ record. They are all rows in the same list, in that order of urgency.
 | Unstarted chats, drafts, pasted images (IndexedDB) | `packages/web/src/drafts.ts` |
 | What a parked chat is called before it has run | `packages/web/src/naming.ts` |
 | An event log rendered as a conversation | `packages/web/src/panes/Transcript.tsx` |
-| What is left to commit, and the history under it | `packages/web/src/panes/Pending.tsx` |
+| What is left to commit, and the two readings under it | `packages/web/src/panes/Pending.tsx` |
+| The project's files, one directory at a time | `packages/web/src/panes/Files.tsx` |
 | Where the graph's lines go, and the SVG that draws them | `packages/web/src/graph.ts`, `packages/web/src/GitGraph.tsx` |
 | Branch, history and lanes, read off the repo | `packages/daemon/src/repo.ts` |
 | Which machine a git call lands on, and batching them | `packages/daemon/src/git.ts` |
@@ -57,8 +58,44 @@ Decisions already taken, which are not gaps to fill:
 - **A history list, but no repository browser.** The uncommitted rail's lower
   half draws the last thirty commits, the graph beside them and where HEAD is
   standing, because nothing on screen said which commit was the last one. No row
-  in it opens anything: no commit view, no file tree, no diff of an old change. A
-  diff is read in the conversation that produced it.
+  in it opens anything: no commit view, no file tree of an old commit, no diff of
+  a change that already landed. A diff is read in the conversation that produced
+  it.
+- **The rail's lower half has two readings, and you pick one.** `history` and
+  `files`, tabbed, sharing the space rather than stacking — they answer the same
+  kind of question, orientation, and a rail split three ways gives each too few
+  rows to read. What is UNCOMMITTED stays fixed above both, because it decides
+  whether you may start another chat and must not be a click away. The tree is
+  not the browser ruled out above: it draws the working tree as it is NOW, the
+  one every run edits and the button above it commits, rather than the tree of
+  some past commit next to a diff read outside the conversation that made it.
+  Nothing in it opens a file — that would be an editor, and the brief takes
+  reading code in scope while putting replacing the editor out of it.
+- **The tree is read through git, one directory per request.** `git ls-tree HEAD
+  <dir>/` plus a `status`, batched into one round trip by `gitBatch`, so
+  `.gitignore` is honoured without aide parsing it (no `node_modules`, ever) and
+  a project on another machine works with no code of its own. The trailing slash
+  is load-bearing: `ls-tree HEAD src` answers with the directory `src` itself, so
+  without it every folder opens to show only itself. One level at a time is the
+  design rather than a limit — fetching the whole tree reads every path in the
+  repository to draw the twenty rows on screen, down a connection that costs
+  1.4s. Nothing polls it; re-opening a folder is the refresh. `buildTree` is pure
+  and `pnpm smoke` covers what fails quietly there: a prefix compared without its
+  slash putting `src2/`'s files under `src`, a deleted file left as a row that
+  opens nothing, a rename showing under both names, and a collapsed folder that
+  fails to mark a change three levels below it.
+- **A remote tree prefetches one level down; a local one does not.** Measured
+  against `tg`: a bare `ssh echo hi` is 1.44s, one directory is 1.52s, and all
+  EIGHT of that repo's top-level directories in the same connection is 1.55s for
+  3.9KB. The cost is the handshake, not the reading — Windows OpenSSH cannot
+  multiplex — so `tree()` spends ~110ms buying every first expand instead of
+  1.4s each, and `GitTree.children` carries them. It stops at one level because
+  two is most of the repository fetched to draw rows nobody asked for, which is
+  the whole-tree read this design exists to avoid. Locally it is skipped
+  entirely: a read is ~30ms, so the same prefetch would be an `ls-tree` per
+  visible directory bought on the chance somebody expands one. `pnpm smoke` pins
+  the local half at zero, because an asymmetry nothing asserts is one that
+  quietly becomes symmetric.
 - **A commit's number counts the branch, not the page.** `GitLog.numbers` is how
   far along the first-parent line each commit is — the first is 1, HEAD's is how
   many there are — so it means the same thing tomorrow. Numbering rows 1..30 from
