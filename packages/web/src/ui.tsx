@@ -48,9 +48,9 @@ export const heldBy = (title: string) =>
  *
  * It also lets the marks compose rather than fight. The row that ran last is
  * often the row you are in, and as two fills that was a contest one of them had
- * to win. That fact now lives in the chat list's indicator column rather than as
- * a wash — a glyph and a frame cannot contest anything — but the argument is
- * unchanged for the next mark that wants a background.
+ * to win. That fact is now an outline on the chat row's own button rather than a
+ * wash across it — a border inside a frame cannot contest anything — but the
+ * argument is unchanged for the next mark that wants a background.
  *
  * Hover keeps the grey wash it always had, and that is now the whole difference
  * between them: hover fills, selection frames. Two languages, so neither can be

@@ -187,15 +187,10 @@ function UnstartedRow({
     <div
       // Matches `ChatRow`: no gap at the edges, `pr-2` — see the argument there.
       // The two row types sit in one list and their buttons have to line up.
-      className={`group flex w-full items-center border py-1.5 pr-2 pl-2 font-sans hover:bg-hover ${
+      className={`group flex w-full items-center border py-1.5 pr-2 pl-3 font-sans hover:bg-hover ${
         selected ? `${SELECTED} text-fg` : "border-transparent text-fg-muted"
       }`}
     >
-      {/* An empty indicator column. A parked chat has no state to report — it
-          has not happened yet — but its title has to start at the same x as
-          every other title in the list, or the two kinds of row read as two
-          lists that got shuffled together. */}
-      <Slot />
       <button
         type="button"
         onClick={onOpen}
@@ -203,7 +198,7 @@ function UnstartedRow({
         // wrote once the request outgrew the column, so without this there is no
         // way to check it against your own words short of opening the chat.
         title={said || undefined}
-        className="flex min-w-0 flex-1 flex-col gap-0.5 pr-1.5 pl-1.5 text-left"
+        className="flex min-w-0 flex-1 flex-col gap-0.5 pr-1.5 text-left"
       >
         <span className="truncate text-[13px]">{preview || "New chat"}</span>
         <div className="flex items-baseline gap-2 text-[10px] tabular-nums text-fg-dim">
@@ -259,8 +254,11 @@ function UnstartedRow({
         Held back, it becomes a padlock rather than a faded ▶. The list is where
         this matters most: a project mid-run draws a column of six or seven of
         them, and six faded triangles read as a list that has not loaded. Six
-        padlocks read as one run holding everything, which is the truth, and the
-        row spinning a few lines up is the one holding it.
+        padlocks read as one run holding everything, which is the truth — and the
+        row a few lines up whose own square is spinning instead of locked is the
+        one holding it. That pairing is why the run is drawn IN this slot rather
+        than in a column of its own: locked and holding are the same fact from
+        two ends, so they belong at the same x.
 
         A 36px square, filled, with a 20px glyph in it — the row's own height, so
         the slot is a square and not a tall slot with a small triangle rattling
@@ -408,124 +406,53 @@ function CaptureBox({ projectId }: { projectId: string }) {
 }
 
 /**
- * What this row is doing, in one fixed column on the left.
- *
- * This started as the words `has the repo` in the title line — the only SENTENCE
- * in a column of names, dates and numbers, so it did not scan, you read it, and
- * it cost seventy pixels of a title that is already truncating at 320px. The
- * wording matched what the daemon's refusals say, so a chat turned away could be
- * traced to the row in its way; that argument is real, but it is an argument for
- * the HOVER, which still says it.
- *
- * What replaced it was one spinner, which is not a vocabulary — it answered
- * "which row is working" and nothing else, and every OTHER state a row can be in
- * went back to being invisible. This is the vocabulary: one column, one glyph
- * per row, at a fixed x so the eye reads straight down it. The states are
- * ranked, because they are not exclusive — a chat can be the last one you used
- * AND be waiting on you — and drawing two marks in one slot is how a column
- * stops being scannable.
- *
- *   working     a ring, sweeping, with the elapsed time inside it
- *   blocked     amber, filled, pulsing — the one state that is stopped ON you
- *   ran last    a hollow gold ring, holding still
- *   otherwise   nothing at all
- *
- * Nothing at all is most rows, and that is the point: a mark on every row is a
- * mark on none of them. The column still reserves its width on a quiet row, or
- * every title in the list would step sideways as runs start and stop.
- *
- * `uncommitted` is deliberately NOT here, though it was asked for. What is
- * uncommitted is a fact about the PROJECT — the commit takes the working tree,
- * not a conversation's diff, which the brief is emphatic about — so a dot per
- * chat would be the same dot on every row, drawn from one number. It is already
- * on the project row and on the rail, which is where a fact about the project
- * belongs.
- */
-function RowMark({
-  status,
-  heldSince,
-  ranLast,
-}: {
-  status: ChatStatus
-  heldSince: number | null
-  ranLast: boolean
-}) {
-  const working = status.state === "working"
-  // Ranked, not stacked — see above. Blocked outranks working because it is the
-  // one that wants something from you; working outranks ran-last because a run
-  // in flight is now and a signpost is not.
-  if (working && status.blocked) {
-    return (
-      <Slot title="A tool call is waiting on you. Open this chat and answer it — nothing moves until you do.">
-        <span className="size-2.5 animate-pulse rounded-full bg-warn" />
-      </Slot>
-    )
-  }
-  if (working) {
-    return (
-      <Slot title={HAS_THE_REPO(heldSince)}>
-        <RunDial since={heldSince} />
-      </Slot>
-    )
-  }
-  if (ranLast) {
-    return (
-      <Slot title="The most recent run in this project happened here — the row you probably want next.">
-        {/* Hollow, where the blocked dot is filled. A signpost and a summons
-            should not differ only in hue: at 10px, on this background, colour
-            alone is the difference two people will read differently.
-            `border-2` because a 1px ring at 10px is a hairline that half
-            disappears on a non-integer device pixel ratio. */}
-        <span className="size-2.5 rounded-full border-2 border-found" />
-      </Slot>
-    )
-  }
-  return <Slot />
-}
-
-/**
- * The column itself — fixed width whatever is in it, including nothing.
- *
- * Wide enough for the dial, which is the largest thing it ever holds. A slot
- * that sized itself to its contents would move every title in the list a few
- * pixels sideways each time a run started, which is the kind of motion you see
- * without being able to name.
- */
-function Slot({ children, title }: { children?: React.ReactNode; title?: string }) {
-  return (
-    <span
-      className="flex size-8 shrink-0 items-center justify-center"
-      title={title}
-      aria-hidden={children === undefined}
-    >
-      {children}
-    </span>
-  )
-}
-
-/**
  * A run in flight: a sweeping ring with its own elapsed time inside it.
  *
- * The time was on the meta line, as one more figure beside the age and the cost.
- * That was tidy and it was wrong — those are a RECORD of what the chat has spent
- * and this is a clock that is running, so the one number on the row that is
- * changing sat in the quietest type on it, six pixels from three numbers that
- * are not. Inside the ring the two halves of one fact are one object: the ring
- * says a run is happening, the number says for how long.
+ * This is drawn IN the row's one button slot, in place of the padlock. Every
+ * earlier version of this gave the state its own furniture — a sentence in the
+ * title line, then a spinner and a clock beside the button, then a whole
+ * indicator column on the left — and each of them cost width on a row that is
+ * already truncating its title at 320px. The column was the worst of the three
+ * because it was mostly EMPTY: one project runs one agent, so on a list of forty
+ * rows it reserved 32px on every one of them to say something about one.
  *
- * 32px, against the 10px dot the other states draw. That asymmetry is deliberate
- * — one row in a project is working and the rest are not, so the working one is
- * allowed to be the biggest thing in the column.
+ * The button slot is already the status column and always was. It is the fixed
+ * x the eye reads down, it is 36px on every row whatever is in it, and what it
+ * draws is already exactly this fact: ▶ to start, ✓ once it has run, and a
+ * padlock when the project is held. The padlock is the redundant one — the whole
+ * list wears it when anything is running, which says "held" forty times and
+ * "held BY THIS ROW" nowhere. So the row holding it spins instead, and the
+ * padlock keeps meaning what it always meant on the other thirty-nine.
+ *
+ * The time goes inside the ring rather than on the meta line beside the cost:
+ * it is the one number on the row that is CHANGING, and the rest of that line is
+ * a record of what the chat has already spent. Inside the ring the two halves of
+ * one fact are one object — the ring says a run is happening, the number says
+ * for how long.
  *
  * Two of the four sides are transparent rather than one, so this reads as a
  * sweeping arc rather than a wheel with a nick out of it.
+ *
+ * `blocked` is not drawn here. A tool call waiting on a human still holds the
+ * checkout, so the ring is still true, and it is a state you meet in the chat
+ * you have OPEN — the composer says it, in a sentence, which is where an
+ * instruction belongs. A second glyph for it in this slot would be a state that
+ * looks different in the list from what it is.
+ *
+ * `uncommitted` is not drawn here either, though it was asked for. What is
+ * uncommitted is a fact about the PROJECT — the commit takes the working tree,
+ * not a conversation's diff, which the brief is emphatic about — so a mark per
+ * chat would be the same mark on every row, drawn from one number. It is already
+ * on the project row and on the rail, which is where a project fact belongs.
  */
 function RunDial({ since }: { since: number | null }) {
   return (
-    <span className="relative flex size-8 items-center justify-center">
-      <span className="absolute inset-0 animate-spin rounded-full border-2 border-info/70 border-t-transparent border-r-transparent" />
+    <>
+      {/* Concentric with the 36px square, inset by a pixel so the arc reads as
+          the button's own edge lit up rather than a hoop dropped over it. */}
+      <span className="pointer-events-none absolute -inset-px animate-spin rounded-sm border-2 border-info/70 border-t-transparent border-r-transparent" />
       <Held since={since} />
-    </span>
+    </>
   )
 }
 
@@ -544,8 +471,8 @@ function RunDial({ since }: { since: number | null }) {
  * seconds at a stretch, and a clock that visibly stalls is the same picture as a
  * wedged run — the one thing this number exists to disprove. Under a minute it
  * counts seconds; over one it counts minutes, because `12m 04s` does not fit
- * inside a 32px ring and the seconds stop being the interesting digit long
- * before the ring runs out of room.
+ * inside a 36px square and the seconds stop being the interesting digit long
+ * before the square runs out of room.
  *
  * Only mounted while a run is in flight, so the timer exists for exactly as long
  * as there is something to count.
@@ -563,11 +490,11 @@ function Held({ since }: { since: number | null }) {
   if (since === null) return null
   const s = Math.max(0, Math.round((now - since) / 1000))
   return (
-    // 11px, not the 9px this started at. 9px inside a 32px ring is a speck with
-    // a wide moat around it — the ring reads and the number does not, which
+    // 11px, not the 9px this started at. 9px inside a 36px square is a speck
+    // with a wide moat around it — the arc reads and the number does not, which
     // wastes the whole reason the count sits in the middle rather than out on
     // the meta line. `12m` is the widest string it can hold and it clears the
-    // ~28px inner circle at this size; the next step up does not.
+    // square's inner width at this size; the next step up does not.
     <span className="text-[11px] leading-none font-semibold tabular-nums text-info">
       {s < 60 ? s : `${Math.floor(s / 60)}m`}
     </span>
@@ -601,31 +528,69 @@ const HAS_THE_REPO = (heldSince: number | null) =>
  * yet"; anything finer was a form to fill in, and the transcript already says
  * what happened.
  */
-function DoneCheck({ done, onToggle }: { done: boolean; onToggle: () => void }) {
+function DoneCheck({
+  done,
+  working,
+  heldSince,
+  ranLast,
+  onToggle,
+}: {
+  done: boolean
+  /** A run is in flight in this chat — the square becomes the dial. */
+  working: boolean
+  /** When that run started, for the number inside the dial. */
+  heldSince: number | null
+  /** The project's most recent run happened here — the square wears gold. */
+  ranLast: boolean
+  onToggle: () => void
+}) {
   return (
     <button
       type="button"
       onClick={onToggle}
-      title={done ? "Served its purpose. Click to reopen it." : "Mark this chat done"}
+      title={
+        working
+          ? HAS_THE_REPO(heldSince)
+          : ranLast
+            ? `The most recent run in this project happened here — the row you probably want next.\n\n${done ? "Served its purpose. Click to reopen it." : "Click to mark this chat done."}`
+            : done
+              ? "Served its purpose. Click to reopen it."
+              : "Mark this chat done"
+      }
       // The same 36px filled square the ▶ on a parked chat wears, because the
       // two are the same slot at two ages — see `UnstartedRow`, which is also
       // where the size is argued.
-      className={`flex size-9 shrink-0 items-center justify-center rounded-sm border bg-input ${
-        done
-          ? // Dimmer than it was. A project with seventy archived chats draws a
-            // solid column of these, and at full strength that wall of green was
-            // the loudest thing in the pane — shouting the one fact you have
-            // already dealt with, over the two rows that still want something.
-            // A tick you have to be looking at to see is right for a state whose
-            // whole meaning is "no longer your problem".
-            "border-ok/25 text-ok/45 hover:border-ok/60 hover:text-ok"
-          : // `text-transparent` rather than `invisible`: the tick is still
-            // there to be hovered, and `currentColor` on the icon means it
-            // vanishes with the text colour it inherits.
-            "border-line-soft text-transparent group-hover:text-fg-muted hover:border-fg-muted"
+      //
+      // `relative`, because the run dial is drawn on this square rather than
+      // beside it.
+      className={`relative flex size-9 shrink-0 items-center justify-center rounded-sm border bg-input ${
+        // Gold outline, and it outranks the two below. Where the last run
+        // happened is the row you most often want next, and a green tick or a
+        // grey plate is what that row looks like the rest of the time — so the
+        // mark has to survive being on either. It is the border alone: this
+        // square is a control with three other things to say, and a fill would
+        // leave it saying one.
+        ranLast && !working
+          ? `border-found ${done ? "text-ok/45" : "text-transparent group-hover:text-fg-muted"}`
+          : done
+            ? // Dimmer than it was. A project with seventy archived chats draws
+              // a solid column of these, and at full strength that wall of green
+              // was the loudest thing in the pane — shouting the one fact you
+              // have already dealt with, over the two rows that still want
+              // something. A tick you have to be looking at to see is right for
+              // a state whose whole meaning is "no longer your problem".
+              "border-ok/25 text-ok/45 hover:border-ok/60 hover:text-ok"
+            : // `text-transparent` rather than `invisible`: the tick is still
+              // there to be hovered, and `currentColor` on the icon means it
+              // vanishes with the text colour it inherits.
+              "border-line-soft text-transparent group-hover:text-fg-muted hover:border-fg-muted"
       }`}
     >
-      <Check className="size-5" />
+      {/* Hidden under the dial rather than unmounted: a run ends and the tick
+          has to be in the same place it was, at the same size, or the column
+          twitches every time a turn finishes. */}
+      <Check className={`size-5 ${working ? "opacity-0" : ""}`} />
+      {working && <RunDial since={heldSince} />}
     </button>
   )
 }
@@ -693,19 +658,19 @@ function ChatRow({
   const spend = chat.spend
   const working = status.state === "working"
   /**
-   * Ran-last is now a mark in the column, not a wash across the row.
+   * Ran-last is a gold outline on the row's own button, not a wash across it.
    *
    * The wash was a gold gradient over the whole row, and it was the loudest
    * thing in the pane — for the mildest fact on it. "This is where the last run
-   * happened" is a signpost; it was being drawn like an alarm, it fought the
-   * selection frame on the row you were usually also IN, and it tinted the text
-   * of the one row you were most likely to be reading. A hollow ring in the
-   * indicator column says the same thing in ten pixels, next to the marks it
-   * should be compared against rather than on a layer of its own.
+   * happened" is a signpost; it was drawn like an alarm, it fought the selection
+   * frame on the row you were usually also IN, and it tinted the text of the one
+   * row you were most likely to be reading. The button already sits at a fixed x
+   * down the list, so outlining it says the same thing in a border, on the
+   * control you would press next anyway.
    *
-   * Still suppressed for the length of a run, and the reason is unchanged:
-   * `newest` returns the holder while one is in flight, so both marks resolve to
-   * the SAME row, and the column draws one glyph per row. `RowMark` ranks them.
+   * Suppressed for the length of a run, because `newest` returns the holder
+   * while one is in flight — so both facts land on the SAME row and the same
+   * square, and the run is the one worth drawing. `DoneCheck` ranks them.
    */
   const lit = ranLast && !working
   // Dim enough to stay behind the title, but not on the row you have selected:
@@ -717,15 +682,10 @@ function ChatRow({
       // plate with its own inset, so the gap was padding stacked on padding —
       // about twenty pixels of nothing between a title that is truncating and a
       // button that is not moving. The title gets them.
-      className={`group flex w-full items-center border py-1.5 pr-2 pl-2 font-sans hover:bg-hover ${
+      className={`group flex w-full items-center border py-1.5 pr-2 pl-3 font-sans hover:bg-hover ${
         selected ? SELECTED : "border-transparent"
       } ${selected || working ? "text-fg" : "text-fg-muted"}`}
     >
-      {/* The indicator column, at the row's left edge and outside the button
-          that opens the chat — a status mark is not a click target for opening
-          it. Fixed x down the whole list, which is the only thing that makes a
-          column of them scannable. */}
-      <RowMark status={status} heldSince={heldSince} ranLast={lit} />
       <button
         type="button"
         onClick={onOpen}
@@ -733,7 +693,7 @@ function ChatRow({
         // Just enough that a truncating title's ellipsis does not touch the
         // plate beside it. The row's own gap used to be doing this, at four
         // times the width.
-        className="flex min-w-0 flex-1 flex-col gap-0.5 pr-1.5 pl-1.5 text-left"
+        className="flex min-w-0 flex-1 flex-col gap-0.5 pr-1.5 text-left"
       >
         <div className="flex items-baseline gap-2">
           {chat.kind !== "chat" && (
@@ -781,7 +741,13 @@ function ChatRow({
           `working` so that it sorts as work, which drew an EMPTY box on a
           conversation you had plainly ticked — and then took a press to say the
           thing the box was already showing. */}
-      <DoneCheck done={status.done} onToggle={onToggleDone} />
+      <DoneCheck
+        done={status.done}
+        working={working}
+        heldSince={heldSince}
+        ranLast={lit}
+        onToggle={onToggleDone}
+      />
     </div>
   )
 }
@@ -1127,10 +1093,10 @@ export function ConversationList({
    * the newest `lastModified` in the list belongs to whichever chat spoke
    * BEFORE this one.
    *
-   * That still matters even though `RowMark` ranks the run above ran-last for
-   * the length of a run — arguably more. The gold ring is what the row is left
-   * wearing the instant the dial stops, and this is what decides which row that
-   * is; reading the dates instead would mark the chat that spoke before this
+   * That still matters even though `DoneCheck` draws the run instead of the gold
+   * for the length of one — arguably more. The gold outline is what the square is
+   * left wearing the instant the dial stops, and this is what decides which row
+   * that is; reading the dates instead would mark the chat that spoke before this
    * one, then correct itself a beat later when the session file lands. A mark
    * that moves after the fact is worse than one that was briefly absent.
    *

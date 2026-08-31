@@ -23,9 +23,9 @@
      that you stop looking. Warm, which is the point — it has to be told apart at
      a glance from the cold blue of the row you have selected.
      This was `editor.findMatchBackground` (#9e6a03) when the mark was a wash
-     across the whole row. It is a 10px ring in the chat list's indicator column
-     now, and a background colour drawn as a 10px ring on near-black is a smudge
-     you have to hunt for — so this is the theme's warm FOREGROUND instead. */
+     across the whole row. It is a 1px outline on that row's own button now, and
+     a background colour drawn as a hairline on near-black is a smudge you have
+     to hunt for — so this is the theme's warm FOREGROUND instead. */
   --color-found: #cca700; /* list.warningForeground, editorWarning.foreground */
   --color-line: #2b2b2b; /* editorGroup.border */
   --color-line-soft: #313131; /* panel.border */
