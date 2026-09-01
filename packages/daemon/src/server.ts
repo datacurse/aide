@@ -680,7 +680,7 @@ app.post("/api/projects/:id/commit", async (req, reply) => {
   // checks live in the repository, so a run that added one has changed the gate
   // it is about to be measured by, and reading a copy from boot would apply the
   // old gate to the diff that changed it.
-  const doc = await readProjectDoc(project.root)
+  const doc = await readProjectDoc(repoOf(project))
   try {
     // Throws if another conversation holds the checkout, with that
     // conversation's name in it.

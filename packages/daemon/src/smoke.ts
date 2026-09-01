@@ -202,6 +202,36 @@ check(
   (await git(root, ["status", "--porcelain"])).includes("A  staged-by-hand.txt"),
 )
 
+// A commit message is written by a MODEL and then written to a file that git
+// reads. Remotely that file is created by `cat >` over ssh with the body on
+// stdin, precisely so the message is never parsed by the far shell — put it on
+// the command line instead and `$(…)`, a backtick or a quote in a subject line
+// stops being prose and starts being something the far side evaluates. This
+// pins the local half of that promise; the remote half shares `withMessageFile`
+// and cannot diverge without this failing too.
+{
+  await writeFile(join(root, "hostile.ts"), "export const hostile = true\n", "utf8")
+  const nasty = [
+    "aide: $(echo pwned) and `echo also`",
+    "",
+    "A body with 'single' and \"double\" quotes, a $VAR, and a trailing backslash \\",
+  ].join("\n")
+  const hostileSha = await commitRun(root, ["hostile.ts"], nasty)
+  const written = await git(root, ["log", "-1", "--format=%B", hostileSha])
+  check(
+    "a message is bytes, not something a shell evaluates",
+    written.includes("$(echo pwned)") && written.includes("`echo also`"),
+    written.split("\n")[0],
+  )
+  check(
+    "and quotes, variables and backslashes survive it",
+    written.includes("'single'") &&
+      written.includes('"double"') &&
+      written.includes("$VAR") &&
+      written.includes("\\"),
+  )
+}
+
 let threw = ""
 try {
   await commitRun(root, [], "nothing here")
@@ -389,6 +419,46 @@ check(
 const scopedSha = await commitRun(root, scoped.paths, "Describe what it does\n")
 const shown = await git(root, ["show", "--stat", "--format=", scopedSha])
 check("commit matches the reviewed diff", shown.includes("notes.md"))
+
+console.log("\nthe project's own brief")
+{
+  const { readProjectDoc } = await import("./registry.js")
+  const { readRepoFile, refPath } = await import("./git.js")
+
+  await writeFile(
+    join(root, STATE_DIR, "project.md"),
+    ["---", "verify:", "  - pnpm typecheck", "---", "", "# smoke", "", "What it is.", ""].join("\n"),
+    "utf8",
+  )
+  const doc = await readProjectDoc(root)
+  check("the brief is read", doc.body.includes("What it is."), `${doc.body.length} chars`)
+  check(
+    "and its verify: commands come with it",
+    doc.verify.map((v) => v.command).join(",") === "pnpm typecheck",
+    doc.verify.map((v) => v.command).join(",") || "(none)",
+  )
+
+  // The remote half cannot be exercised without a host, so what is pinned here
+  // is the thing that made it wrong: a path built for the machine that HOLDS the
+  // repo. `join` answers with backslashes on Windows, which a POSIX shell reads
+  // as escapes rather than separators — so a remote path must be POSIX no matter
+  // what platform the daemon runs on. Both halves share `readRepoFile`, so a
+  // remote read cannot diverge from the local one that is asserted above.
+  const remote = { root: "/root/code/app", host: "somewhere" }
+  check(
+    "a remote path is POSIX, whatever this machine spells paths like",
+    refPath(remote, STATE_DIR, "project.md") === "/root/code/app/.aide/project.md",
+    refPath(remote, STATE_DIR, "project.md"),
+  )
+
+  // A missing brief is a legal answer, NOT an error — and it has to stay legal,
+  // because that is what a project with no `.aide/` looks like. It is also why
+  // the remote bug was invisible for so long: reading the wrong machine's disk
+  // produced exactly this, and nothing anywhere said so.
+  check("a missing file reads as absent, not as a failure", (await readRepoFile(root, "no-such-file.md")) === null)
+  const bare = await readProjectDoc(join(root, "does-not-exist"))
+  check("and a project with no brief still answers", bare.body === "" && bare.verify.length === 0)
+}
 
 console.log("\nwhat is left to commit — the indicator, and the gate it drives")
 {
@@ -1577,6 +1647,35 @@ console.log("\nbatched reads")
   // A failing command must not take the batch down with it — the questions are
   // independent, and "no upstream" must not cost you the branch name.
   check("a failing command yields empty rather than aborting", (bogus ?? "").trim() === "")
+
+  // The batch carries an env, which is what lets the three reads of a SCRATCH
+  // index share one round trip — the thing that took a remote commit's first
+  // step from eight ssh connections to two. If this stops being honoured the
+  // reads silently fall back to the REAL index: no error, just a diff measured
+  // against the human's staging area instead of the working tree.
+  const { withWorkingTreeIndex } = await import("./git.js")
+  // Dirtied on purpose, and with an UNTRACKED file specifically: it is in the
+  // working tree and not in the real index, so it is the one reading that tells
+  // the two indexes apart. Against a clean tree both answer empty and the check
+  // below passes without proving anything.
+  await writeFile(join(root, "batch-edit.ts"), "export const batched = true\n", "utf8")
+  const before = await repoStatus(root)
+  const [batchDiff, batchNames] = await withWorkingTreeIndex(root, (_g, batchTemp) =>
+    batchTemp([
+      ["diff", "--cached", "--stat", "HEAD", "--"],
+      ["diff", "--cached", "--name-only", "-z", "HEAD", "--"],
+    ]),
+  )
+  const batched = (batchNames ?? "").split("\0").filter(Boolean)
+  check(
+    "a batched read sees the scratch index, not the real one",
+    batched.includes("batch-edit.ts") && (batchDiff ?? "").includes("batch-edit.ts"),
+    `${batched.length} paths`,
+  )
+  check(
+    "and the human's own index is untouched by it",
+    JSON.stringify(await repoStatus(root)) === JSON.stringify(before),
+  )
 }
 
 console.log("\nproject identity")

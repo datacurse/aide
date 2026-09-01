@@ -179,6 +179,51 @@ Decisions already taken, which are not gaps to fill:
   `echo`, because `git status -z` ends in a NUL with no newline: a separator
   that contributes a byte of its own splits that output one byte early, and the
   rail's file list comes back mangled. `pnpm smoke` pins it.
+- **Connections are also a budget, not just a latency.** The 1.4s above is the
+  half of this that was measured first; the other half is that there is a
+  CEILING. sshd refuses new connections past `MaxStartups` (10 on `tg`, the
+  default), and this machine's spawn table gives out around the same point —
+  measured, 12 concurrent `ssh` calls already lose one to
+  `kex_exchange_identification: read: Software caused connection abort`, and 30
+  lose two thirds to that plus `spawn ENOMEM`. So a remote read is batched to be
+  fast AND to stay under a limit that fails as a refusal rather than a slowdown.
+  Two things came of hitting it: `treeChanges` spent EIGHT serial connections
+  (`rev-parse`, `--git-dir`, `cp`, `add -A`, three reads, `rm`) before the commit
+  gate had read anything — now three, with `prepareRemoteIndex` as one script and
+  the reads batched through `gitBatch`'s `env` against the scratch index — and
+  `App.tsx`'s 1500ms poll fired on the clock whether or not the last beat
+  answered, which against a ~1.75s remote `pending` meant unbounded overlap. It
+  now skips a beat rather than stacking one. The symptom was a commit dying on
+  `tg did not answer \`git diff\` within 90s` while the rail beside it, polling
+  the same repo, drew it as perfectly reachable: the commit's connections were
+  the ones being dropped. A failure with nothing on either stream is that case,
+  so `git()` names it `could not reach <host>` rather than surfacing execFile's
+  message, which is the whole ssh command line.
+- **A path handed to git must exist on the machine that RUNS git.** The trap
+  `withTempIndex` documents for `GIT_INDEX_FILE` is not special to the index:
+  `commitRun` wrote the message with `writeFile(join(tmpdir(), …))` and passed it
+  to `git commit -F`, which for a remote project writes the file HERE and reads
+  it THERE — `could not read log file 'C:\Users\…\Temp\aide-commitmsg-…'`, after
+  the diff had been read, the checks had run and the message had been paid for.
+  `withMessageFile` puts it in `/tmp` on the far side. The content goes over
+  STDIN (`cat > path`, via `spawn` — `execFile` cannot supply one) rather than
+  interpolated into the command, because the message is written by a MODEL: on a
+  command line a subject containing `$(…)` or a backtick stops being prose and
+  becomes something the remote shell evaluates. `pnpm smoke` commits a message
+  full of `$(…)`, backticks, quotes and backslashes and asserts they survive as
+  bytes; the remote half shares the same helper, so it cannot diverge without
+  that failing.
+- **`.aide/project.md` is read from the machine that HOLDS it.** `readProjectDoc`
+  took a path and used `node:fs`, so for a remote project it read THIS machine's
+  disk for a path that only exists on the far one — missed every time, and
+  returned the empty doc. Both consequences were silent, because a missing brief
+  is a legal answer: the agent ran with no project context, and the commit gate
+  read no `verify:` commands and skipped every check. It takes a `RepoRef` now
+  and reads through `readRepoFile`, which is `cat` over ssh for a remote ref.
+  Measured against `tg`: 0 chars before, 407 after. `pnpm smoke` pins the local
+  read, that a missing file is absent rather than an error, and that a remote
+  path is POSIX — `join` on Windows would answer with backslashes, which a POSIX
+  shell reads as escapes.
 - **A project's id hashes the host as well as the path.** `/root/code/app`
   exists on more than one machine, and without the host those collide into a
   single registry entry — you would open one and see the other's conversations.

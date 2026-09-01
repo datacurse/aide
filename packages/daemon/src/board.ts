@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises"
 import type { ChatStatus, Project } from "@aide/protocol"
 import { aideHome, boardPath } from "@aide/protocol/node"
 import { readCheckpoint, restoreCommand } from "./checkpoint.js"
+import { repoOf } from "./git.js"
 
 /**
  * Which conversations you have ticked off.
@@ -120,7 +121,11 @@ export async function closeChat(
  * labelled "done".
  */
 async function checkpointNotice(project: Project, sessionId: string): Promise<string | null> {
-  const found = await readCheckpoint(project.root, sessionId).catch(() => null)
+  // `repoOf`, not the bare root — which compiles, means "on this machine", and
+  // for a remote project fails into the `.catch` below. That failure is silent
+  // by design here, so the symptom would not be an error but a chat ticked off
+  // with no undo offered at exactly the moment somebody decides the work was bad.
+  const found = await readCheckpoint(repoOf(project), sessionId).catch(() => null)
   if (!found) return null
   return `the tree as it was before this conversation is kept at ${found.ref} — undo with \`${restoreCommand(found.ref)}\``
 }

@@ -1,6 +1,6 @@
-import { execFile } from "node:child_process"
+import { execFile, spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
-import { copyFile, rm } from "node:fs/promises"
+import { copyFile, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { isAbsolute, join } from "node:path"
 import { promisify } from "node:util"
@@ -57,6 +57,16 @@ export const refHost = (ref: RepoRef): string | null =>
  * mistake this exists to make hard to write: for a remote project that is a
  * Linux path handed to Windows git, which is exactly the "cannot change to
  * '/root/code/…'" the rail showed.
+ *
+ * That has now happened three times, so it is worth saying what it costs rather
+ * than only what it is. The type cannot catch it — a bare string has to stay
+ * legal for every local caller — so the damage is decided by whether the call
+ * site swallows the error. `ChatLane.#checkpoint` did NOT: it is awaited before
+ * a turn may write, deliberately, so a remote project could not start a
+ * conversation at all. `checkpointNotice` in `board.ts` DID, via a `.catch`, so
+ * the same bug there showed up as a chat ticked off with no undo offered. When
+ * you add a caller, grep for `project.root` beside a git call before assuming
+ * this one is fine.
  */
 export const repoOf = (project: { root: string; host?: string }): RepoRef =>
   project.host ? { root: project.root, host: project.host } : project.root
@@ -119,12 +129,26 @@ function gitCommand(
  * A failing command yields "" rather than aborting the batch, matching the
  * `gitOr` these callers already wrap themselves in: the questions are
  * independent, and "no upstream" must not stop the branch name from arriving.
+ *
+ * `env` rides in front of every command in the batch, which is what lets reads
+ * against a SCRATCH INDEX be batched at all — `withWorkingTreeIndex` sets
+ * `GIT_INDEX_FILE`, and without this the three reads it wraps had to go one
+ * connection each. It is applied per command rather than exported once for the
+ * script, so a command list is still a list of independent commands rather than
+ * a thing with shared state between its entries.
  */
-export async function gitBatch(root: RepoRef, commands: string[][]): Promise<string[]> {
+export async function gitBatch(
+  root: RepoRef,
+  commands: string[][],
+  env?: NodeJS.ProcessEnv,
+): Promise<string[]> {
   if (!refHost(root)) {
-    return Promise.all(commands.map((args) => gitOr("", () => git(root, args))))
+    return Promise.all(commands.map((args) => gitOr("", () => git(root, args, env))))
   }
 
+  const prefix = Object.entries(env ?? {})
+    .map(([k, v]) => `${k}=${shellQuote(String(v))} `)
+    .join("")
   const marker = `--aide-${randomUUID()}--`
   const script = commands
     .map(
@@ -140,7 +164,7 @@ export async function gitBatch(root: RepoRef, commands: string[][]): Promise<str
         // tell it apart from a newline the command really did emit. Getting
         // this wrong splits `?? a.md\0?? b.md` one byte early and the file list
         // comes back mangled.
-        `{ git -C ${shellQuote(refRoot(root))} ${args.map(shellQuote).join(" ")} 2>/dev/null || true; }; printf %s ${shellQuote(marker)}`,
+        `{ ${prefix}git -C ${shellQuote(refRoot(root))} ${args.map(shellQuote).join(" ")} 2>/dev/null || true; }; printf %s ${shellQuote(marker)}`,
     )
     .join("; ")
 
@@ -188,7 +212,16 @@ export async function git(
       )
     }
     const detail = `${e.stderr ?? ""}${e.stdout ?? ""}`.trim()
-    throw new Error(detail || e.message || `git ${args[0]} failed`)
+    if (detail) throw new Error(detail)
+    // A remote call that failed with NOTHING on either stream did not reach git
+    // at all — ssh itself gave up, which is what an exhausted connection table
+    // looks like from here (sshd past `MaxStartups`, or this machine out of
+    // process handles). `e.message` for that case is execFile's own, which is
+    // the entire ssh command line including the config path and the remote
+    // script: a wall of text in the rail that names everything except what went
+    // wrong.
+    if (refHost(cwd)) throw new Error(`could not reach ${refHost(cwd)} to run \`git ${args[0]}\``)
+    throw new Error(e.message || `git ${args[0]} failed`)
   }
 }
 
@@ -235,7 +268,14 @@ export async function withTempIndex<T>(
   } finally {
     // `force` because git may never have created it — a callback that threw on
     // its first command leaves no file, and that must not mask the real error.
-    if (host) await removeRemote(host, index)
+    //
+    // The remote delete is NOT awaited. It is a `/tmp` unlink that nothing later
+    // depends on, and awaiting it spends a whole 1.4s ssh handshake making the
+    // caller wait to throw a file away — a quarter of what a remote commit's
+    // first step costs, for no answer anybody reads. Failing silently is the
+    // same outcome as the local `.catch(() => {})` beside it: a stale scratch
+    // index in `/tmp`, named with a UUID so it collides with nothing.
+    if (host) void removeRemote(host, index)
     else await rm(index, { force: true }).catch(() => {})
   }
 }
@@ -247,6 +287,124 @@ async function removeRemote(host: string, path: string): Promise<void> {
     ["-o", "BatchMode=yes", "-F", sshConfigPath(), host, `rm -f ${shellQuote(path)}`],
     GIT_OPTS,
   ).catch(() => {})
+}
+
+/**
+ * A path inside the repository, spelled for the machine that HOLDS it.
+ *
+ * `join` is this machine's grammar, so on Windows it answers `C:\…\.aide\
+ * project.md` — backslashes, handed to a POSIX shell. A remote root is always
+ * POSIX, so it is built by hand. Same trap as `realIndexPath`, which is why that
+ * one is local-only now.
+ */
+export const refPath = (ref: RepoRef, ...parts: string[]): string =>
+  refHost(ref) ? [refRoot(ref), ...parts].join("/") : join(refRoot(ref), ...parts)
+
+/**
+ * Read a file out of the repository, wherever the repository is.
+ *
+ * Null when it is not there, which callers treat as "no such file" rather than
+ * as an error — `.aide/project.md` is genuinely optional.
+ *
+ * `cat` over ssh for a remote project, because `node:fs` would be reading THIS
+ * machine's disk for a path that only exists on the far one. That is not a
+ * hypothetical difference: `readProjectDoc` did exactly this, missed every time
+ * for a remote project, and returned the empty doc — so the agent ran without
+ * the brief AND the commit gate ran without the `verify:` commands, both
+ * silently, because a missing file is a legal answer here.
+ */
+export async function readRepoFile(ref: RepoRef, ...parts: string[]): Promise<string | null> {
+  const path = refPath(ref, ...parts)
+  const host = refHost(ref)
+  if (!host) return await readFile(path, "utf8").catch(() => null)
+
+  try {
+    const { stdout } = await run(
+      "ssh",
+      ["-o", "BatchMode=yes", "-F", sshConfigPath(), host, `cat ${shellQuote(path)}`],
+      withRemoteTimeout(ref, GIT_OPTS),
+    )
+    return stdout
+  } catch {
+    // Absent and unreachable are the same answer here on purpose: this is only
+    // ever asked about optional files, and a host that cannot be reached will
+    // fail loudly at the very next git call anyway.
+    return null
+  }
+}
+
+/**
+ * A file holding `content`, ON THE MACHINE THAT RUNS GIT, for the duration of
+ * `fn`.
+ *
+ * The same trap as `GIT_INDEX_FILE` in `withTempIndex`, and it bit in exactly
+ * the same way: `commitRun` wrote the message with `writeFile(join(tmpdir(),
+ * …))` and handed the result to `git commit -F`. Locally those are the same
+ * disk. For a remote project the file is written HERE and read THERE, so the
+ * commit died on `could not read log file
+ * 'C:\\Users\\…\\Temp\\aide-commitmsg-…': No such file or directory` — a Windows
+ * path quoted at a Linux box, after the diff had been read, the checks had run
+ * and the message had been paid for.
+ *
+ * A file rather than `-m` because commit messages are multi-line by design, and
+ * over ssh the argument would be parsed a second time by the remote shell.
+ * Content goes over STDIN rather than interpolated into the command, so a
+ * message containing quotes, backticks or a `$(…)` is bytes rather than
+ * something the far shell evaluates — which for a model-written commit message
+ * is the difference between a body and an injection.
+ */
+export async function withMessageFile<T>(
+  ref: RepoRef,
+  content: string,
+  fn: (path: string) => Promise<T>,
+): Promise<T> {
+  const host = refHost(ref)
+  const body = content.endsWith("\n") ? content : `${content}\n`
+  const path = host
+    ? `/tmp/aide-commitmsg-${randomUUID()}`
+    : join(tmpdir(), `aide-commitmsg-${randomUUID()}`)
+
+  if (host) await writeRemoteFile(host, path, body)
+  else await writeFile(path, body, "utf8")
+
+  try {
+    return await fn(path)
+  } finally {
+    // Not awaited remotely, for the reason `withTempIndex`'s cleanup is not:
+    // a `/tmp` unlink nothing depends on is not worth a 1.4s handshake.
+    if (host) void removeRemote(host, path)
+    else await rm(path, { force: true }).catch(() => {})
+  }
+}
+
+/**
+ * Write a file on the far side, with the content on stdin.
+ *
+ * `spawn` rather than the `execFile` everything else here uses, because
+ * `execFile` cannot supply a stdin body — and stdin is the point: it is what
+ * keeps the message out of the command line. Unlike the best-effort helpers
+ * above this one THROWS, because a commit whose message never arrived must not
+ * go on to write an empty one.
+ */
+function writeRemoteFile(host: string, path: string, content: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      "ssh",
+      ["-o", "BatchMode=yes", "-F", sshConfigPath(), host, `cat > ${shellQuote(path)}`],
+      { windowsHide: true, stdio: ["pipe", "ignore", "pipe"] },
+    )
+    let stderr = ""
+    child.stderr?.on("data", (b: Buffer) => {
+      stderr += b.toString()
+    })
+    child.on("error", reject)
+    child.on("exit", (code) =>
+      code === 0
+        ? resolve()
+        : reject(new Error(stderr.trim() || `could not write the commit message to ${host}`)),
+    )
+    child.stdin?.end(content)
+  })
 }
 
 /**
@@ -267,40 +425,74 @@ async function removeRemote(host: string, path: string): Promise<void> {
  * The copy is best effort. With no index to copy the scratch one starts empty,
  * which makes the add slower and the resulting tree identical, so a failure here
  * costs time and never correctness.
+ *
+ * The callback gets `batchTemp` beside `gitTemp`: several reads of the staged
+ * tree in one round trip, which is what keeps a remote commit to two connections
+ * instead of eight. Use it whenever the reads are independent — asking for the
+ * patch, the stat and the paths one at a time is three handshakes for three
+ * views of the same tree.
  */
 export async function withWorkingTreeIndex<T>(
   root: RepoRef,
-  fn: (gitTemp: (args: string[]) => Promise<string>) => Promise<T>,
+  fn: (
+    gitTemp: (args: string[]) => Promise<string>,
+    batchTemp: (commands: string[][]) => Promise<string[]>,
+  ) => Promise<T>,
 ): Promise<T> {
   return withTempIndex(root, async (gitTemp, indexPath) => {
     const host = refHost(root)
-    const real = await realIndexPath(root)
-    if (real) {
+    if (host) await prepareRemoteIndex(root, host, indexPath)
+    else {
+      const real = await realIndexPath(refRoot(root))
       // The copy happens where both files are. `copyFile` is this machine's
       // filesystem, so a remote project needs `cp` over there — copying the far
       // index down and back would be the stat cache's whole point thrown away,
       // plus two transfers of a file that can be megabytes.
-      if (host) await copyRemote(host, real, indexPath)
-      else await copyFile(real, indexPath).catch(() => {})
+      if (real) await copyFile(real, indexPath).catch(() => {})
+      await gitTemp(["add", "-A"])
     }
-    await gitTemp(["add", "-A"])
-    return fn(gitTemp)
+    const batchTemp = (commands: string[][]) =>
+      gitBatch(root, commands, { GIT_INDEX_FILE: indexPath })
+    return fn(gitTemp, batchTemp)
   })
 }
 
-/** `cp` on the far side. Best effort, exactly like the local `copyFile`. */
-async function copyRemote(host: string, from: string, to: string): Promise<void> {
+/**
+ * Locate the real index, copy it, and stage the tree — in ONE ssh connection.
+ *
+ * The three steps are separate calls locally, where each costs about 30ms and
+ * the clarity is free. Remotely each is a full connection at ~1.4s, because
+ * Windows OpenSSH cannot multiplex, and they were the first three of the EIGHT
+ * that `treeChanges` spent before the commit gate had read anything at all. That
+ * is the step the rail reported as `did not answer \`git diff\` within 90s`:
+ * eight serial handshakes against a host whose sshd drops connections past
+ * `MaxStartups` while the rail is polling it 1500ms apart.
+ *
+ * Written as a shell script rather than a `gitBatch`, because the steps are NOT
+ * independent — the `cp` must land before the `add` reads it, and `--git-dir` is
+ * resolved on the far side by `$(…)` instead of being round-tripped here first.
+ *
+ * Entirely best effort, matching the local path: a missing index (a repo with no
+ * commits) or a failed copy costs the stat cache and nothing else, so every step
+ * is `|| true` and the whole thing swallows its error. What must not happen is
+ * this throwing and taking a readable diff down with it.
+ */
+async function prepareRemoteIndex(root: RepoRef, host: string, indexPath: string): Promise<void> {
+  const dir = `$(git -C ${shellQuote(refRoot(root))} rev-parse --git-path index)`
+  const script = [
+    // `--git-path index` rather than `--git-dir` plus a join: it answers with the
+    // index's own path, already absolute-or-relative-to-root the way git means
+    // it, so the worktree case (`.git` is a FILE pointing elsewhere) needs no
+    // special handling here.
+    `cd ${shellQuote(refRoot(root))} || exit 0`,
+    `cp ${dir} ${shellQuote(indexPath)} 2>/dev/null || true`,
+    `GIT_INDEX_FILE=${shellQuote(indexPath)} git -C ${shellQuote(refRoot(root))} add -A || true`,
+  ].join("; ")
+
   await run(
     "ssh",
-    [
-      "-o",
-      "BatchMode=yes",
-      "-F",
-      sshConfigPath(),
-      host,
-      `cp ${shellQuote(from)} ${shellQuote(to)}`,
-    ],
-    GIT_OPTS,
+    ["-o", "BatchMode=yes", "-F", sshConfigPath(), host, script],
+    withRemoteTimeout(root, GIT_OPTS),
   ).catch(() => {})
 }
 
@@ -311,18 +503,16 @@ async function copyRemote(host: string, from: string, to: string): Promise<void>
  * `--git-dir` rather than `<root>/.git`, because the latter is a FILE when the
  * project is itself a worktree, and the index lives in the directory it points
  * at rather than beside it.
+ *
+ * LOCAL only: `join` is this machine's path grammar, which on Windows means
+ * backslashes, and the result would be handed to a POSIX shell. The remote side
+ * resolves its own index inside `prepareRemoteIndex`, where `$(git rev-parse
+ * --git-path index)` answers on the machine that has the file.
  */
-async function realIndexPath(root: RepoRef): Promise<string | null> {
+async function realIndexPath(root: string): Promise<string | null> {
   const dir = await gitOr("", async () => (await git(root, ["rev-parse", "--git-dir"])).trim())
   if (!dir) return null
-  // `join` is this machine's path grammar, which on Windows means backslashes —
-  // fine for a local repo and wrong for a remote one, where the result is handed
-  // straight back to a POSIX shell. A remote path is always POSIX, so it is
-  // built by hand.
-  if (refHost(root)) {
-    return dir.startsWith("/") ? `${dir}/index` : `${refRoot(root)}/${dir}/index`
-  }
-  return isAbsolute(dir) ? join(dir, "index") : join(refRoot(root), dir, "index")
+  return isAbsolute(dir) ? join(dir, "index") : join(root, dir, "index")
 }
 
 /**

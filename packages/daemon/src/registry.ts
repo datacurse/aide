@@ -3,7 +3,7 @@ import { existsSync } from "node:fs"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { basename, resolve } from "node:path"
 import type { Project, ProjectDoc, SshHost } from "@aide/protocol"
-import { EMPTY_PROJECT_DOC } from "@aide/protocol"
+import { EMPTY_PROJECT_DOC, STATE_DIR } from "@aide/protocol"
 import {
   aideHome,
   parseProjectDoc,
@@ -11,6 +11,7 @@ import {
   registryPath,
   stateDir,
 } from "@aide/protocol/node"
+import { readRepoFile, refHost, refPath, type RepoRef } from "./git.js"
 import { isGitRepo, repoRoot } from "./repo.js"
 import { remoteRepoRoot, scaffoldRemoteState } from "./ssh.js"
 
@@ -152,21 +153,25 @@ export async function scaffoldState(root: string): Promise<void> {
  *
  * A missing file is normal — `.aide/` may predate this, or the human may have
  * deleted it — and means "no project context", not an error.
+ *
+ * Takes a `RepoRef` rather than a path, because for a remote project the file is
+ * on the far machine and `node:fs` here would miss it every time. It did: the
+ * agent ran with no brief and, worse, the commit gate read no `verify:` commands
+ * and skipped every check — silently in both cases, since "absent" is a legal
+ * answer. A bare string still compiles and still means "here".
  */
-export async function readProjectDoc(root: string): Promise<ProjectDoc> {
-  let raw: string
-  try {
-    raw = await readFile(projectDocPath(root), "utf8")
-  } catch {
-    return EMPTY_PROJECT_DOC
-  }
+export async function readProjectDoc(ref: RepoRef): Promise<ProjectDoc> {
+  const raw = await readRepoFile(ref, STATE_DIR, "project.md")
+  if (raw === null) return EMPTY_PROJECT_DOC
   try {
     return parseProjectDoc(raw)
   } catch (err) {
     // Re-thrown with the path, because "bootstrap must be a string" is not
-    // actionable without knowing which file said it.
+    // actionable without knowing which file said it — and for a remote project
+    // it must name the machine, or it points at a path on the wrong one.
+    const where = refHost(ref) ? `${refHost(ref)}:` : ""
     throw new Error(
-      `${projectDocPath(root)}: ${err instanceof Error ? err.message : String(err)}`,
+      `${where}${refPath(ref, STATE_DIR, "project.md")}: ${err instanceof Error ? err.message : String(err)}`,
     )
   }
 }

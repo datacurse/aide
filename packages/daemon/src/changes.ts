@@ -1,7 +1,14 @@
-import { access, rm, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
+import { access } from "node:fs/promises"
 import { join } from "node:path"
-import { git, gitOr, refHost, refRoot, withWorkingTreeIndex, type RepoRef } from "./git.js"
+import {
+  git,
+  gitOr,
+  refHost,
+  refRoot,
+  withMessageFile,
+  withWorkingTreeIndex,
+  type RepoRef,
+} from "./git.js"
 
 /**
  * What is uncommitted, what a run changed, and committing either.
@@ -79,11 +86,20 @@ export async function treeChanges(root: RepoRef): Promise<TreeChanges> {
   )
   const base = head ? [head] : []
 
-  return await withWorkingTreeIndex(root, async (gitTemp) => ({
-    diff: await gitTemp(["diff", "--cached", ...base, "--"]),
-    stat: await gitTemp(["diff", "--cached", "--stat", ...base, "--"]),
-    paths: splitZ(await gitTemp(["diff", "--cached", "--name-only", "-z", ...base, "--"])),
-  }))
+  // One round trip for all three, not three. They are three readings of the same
+  // staged tree, so batching them cannot make them disagree — and on a remote
+  // project each one was its own ssh handshake at ~1.4s. This is the commit
+  // gate's FIRST step, which is where `did not answer \`git diff\` within 90s`
+  // came from: eight serial connections against a host that starts refusing them
+  // past `MaxStartups` while the rail polls it every 1500ms.
+  return await withWorkingTreeIndex(root, async (_gitTemp, batchTemp) => {
+    const [diff, stat, names] = await batchTemp([
+      ["diff", "--cached", ...base, "--"],
+      ["diff", "--cached", "--stat", ...base, "--"],
+      ["diff", "--cached", "--name-only", "-z", ...base, "--"],
+    ])
+    return { diff: diff ?? "", stat: stat ?? "", paths: splitZ(names ?? "") }
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -124,14 +140,19 @@ export interface RunChanges extends TreeChanges {
  * staged tree, and the `add -A` behind it is the expensive part.
  */
 export async function runChanges(root: RepoRef, checkpoint: string): Promise<RunChanges> {
-  const { diff, stat, paths } = await withWorkingTreeIndex(root, async (gitTemp) => ({
-    // The trailing `--` is not a leftover: it tells git the argument before it
-    // is a revision, so a file whose name happens to look like the checkpoint
-    // sha cannot turn this into "ambiguous argument".
-    diff: await gitTemp(["diff", "--cached", checkpoint, "--"]),
-    stat: await gitTemp(["diff", "--cached", "--stat", checkpoint, "--"]),
-    paths: splitZ(await gitTemp(["diff", "--cached", "--name-only", "-z", checkpoint, "--"])),
-  }))
+  // Batched for the same reason as `treeChanges` above: one round trip for three
+  // readings of one staged tree.
+  const { diff, stat, paths } = await withWorkingTreeIndex(root, async (_gitTemp, batchTemp) => {
+    const [d, s, names] = await batchTemp([
+      // The trailing `--` is not a leftover: it tells git the argument before it
+      // is a revision, so a file whose name happens to look like the checkpoint
+      // sha cannot turn this into "ambiguous argument".
+      ["diff", "--cached", checkpoint, "--"],
+      ["diff", "--cached", "--stat", checkpoint, "--"],
+      ["diff", "--cached", "--name-only", "-z", checkpoint, "--"],
+    ])
+    return { diff: d ?? "", stat: s ?? "", paths: splitZ(names ?? "") }
+  })
 
   // Against the checkpoint's own PARENT rather than HEAD. They are the same
   // commit right now, but reading it off the checkpoint means this stays correct
@@ -250,16 +271,15 @@ export async function commitRun(
     await git(root, ["add", "-A", "--", ...chunk])
   }
 
-  const file = join(tmpdir(), `aide-commitmsg-${process.pid}-${Date.now()}`)
-  await writeFile(file, message.endsWith("\n") ? message : `${message}\n`, "utf8")
-  try {
+  // The message file is written wherever git will READ it, which for a remote
+  // project is not this machine — see `withMessageFile`, and the commit that
+  // died on a Windows temp path quoted at a Linux box.
+  await withMessageFile(root, message, (file) =>
     // One call, so the commit is atomic. If the pathspec list is too long for a
     // single command line this throws rather than committing a subset — a
     // partial commit of a reviewed change is worse than a failed one.
-    await git(root, ["commit", "-F", file, "--cleanup=whitespace", "--", ...committable])
-  } finally {
-    await rm(file, { force: true })
-  }
+    git(root, ["commit", "-F", file, "--cleanup=whitespace", "--", ...committable]),
+  )
   return (await git(root, ["rev-parse", "HEAD"])).trim()
 }
 

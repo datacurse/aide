@@ -391,7 +391,7 @@ export class ChatLane {
       // that can suspend — the lock above is taken synchronously and nothing may
       // run in front of it.
       const [doc, sourceIdAtStart] = await Promise.all([
-        readProjectDoc(project.root),
+        readProjectDoc(repoOf(project)),
         currentSourceId(),
       ])
       record.sourceIdAtStart = sourceIdAtStart
@@ -625,7 +625,7 @@ export class ChatLane {
     if (record.projectId !== opts.project.id) throw new Error("that run holds another project")
     if (record.nested) throw new Error("that run already has a turn inside it")
 
-    const doc = await readProjectDoc(opts.project.root)
+    const doc = await readProjectDoc(repoOf(opts.project))
 
     // Stopped while the brief was being read. Answered here rather than left to
     // the worker, because `#coldStart` would file an interrupt as the HELD run's
@@ -773,7 +773,12 @@ export class ChatLane {
    * once the session has a name. See `adoptCheckpoint`.
    */
   async #checkpoint(project: Project, sessionId: string | null, runId: string): Promise<void> {
-    const root = project.root
+    // `repoOf`, NOT `project.root`. The bare root is a valid `RepoRef` that
+    // silently means "on this machine", so for a remote project every call below
+    // ran Windows git against a Linux path — `fatal: cannot change to
+    // '/root/code/…': No such file or directory`, after the turn had been
+    // admitted and the lock taken.
+    const root = repoOf(project)
     const existing = sessionId ? await readCheckpoint(root, sessionId) : null
     if (existing) return
 

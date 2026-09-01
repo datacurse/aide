@@ -502,7 +502,13 @@ function toLines(events: RunEvent[], live?: LiveText | null): Line[] {
           turns: e.numTurns,
           ms: e.durationMs,
           cost: e.totalCostUsd,
-          errors: e.errors ?? [],
+          // Not for a run you stopped. The SDK still reports WHY its stream
+          // ended, and for an interrupt that reason is the interrupt — so the
+          // row said "interrupted by you" and then contradicted itself with an
+          // error underneath, which reads as the turn having failed on top of
+          // being stopped. The header already carries the outcome; the raw
+          // string is still in the log for anyone reading that.
+          errors: e.status === "cancelled" ? [] : (e.errors ?? []),
         })
         break
     }
@@ -1177,10 +1183,20 @@ function renderLine(
         </p>
         {/* What the SDK said, under the line that says it failed. The subtype
             names the wall that was hit and is already in the label; these are
-            the only place the actual reason appears. */}
+            the only place the actual reason appears.
+
+            Humanized, like the `error` rows above — and this is where it
+            actually matters. An SDK diagnostic reaches the screen through
+            `run.finished.errors[]` far more often than through `run.error`, so
+            translating only the latter left the raw string as the LAST thing in
+            a conversation that never got a reply: a turn interrupted a second
+            in read as `[ede_diagnostic] result_type=user last_content_type=n/a
+            stop_reason=null`, which is indistinguishable from the model having
+            answered with nonsense. The raw text stays on `title` for anyone
+            debugging. */}
         {line.errors.map((text, i) => (
-          <p key={i} className="mt-1 break-words text-err">
-            {text}
+          <p key={i} className="mt-1 break-words text-err" title={text}>
+            {humanizeError(text)}
           </p>
         ))}
       </div>

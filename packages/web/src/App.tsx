@@ -134,9 +134,41 @@ export function App() {
     }
   }, [projectId, rememberPending, rememberPendingError])
 
+  /**
+   * A tick is skipped while the previous one is still in flight.
+   *
+   * `setInterval` fires on the clock whether or not the last beat answered, and
+   * against a REMOTE project a beat does not: `gitPending` is one ssh round trip
+   * at about 1.75s on a 1500ms interval, so every beat started before the one
+   * before it finished and the overlap grew without bound. Each of those is a
+   * fresh ssh process — Windows OpenSSH cannot multiplex — so what it grows into
+   * is dozens of concurrent connections against a host whose sshd refuses them
+   * past `MaxStartups` (10, on the machine this was found on) and a Windows
+   * spawn table that answers `ENOMEM` before that. Measured: 12 at once already
+   * loses one to `kex_exchange_identification`, 30 loses two thirds.
+   *
+   * The visible symptom was a commit dying on `did not answer \`git diff\`
+   * within 90s` while the rail beside it, polling happily, showed the same repo
+   * as perfectly reachable — the commit's connections were the ones being
+   * dropped.
+   *
+   * A skipped beat costs nothing: the next one reads the same state, and it is
+   * strictly better to be one beat behind than to be the reason the answer never
+   * arrives.
+   */
+  const inFlight = useRef(false)
   useEffect(() => {
-    void refresh()
-    const timer = setInterval(() => void refresh(), POLL_MS)
+    const beat = async () => {
+      if (inFlight.current) return
+      inFlight.current = true
+      try {
+        await refresh()
+      } finally {
+        inFlight.current = false
+      }
+    }
+    void beat()
+    const timer = setInterval(() => void beat(), POLL_MS)
     return () => clearInterval(timer)
   }, [refresh])
 

@@ -332,43 +332,39 @@ function sshWithInput(host: SshHost, remoteCommand: string, input: string): Prom
 }
 
 /**
- * Not implemented, and written down rather than left as a gap to rediscover.
+ * A remote project works, and this is what each of its three halves cost.
  *
- * The picker above is finished: aide lists your machines, walks them, and knows
- * which directories are repositories. What is missing is everything a project
- * does AFTER it is added, and the reason it is missing is structural rather than
- * a matter of effort — three separate assumptions, each of which has to be paid
- * for on its own.
+ * This block used to say "not implemented", listing three structural
+ * assumptions in the way. All three have been paid, and the note is kept rather
+ * than deleted because each answer is the reason the next person should not
+ * reach for the shortcut that was rejected.
  *
- * 1. **The agent runs where the daemon runs.** `runAgent` passes `cwd:
- *    project.root` to the SDK, and the SDK is a `claude` binary for THIS
- *    platform — the installed package is literally
- *    `claude-agent-sdk-win32-x64`. Pointing `cwd` at a remote path does not move
- *    the process; it fails to chdir. Running the agent on the far side means an
- *    agent process over there, which means the SDK installed there, credentials
- *    there, and a transport carrying the message stream back — the daemon stops
- *    being the thing that runs the agent and becomes the thing that talks to one.
+ * 1. **The agent runs where the daemon runs** — no longer. `runAgent` passed
+ *    `cwd: project.root` to a `claude` binary for THIS platform, so a remote
+ *    path did not move the process, it failed to chdir. The fix was an agent
+ *    process on the far side: `runner.ts` names the seam, `SshRunner` speaks it
+ *    over `ssh <host> aide-agent --stdio`, and `pnpm deploy-agent` puts it
+ *    there. The daemon stopped being the thing that runs the agent and became
+ *    the thing that talks to one.
  *
- * 2. **Every git call is `execFile("git", ["-C", root, …])`.** `git.ts`,
- *    `repo.ts`, `changes.ts` and `checkpoint.ts` all assume a local binary and a
- *    local path, including `withTempIndex`, which writes a scratch index into
- *    THIS machine's temp directory and hands it to git through `GIT_INDEX_FILE`.
- *    That trick is what makes working in someone's own checkout safe, and it
- *    does not survive the two ends being different machines.
+ * 2. **Every git call assumed a local binary and a local path** — now `RepoRef`
+ *    carries the host, and `-C <root>` was already the seam that made that
+ *    affordable. `withTempIndex` was the hard part, since `GIT_INDEX_FILE` is
+ *    interpreted by whichever machine runs git; it puts the scratch index in
+ *    `/tmp` over there. The general rule that came out of it — a path handed to
+ *    git must exist on the machine that RUNS git — then caught the commit
+ *    message file, which was being written here and read there.
  *
- * 3. **`.aide/` is read with `node:fs`.** `readProjectDoc` and `scaffoldState`
- *    open paths directly, so a remote project has no brief and no state
- *    directory.
+ * 3. **`.aide/` was read with `node:fs`** — `readProjectDoc` takes a `RepoRef`
+ *    and reads through `readRepoFile`, which is `cat` over ssh. This one was the
+ *    worst of the three to leave, because it failed SILENTLY: a missing brief is
+ *    a legal answer, so the agent ran with no project context and the commit
+ *    gate skipped every check, neither of them saying so. `scaffoldRemoteState`
+ *    above is the write half.
  *
- * The shape that fits aide's constraints — one agent has the repo, state lives
- * in files beside the code, and a run works the project's own checkout — is a
- * small aide agent running ON the remote machine, with this daemon as a client
- * of it. That is a different program, not a flag on this one. Mounting the
- * remote filesystem (sshfs) is the tempting shortcut and is worse than it looks:
- * git over a network filesystem is slow enough to change how the tool feels, and
- * the checkpoint machinery runs on every turn.
- *
- * Left as a comment rather than a stub that throws: an exported
- * `addRemoteProject` nothing calls is a function that looks like an API and is
- * a note, and the next person to read it has to run it to find that out.
+ * Mounting the remote filesystem (sshfs) was the tempting shortcut throughout
+ * and is still worse than it looks: git over a network filesystem is slow enough
+ * to change how the tool feels, and the checkpoint machinery runs on every turn.
+ * The measured cost of the road actually taken is a connection, ~1.4s, which is
+ * why so much here is batched.
  */
