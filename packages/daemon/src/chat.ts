@@ -25,6 +25,7 @@ import type { EventLog } from "./eventlog.js"
 import { git, gitOr, refRoot, repoOf, type RepoRef } from "./git.js"
 import { readProjectDoc } from "./registry.js"
 import { LocalRunner, SshRunner, type Runner } from "./runner.js"
+import { forgetConversations } from "./sessions.js"
 import { currentSourceId, staleSince } from "./source.js"
 import type { FromWorker, ToWorker } from "./worker/main.js"
 
@@ -1050,6 +1051,13 @@ export class ChatLane {
     const release = () => {
       this.#turns.delete(runId)
       this.#watchers.delete(runId)
+      // The turn just wrote to the conversation store, and for a REMOTE project
+      // that store is read over ssh and cached. Dropped here rather than left to
+      // the TTL because this is the exact moment the browser refetches the chat
+      // list — it watches the holder go null — so a cached answer from before
+      // the turn would show a stale row at the one moment somebody is looking
+      // for a fresh one. Local projects have no cache and this is a no-op.
+      forgetConversations(worker.projectId)
       this.#armIdle(worker)
     }
     // The RECORD is what holds the project, so it waits. Nothing else can be let

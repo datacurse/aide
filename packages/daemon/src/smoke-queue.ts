@@ -54,6 +54,42 @@ const wait = (ms: number) => new Promise((r) => setTimeout(r, ms))
  */
 const TURN_MS = Number(process.env["AIDE_SMOKE_WORK_MS"] ?? 400) + 800
 
+/**
+ * Wait until nothing is in flight on `l`, rather than for a fixed number of ms.
+ *
+ * The budget above is a sleep racing work whose duration is not fixed, and it
+ * was measured on an idle machine. The commit gate does not run on one — it runs
+ * beside the daemon, a live turn, and whatever else is going on — and losing
+ * that race reports a turn that HAS finished, and is merely still recording
+ * where it got to, as one that never ended. Which is precisely the failure the
+ * comment above predicts, so this is that comment taken at its word rather than
+ * a bigger number.
+ *
+ * Reproduced before changing anything: five runs in a row pass on an idle
+ * machine, and four run at once all fail on "the turn is no longer in flight".
+ *
+ * The ceiling is only reached when something is genuinely stuck, and it is
+ * generous because a suite that occasionally takes a few seconds longer beats
+ * one that occasionally refuses a commit.
+ */
+const settled = async (l: { turns(): readonly unknown[] }, ms = 15_000): Promise<void> => {
+  const deadline = Date.now() + ms
+  while (l.turns().length > 0 && Date.now() < deadline) await wait(25)
+}
+
+/**
+ * An idle window long enough that it cannot fire while a section is running.
+ *
+ * The lanes that check a session stays WARM want the reaper never to run; the
+ * one that checks it gets evicted has its own short window and its own lane
+ * below. Five seconds read as "never" on an idle machine and stopped being
+ * "never" under load, where the git work between two turns can outlast it — so
+ * the warm assertions started failing on `liveSessions()` for a session that was
+ * doing exactly what it should. This is a fixture saying what it means rather
+ * than a number that happened to be big enough.
+ */
+const NEVER_IDLE = 120_000
+
 const root = await mkdtemp(join(tmpdir(), "aide-queue-"))
 await git(root, ["init", "-b", "main"])
 await git(root, ["config", "user.email", "smoke@aide.test"])
@@ -83,7 +119,7 @@ console.log("\nchat sessions stay warm")
 // how many turns THIS PROCESS has taken, so numTurns is the assertion: 2 means
 // the message reached a live session, 1 means it silently cold-started and the
 // whole warm path is doing nothing.
-const lane = new ChatLane(log, { idleMs: 5_000 })
+const lane = new ChatLane(log, { idleMs: NEVER_IDLE })
 const say = (sessionId: string | null, text: string) =>
   lane.send({
     project,
@@ -101,7 +137,7 @@ const turnsOf = (runId: string): number => {
 }
 
 const c1 = await say(null, "first message")
-await wait(TURN_MS)
+await settled(lane)
 const started = log.read(c1).find((e) => e.type === "run.started")
 const chatSession = started?.type === "run.started" ? started.sessionId : null
 check("a new chat learns its session id", Boolean(chatSession), String(chatSession))
@@ -109,7 +145,7 @@ check("the turn is no longer in flight", lane.turns().length === 0)
 check("the session is held open", lane.liveSessions() === 1, `${lane.liveSessions()}`)
 
 const c2 = await say(chatSession, "follow-up")
-await wait(TURN_MS)
+await settled(lane)
 check("the follow-up reused the open session", turnsOf(c2) === 2, `numTurns ${turnsOf(c2)}`)
 check("it did not fork a second one", lane.liveSessions() === 1, `${lane.liveSessions()}`)
 
@@ -121,13 +157,13 @@ try {
   refused = true
 }
 check("a second turn on a busy conversation is refused", refused)
-await wait(TURN_MS)
+await settled(lane)
 check("the third turn also reused it", turnsOf(c3) === 3, `numTurns ${turnsOf(c3)}`)
 
 const c4 = await say(chatSession, "stop me")
 await wait(100)
 check("interrupt resolves for a live turn", lane.interrupt(c4))
-await wait(TURN_MS)
+await settled(lane)
 const stopped = log.read(c4).at(-1)
 check(
   "an interrupted turn is filed cancelled",
@@ -144,7 +180,7 @@ check(
 // session ids name checkpoint refs, a made-up one exercises a rejection path no
 // real conversation can reach.
 const other = await say("dddddddd-1111-4111-8111-111111111111", "hello")
-await wait(TURN_MS)
+await settled(lane)
 check("a different conversation gets its own session", lane.liveSessions() === 2)
 check("and starts its own turn count", turnsOf(other) === 1, `numTurns ${turnsOf(other)}`)
 
@@ -268,7 +304,7 @@ const e1 = await evicting.send({
   effort: "medium",
   thinking: true,
 })
-await wait(TURN_MS)
+await settled(evicting)
 check("warm right after the turn", evicting.liveSessions() === 1, `${evicting.liveSessions()}`)
 await wait(1400)
 check(
@@ -294,7 +330,7 @@ console.log("\nthe lock — one agent has the repo")
   // `addProject` scaffolds this in production; a bare temp repo has no `.aide/`.
   await mkdir(join(root, STATE_DIR), { recursive: true })
 
-  const locked = new ChatLane(log, { idleMs: 5_000 })
+  const locked = new ChatLane(log, { idleMs: NEVER_IDLE })
 
   const firstRun = await locked.send({
     project,
@@ -418,7 +454,7 @@ console.log("\nthe lock — one agent has the repo")
     // read the record the profile is going to be judged from.
     thinking: false,
   })
-  await wait(TURN_MS)
+  await settled(locked)
   check(
     "a follow-up does not re-checkpoint",
     !log.read(secondRun).some((e) => e.type === "checkpoint.taken"),

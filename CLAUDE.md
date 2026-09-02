@@ -224,6 +224,39 @@ Decisions already taken, which are not gaps to fill:
   read, that a missing file is absent rather than an error, and that a remote
   path is POSIX — `join` on Windows would answer with backslashes, which a POSIX
   shell reads as escapes.
+- **A remote project's conversations are read by asking the far side.** The SDK's
+  `listSessions`/`getSessionMessages` take a directory and read it LOCALLY, so
+  they cannot be pointed at another machine: for a remote project the daemon
+  looked in this machine's `~/.claude/projects/` for a Linux root, found no
+  directory at all, and answered with an empty list — the UI drew a project with
+  no conversations while a 1.2MB transcript sat intact on the far side. Nothing
+  lost, nothing findable, and no error anywhere. `aide-agent --sessions <root>`
+  and `--session <root> <id>` run those same SDK calls where the files are and
+  print one JSON document. Deliberately one-shot subcommands rather than
+  `ToWorker` messages: that protocol describes a live conversation holding the
+  project's lock, and this is a stateless read that is polled and must work when
+  no agent is running. Shaped like `gitBatch` and `readRepoFile` instead. In
+  query mode `stdio.ts` skips the `ready` line and the stdin wiring — stdout is
+  one document there, so a framing line in front of it makes the answer
+  unparseable, and an attached stdin would leave a polled ssh call that never
+  returns. Costs a connection: ~6.5s to list, ~9.8s to open a 1.2MB transcript.
+- **That read is cached, and the invalidation is the load-bearing half.** Only
+  the REMOTE one — the local SDK call is a directory read in single-digit
+  milliseconds, so a cache in front of it would buy nothing and add a staleness
+  bug. Measured against `tg`: a list goes 5470ms → 0ms, a 336-event transcript
+  5156ms → 3ms. The 60s TTL is not what makes it correct; `forgetConversations`
+  is. Everything that CHANGES a conversation goes through this daemon, so
+  `ChatLane`'s `release()` — the one place a turn lets go of a project — drops
+  the entry, and the next read is fresh. That matters because the browser
+  refetches the chat list precisely BECAUSE a turn finished (it watches the
+  holder go null), so a plain TTL would serve a stale row at the one moment
+  somebody is looking for a new one. The TTL only covers the writer aide cannot
+  see: somebody running `claude` in a terminal on the far machine. The PROMISE is
+  cached rather than the result, so two requests three seconds apart share one
+  ssh connection instead of opening a second — verified, two concurrent cold
+  reads cost one connection — and a rejection is evicted rather than replayed for
+  a minute. Status and spend are attached OUTSIDE the cached read, from the board
+  and the event logs, so ticking a chat off is correct even on a cache hit.
 - **A project's id hashes the host as well as the path.** `/root/code/app`
   exists on more than one machine, and without the host those collide into a
   single registry entry — you would open one and see the other's conversations.
@@ -268,6 +301,20 @@ Decisions already taken, which are not gaps to fill:
 - **Two modes: Plan and Auto.** Manual and Edit-automatically are gone. Nothing
   aide runs may need a human mid-turn, because the fix above is a turn nobody
   typed. Re-adding a mode that asks means re-opening that.
+- **`AskUserQuestion` is refused, in both modes.** It is the one tool that turns
+  a turn into a mid-run permission prompt, which is the thing the rule above
+  exists to prevent — and the enforcement was missing, so it was reachable the
+  whole time. `canUseTool` routes every unresolved call in a CHAT run to the
+  browser, and this tool is never on the allowlist, so it always became a
+  blocking question. Watched doing it: a turn on Auto sat on one for 937s asking
+  which chess variant to migrate, holding a remote project, `blocked: true` in
+  the daemon's own state, with two buttons whose only honest answer was to kill
+  the run. `ExitPlanMode` is the exception because it ENDS the turn rather than
+  parking it — nothing is held waiting on the click. Two layers, deliberately:
+  `disallowedTools` takes it out of the schema so it is never called, and
+  `canUseTool` denies it anyway as the backstop, with a refusal that names the
+  alternative — put the options in the reply and end the turn, and the human
+  answers in the next message.
 - **A tool row is drawn when the call opens, not when its event arrives.**
   `tool.start` is read off the COMPLETED assistant message, so a call the model
   announces two sentences into a reply reaches the log only once it has stopped

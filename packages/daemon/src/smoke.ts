@@ -556,6 +556,41 @@ console.log("\ncarrying out an approved plan")
   check("an empty command is still nothing", !verdict("   ").allow)
 }
 
+console.log("\nnothing may stop for a human mid-turn")
+{
+  const { QUESTION_TOOL, QUESTION_REFUSAL } = await import("./agent.js")
+  const { CONFIG } = await import("./config.js")
+
+  // The rule this pins was unenforced for the whole life of the feature, and the
+  // symptom was not an error: a turn on Auto simply stopped, held a remote
+  // project's checkout, and waited 937 seconds for a click. `canUseTool` routes
+  // every unresolved call in a chat run to the browser, so a tool that is not on
+  // an allowlist becomes a QUESTION rather than a refusal — which is right for
+  // an edit and catastrophic for the one tool whose whole purpose is to block.
+  check(
+    "the question tool is never on the chat allowlist",
+    !CONFIG.chatAutoAllowTools.includes(QUESTION_TOOL),
+    CONFIG.chatAutoAllowTools.join(","),
+  )
+  check(
+    "nor on the task allowlist — a headless run has nobody to ask at all",
+    !CONFIG.allowedTools.includes(QUESTION_TOOL),
+  )
+  // A refusal an agent cannot act on just becomes a retry, and a retry loop
+  // against a blocked tool spends money going nowhere. This one has to name the
+  // thing to do instead, which is: say it in the reply and end the turn.
+  check(
+    "and the refusal says what to do instead",
+    QUESTION_REFUSAL.includes("reply") && QUESTION_REFUSAL.includes("end the turn"),
+    QUESTION_REFUSAL.slice(0, 60),
+  )
+  // `ExitPlanMode` is the deliberate exception and must NOT be swept up by the
+  // same rule: it ends the turn rather than parking it, so nothing is held while
+  // the human reads. Not asserted here — the two are string literals, so tsc
+  // rejects the comparison as provably false, which is a stronger guarantee than
+  // a runtime check and costs nothing to keep.
+}
+
 console.log("\ninherited chat mode")
 {
   // The session store is shared with the CLI and the VS Code extension, and a

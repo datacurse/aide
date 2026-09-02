@@ -196,6 +196,37 @@ function summarizeToolResult(content: unknown): string {
 const PLAN_HANDOFF_TOOL = "ExitPlanMode"
 
 /**
+ * The tool that asks the human a multiple-choice question mid-turn, and the one
+ * tool aide always refuses.
+ *
+ * Neither mode may stop for permission mid-turn — see the brief. `ExitPlanMode`
+ * is the single exception, and it is an exception because it ENDS the turn: the
+ * plan is handed over and nothing is holding the checkout waiting on a click.
+ * `AskUserQuestion` is the opposite shape. It blocks with the run still live,
+ * still holding the project's lock, and aide sends turns nobody typed — the
+ * commit gate's repair attempt is one — so a question raised by one of those has
+ * nobody to answer it and wedges the project until someone finds the stop button.
+ *
+ * Observed doing exactly that: a turn on Auto sat on `AskUserQuestion` for 937
+ * seconds asking which chess variant to migrate, holding a remote project, with
+ * `allow`/`decline` buttons whose only honest answer was to kill the run.
+ *
+ * The refusal names the alternative rather than just saying no, because the model
+ * has a real decision to communicate and a good way to do it: say the options in
+ * the reply and stop. The turn ends, the lock is released, and the human answers
+ * in the next message — which is the same conversation, one turn later, with
+ * nothing held in the meantime.
+ */
+export const QUESTION_TOOL = "AskUserQuestion"
+
+export const QUESTION_REFUSAL = [
+  "aide does not allow AskUserQuestion: it blocks the turn while holding the",
+  "project's checkout, and aide sends turns that nobody is watching.",
+  "Put the question and the options in your reply and end the turn instead —",
+  "the human answers in the next message.",
+].join(" ")
+
+/**
  * What a chat in Auto mode may do with a shell, decided by aide instead of by a
  * model that guards it.
  *
@@ -929,6 +960,13 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
       ...(opts.onDelta ? { includePartialMessages: true } : {}),
       ...(opts.maxBudgetUsd ? { maxBudgetUsd: opts.maxBudgetUsd } : {}),
       ...(opts.maxTurns ? { maxTurns: opts.maxTurns } : {}),
+      // Taken away rather than only refused. `canUseTool` denies this too, but a
+      // deny is a round trip the model can spend a turn arguing with — it sees
+      // the tool, calls it, is refused, and may well try again. `disallowedTools`
+      // removes it from the schema, so the question is never asked in the first
+      // place and the model reaches for prose instead. The deny stays as the
+      // backstop for the case this option stops covering. See `QUESTION_TOOL`.
+      disallowedTools: [QUESTION_TOOL],
       // Load the target project's .claude/ but not the host's ~/.claude, so a run
       // behaves the same on anyone's machine. Measured: the host's global config
       // is only ~700 tokens, so this is for reproducibility, not for savings.
@@ -939,6 +977,21 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
       // auth problem rather than a config one.
       env: { ...process.env, ...opts.env },
       canUseTool: async (name, toolInput) => {
+        // Refused in EVERY mode, and before the branch below, because that
+        // branch is what turns an unresolved call into a blocking question —
+        // and this is the one call that must never become one. See
+        // `QUESTION_TOOL`: it holds the lock waiting for a click that a turn
+        // nobody typed will never get.
+        if (name === QUESTION_TOOL) {
+          pending.push({
+            type: "tool.denied",
+            name,
+            input: toolInput,
+            reason: QUESTION_REFUSAL,
+          })
+          return { behavior: "deny", message: QUESTION_REFUSAL }
+        }
+
         // A chat asks. This is the whole difference between the two kinds of
         // run: a human is present, so a call the SDK could not resolve becomes a
         // question rather than a refusal. The turn blocks here until the answer

@@ -10,14 +10,156 @@
  * SDK's session store, shared with the Claude Code CLI and the VS Code
  * extension, which is why a chat you had in VS Code appears in aide with no
  * import step — and why deleting one here would delete it there.
+ *
+ * That store is on the machine that RAN the agent, which for a remote project is
+ * not this one. The SDK's readers take a directory and read it locally, so they
+ * cannot be pointed at another host — `listSessions({ dir })` for a Linux root
+ * found no directory at all here and answered with an empty list, which the UI
+ * drew as a project with no conversations while a 1.2MB transcript sat intact on
+ * the far side. So a remote project asks `aide-agent` instead; see
+ * `remoteQuery`.
  */
+import { execFile } from "node:child_process"
 import { open, readdir, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { isAbsolute, join, relative } from "node:path"
+import { promisify } from "node:util"
 import { getSessionMessages, listSessions } from "@anthropic-ai/claude-agent-sdk"
 import type { ChatMode, ConversationSummary, Project, RunEvent } from "@aide/protocol"
 import { STATE_DIR, chatModeFromSdk } from "@aide/protocol"
+import { sshConfigPath } from "@aide/protocol/node"
 import { normalizeSdkMessage } from "./agent.js"
+
+const run = promisify(execFile)
+
+/** Where `deploy-agent` puts it. Matches `REMOTE_AGENT` in `chat.ts`. */
+const REMOTE_AGENT = process.env["AIDE_REMOTE_AGENT"] ?? "$HOME/.aide/agent/aide-agent"
+
+/**
+ * How long a remote session read may take.
+ *
+ * Same reasoning as `REMOTE_GIT_TIMEOUT_MS` in `git.ts`, and the same failure it
+ * prevents: this is called from an HTTP handler the browser polls, so a hang
+ * here is a pane that never fills and a request that never returns. Shorter than
+ * git's 90s because this reads a directory listing, not a tree.
+ */
+const REMOTE_SESSION_TIMEOUT_MS = 30_000
+
+/**
+ * How long a remote answer is reused.
+ *
+ * Only remote reads are cached, because only they are slow: the local SDK call
+ * is a directory read at single-digit milliseconds and a cache in front of it
+ * would add a staleness bug to buy nothing. Measured against `tg`: 6.5s to list
+ * a project's conversations, 9.8s to open a 1.2MB transcript, essentially all of
+ * it the ssh connection and the transfer.
+ *
+ * Sixty seconds is long because the invalidation below, not the clock, is what
+ * makes this correct. Everything that CHANGES a conversation goes through this
+ * daemon — a turn finishing, a chat being ticked off — so those drop the entry
+ * outright and the next read is fresh. The TTL is only a backstop for the one
+ * writer aide does not see: somebody running `claude` in a terminal on the far
+ * machine. A minute of staleness for that case, against a 6.5s wait on every
+ * project switch, is the trade.
+ */
+const REMOTE_CACHE_MS = 60_000
+
+/**
+ * Remote answers, keyed by what was asked.
+ *
+ * The PROMISE is stored, not the result, and that is the half that matters most
+ * on a slow read: two requests arriving three seconds apart — the browser
+ * refetching while the first is still in flight — share one ssh connection
+ * instead of opening a second. Connections are a budget here, not just a
+ * latency; see the `MaxStartups` note in CLAUDE.md.
+ *
+ * A rejected promise is evicted rather than cached, or one unreachable moment
+ * would be replayed as an error for a full minute after the host came back.
+ */
+const remoteCache = new Map<string, { at: number; value: Promise<unknown> }>()
+
+/**
+ * Forget what was read for a project, so the next read goes to the machine.
+ *
+ * Called wherever aide itself changes a conversation. Without it the cache would
+ * be a plain TTL, which is wrong in the precise case the UI cares about: the
+ * chat list refetches BECAUSE a turn just finished, and serving that request a
+ * cached list from before the turn shows the user a stale row at the one moment
+ * they are looking for a fresh one.
+ *
+ * Takes the project id and clears every entry for it — list and transcripts
+ * alike — because a finished turn changes both and the id is what every caller
+ * has to hand.
+ */
+export function forgetConversations(projectId: string): void {
+  for (const key of remoteCache.keys()) {
+    if (key.startsWith(`${projectId} `)) remoteCache.delete(key)
+  }
+}
+
+/** A cached remote read. `key` must identify the question, not just the host. */
+async function cachedRemote<T>(key: string, read: () => Promise<T>): Promise<T> {
+  const hit = remoteCache.get(key)
+  if (hit && Date.now() - hit.at < REMOTE_CACHE_MS) return hit.value as Promise<T>
+
+  const value = read()
+  remoteCache.set(key, { at: Date.now(), value })
+  // Evicted on failure, so an error is never served from cache — and evicted
+  // only if this entry is still the current one, or a retry that has already
+  // replaced it would be thrown away by its predecessor's rejection.
+  value.catch(() => {
+    if (remoteCache.get(key)?.value === value) remoteCache.delete(key)
+  })
+  return value
+}
+
+/**
+ * Ask `aide-agent` on the far side to read its own session store.
+ *
+ * One ssh call that answers and exits, deliberately NOT a message on the
+ * `ToWorker` protocol: that protocol describes a live conversation holding the
+ * project's lock, and this is a stateless read that has to work when no agent is
+ * running at all. Shaped like `gitBatch` and `readRepoFile` instead.
+ *
+ * Throws with the host named, because the two failures a caller must tell apart
+ * are "this project has no conversations" and "aide could not reach the machine
+ * that has them" — and an empty list for the second is exactly the bug this
+ * function exists to fix, one hop further out.
+ */
+async function remoteQuery<T>(host: string, args: string[]): Promise<T> {
+  const command = [REMOTE_AGENT, ...args.map((a) => `'${a.replace(/'/g, `'\\''`)}'`)].join(" ")
+  let stdout: string
+  try {
+    ;({ stdout } = await run(
+      "ssh",
+      ["-o", "BatchMode=yes", "-F", sshConfigPath(), host, command],
+      { windowsHide: true, maxBuffer: 64 * 1024 * 1024, timeout: REMOTE_SESSION_TIMEOUT_MS },
+    ))
+  } catch (err) {
+    const e = err as { stderr?: string; killed?: boolean }
+    if (e.killed) throw new Error(`${host} did not answer in ${REMOTE_SESSION_TIMEOUT_MS / 1000}s`)
+    const detail = (e.stderr ?? "").trim()
+    // A missing agent is the one failure with an obvious next step, and it is
+    // likely: a machine can be added as a project before it is deployed to.
+    if (/not found|No such file/i.test(detail)) {
+      throw new Error(`${host} has no aide-agent — run \`pnpm deploy-agent ${host}\``)
+    }
+    throw new Error(detail || `could not read conversations from ${host}`)
+  }
+
+  let parsed: T & { error?: string }
+  try {
+    parsed = JSON.parse(stdout) as T & { error?: string }
+  } catch {
+    // stdout is one JSON document by contract. Anything else means something
+    // wrote to it that should not have — the exact corruption `stdio.ts`
+    // reassigns `console.log` to prevent — so show a slice rather than a bare
+    // "unexpected token".
+    throw new Error(`${host} answered with something that is not JSON: ${stdout.slice(0, 200)}`)
+  }
+  if (parsed.error) throw new Error(`${host}: ${parsed.error}`)
+  return parsed
+}
 
 /**
  * A transcript this long is already unreadable, and the JSONL behind it can be
@@ -84,7 +226,19 @@ export async function listConversations(
   /** The turn running in this project right now, if any — see the fallback below. */
   liveTurn: LiveTurn | null = null,
 ): Promise<ConversationSummary[]> {
-  const sessions = await listSessions({ dir: project.root })
+  // The far side's store for a remote project, this machine's for a local one.
+  // Same shape either way — it is the same SDK call, just executed where the
+  // files are.
+  const sessions = project.host
+    ? (
+        await cachedRemote(`${project.id} list`, () =>
+          remoteQuery<{ sessions: Awaited<ReturnType<typeof listSessions>> }>(project.host!, [
+            "--sessions",
+            project.root,
+          ]),
+        )
+      ).sessions
+    : await listSessions({ dir: project.root })
 
   const rows: ConversationSummary[] = sessions
     .map((s) => {
@@ -143,7 +297,17 @@ export async function getConversation(
     liveSummary(project, sessionId, liveTurnFor(sessionId))
   if (!summary) return null
 
-  const messages = await getSessionMessages(sessionId, { dir: project.root })
+  const messages = project.host
+    ? (
+        await cachedRemote(`${project.id} session ${sessionId}`, () =>
+          remoteQuery<{ messages: Awaited<ReturnType<typeof getSessionMessages>> }>(project.host!, [
+            "--session",
+            project.root,
+            sessionId,
+          ]),
+        )
+      ).messages
+    : await getSessionMessages(sessionId, { dir: project.root })
   // The TAIL, not the head. Slicing from the front served the oldest 1500
   // messages of a long conversation and hid everything recent — the exact
   // opposite of what anyone opening it wants to read.
@@ -247,6 +411,14 @@ function liveSummary(
  *
  * Looking it up through the listing was the mistake: reading the transcript
  * never needed the index, so neither does finding it.
+ *
+ * LOCAL only, and it degrades rather than lying: `findSessionFile` scans this
+ * machine's store, so for a remote project it finds nothing and the caller falls
+ * through to `liveSummary` — which covers the same window, because the only way
+ * to reach an unnameable remote session is to have just started it here. What is
+ * lost is the narrower case of an unnameable session with no live turn, which
+ * would need another round trip to the far side to answer and is not worth one
+ * on a path the browser polls.
  */
 async function summaryFromFile(
   project: Project,
