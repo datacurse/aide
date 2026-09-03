@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs"
 import { dirname } from "node:path"
 import fastifyWebsocket from "@fastify/websocket"
-import Fastify from "fastify"
+import Fastify, { type FastifyReply, type FastifyRequest } from "fastify"
 import type {
   Activity,
   Attachment,
@@ -124,9 +124,9 @@ app.addHook("onRequest", async (req, reply) => {
 // the repository half-changed and a reset socket that read as a failure.
 //
 // Chat turns are visible to the chat lane. A commit is not: it is one HTTP
-// request that writes the spec, stages a path list and rewrites the backlog
-// before it answers. So mutating requests are counted here, which is the only
-// place that sees them.
+// request that runs the project's checks, spends a model call on a message,
+// stages and writes a commit and may push it, all before it answers. So
+// mutating requests are counted here, which is the only place that sees them.
 //
 // This matters more now than when it was written, not less. The daemon serves
 // the checkout its own agents edit, so aide developing aide means a run rewrites
@@ -156,6 +156,60 @@ app.addHook("onResponse", async (req) => finishWrite(req.id))
 app.addHook("onRequestAbort", async (req) => finishWrite(req.id))
 
 const notFound = (msg: string) => ({ statusCode: 404, error: "Not Found", message: msg })
+
+/**
+ * The three lines every project route opened with, written once.
+ *
+ * `const { id } = req.params as { id: string }`, a `getProject`, and a 404 —
+ * fifteen copies of it, each with its own hand-written cast that the compiler
+ * cannot check against the route string it is supposed to match. A typo in the
+ * param name does not fail to compile; it yields `undefined` and a 404 for a
+ * project that is plainly there.
+ *
+ * `handler` receives the resolved project, so a route that reaches its body has
+ * one — which is the other half of what this removes: the `project!` and the
+ * re-checks that come of a value the type system had already lost track of.
+ *
+ * Extra params (`:sessionId`, `:sha`) still come off `req.params` in the route,
+ * because they vary and a generic that covered them would be a schema library
+ * in all but name — and `packages/protocol` deliberately has none.
+ */
+const withProject = <T>(
+  handler: (project: Project, req: FastifyRequest, reply: FastifyReply) => Promise<T>,
+) => {
+  return async (req: FastifyRequest, reply: FastifyReply) => {
+    const { id } = req.params as { id: string }
+    const project = await getProject(id)
+    if (!project) return reply.code(404).send(notFound(`no project ${id}`))
+    return await handler(project, req, reply)
+  }
+}
+
+/**
+ * A read of somebody's repository that may simply not be reachable.
+ *
+ * The `catch` blocks this replaces were four distinct messages for one situation,
+ * and the common case is not exotic: a project whose directory was moved or
+ * deleted, or a remote whose host is not answering. It must not read as the
+ * daemon being broken — hence 502 rather than 500, since the failure is
+ * downstream of this process. aide is fine; the thing it was asked to read is not.
+ *
+ * The message names the ROOT rather than the operation, because that is the part
+ * that tells you which of your projects has gone missing.
+ */
+const readingRepo = async <T>(
+  project: Project,
+  reply: FastifyReply,
+  read: () => Promise<T>,
+): Promise<T | never> => {
+  try {
+    return await read()
+  } catch (err) {
+    return reply.code(502).send({
+      message: `could not read ${project.root}: ${err instanceof Error ? err.message : String(err)}`,
+    })
+  }
+}
 
 /**
  * A conversation nothing is known about.
@@ -404,32 +458,18 @@ async function withBookkeeping<T extends { sessionId: string }>(
   }))
 }
 
-/**
- * The branch a commit would land on. Shown on the button so it is never a guess.
- *
- * It matters more than it used to. A commit used to go to a branch aide made for
- * the conversation; it now goes to whatever the human has checked out, so the
- * name of that branch is part of what they are approving.
- */
-app.get("/api/projects/:id/branch", async (req, reply) => {
-  const { id } = req.params as { id: string }
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-  try {
-    return { branch: await currentBranch(repoOf(project)) }
-  } catch {
-    return { branch: null }
-  }
-})
-
 // ---------------------------------------------------------------------------
 // The repository itself
 //
-// Read-only, and separate from the task-worktree routes above on purpose: those
-// show what an agent did, these show the repo it did it in. Split across three
-// requests because they have three different lifetimes — the summary is polled,
-// the working tree is re-read only while you are looking at it, and a commit is
-// immutable and therefore fetched once and never again.
+// Read-only, and separate from the conversation routes above on purpose: those
+// show what an agent did, these show the repo it did it in. Split by lifetime:
+// the summary is polled on the app's beat, the file tree is re-read only while
+// you are looking at it.
+//
+// There was a `/branch` route here, answering the one question the commit button
+// asks. It is now a field on `GitPending`, which the rail already polls — so the
+// answer arrives in a request that was happening anyway rather than in one of
+// its own. `currentBranch` is still the thing that computes it.
 // ---------------------------------------------------------------------------
 
 const DEFAULT_LOG = 50
@@ -443,26 +483,18 @@ const MAX_LOG = 500
  * that number, and the call behind it is the priciest one git makes on a large
  * tree. Two beats, two questions, and neither pays for the other's answer.
  */
-app.get("/api/projects/:id/git", async (req, reply) => {
-  const { id } = req.params as { id: string }
-  const { limit } = req.query as { limit?: string }
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-
-  const n = Math.min(Math.max(Number(limit) || DEFAULT_LOG, 1), MAX_LOG)
-  try {
-    return {
+app.get(
+  "/api/projects/:id/git",
+  withProject(async (project, req, reply) => {
+    const { limit } = req.query as { limit?: string }
+    const n = Math.min(Math.max(Number(limit) || DEFAULT_LOG, 1), MAX_LOG)
+    return await readingRepo(project, reply, async () => ({
       overview: await repo.overview(repoOf(project)),
       log: await repo.log(repoOf(project), n),
-    }
-  } catch (err) {
-    // A project whose directory was moved or deleted is the common case here,
-    // and it must not read as the daemon being broken.
-    return reply.code(502).send({
-      message: `could not read ${project.root}: ${err instanceof Error ? err.message : String(err)}`,
-    })
-  }
-})
+    }))
+  }),
+)
+
 
 /**
  * What is still uncommitted, cheap enough to poll from an always-visible rail.
@@ -475,18 +507,12 @@ app.get("/api/projects/:id/git", async (req, reply) => {
  * able to disagree — the indicator saying "clean" while the daemon refuses to
  * start a chat would be unexplainable from the screen.
  */
-app.get("/api/projects/:id/git/pending", async (req, reply) => {
-  const { id } = req.params as { id: string }
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-  try {
-    return await repo.pending(repoOf(project))
-  } catch (err) {
-    return reply.code(502).send({
-      message: `could not read ${project.root}: ${err instanceof Error ? err.message : String(err)}`,
-    })
-  }
-})
+app.get(
+  "/api/projects/:id/git/pending",
+  withProject((project, _req, reply) =>
+    readingRepo(project, reply, () => repo.pending(repoOf(project))),
+  ),
+)
 
 /**
  * One directory of the working tree, for the rail's file view.
@@ -500,56 +526,31 @@ app.get("/api/projects/:id/git/pending", async (req, reply) => {
  * in the repository to draw the twenty rows you can see, and does it again down
  * a 1.4s ssh connection for a remote project.
  */
-app.get("/api/projects/:id/git/tree", async (req, reply) => {
-  const { id } = req.params as { id: string }
-  const { path } = req.query as { path?: string }
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
+app.get(
+  "/api/projects/:id/git/tree",
+  withProject(async (project, req, reply) => {
+    const { path } = req.query as { path?: string }
 
-  // This value comes from the URL and ends up as a git argument, so the same
-  // rule `isSha` enforces for commits applies: a path that starts with a dash
-  // reaches `ls-tree` as a FLAG rather than as a directory, and git is very
-  // willing to run programs it has been told to. `..` is refused for the
-  // ordinary reason — the tree of a project is the project.
-  const dir = (path ?? "").replace(/\\/g, "/")
-  if (dir.startsWith("-") || dir.split("/").includes("..")) {
-    return reply.code(400).send({ message: `${dir} is not a path inside this project` })
-  }
+    // This value comes from the URL and ends up as a git argument, so the same
+    // rule `isSha` enforces for commits applies: a path that starts with a dash
+    // reaches `ls-tree` as a FLAG rather than as a directory, and git is very
+    // willing to run programs it has been told to. `..` is refused for the
+    // ordinary reason — the tree of a project is the project.
+    const dir = (path ?? "").replace(/\\/g, "/")
+    if (dir.startsWith("-") || dir.split("/").includes("..")) {
+      return reply.code(400).send({ message: `${dir} is not a path inside this project` })
+    }
 
-  try {
-    return await repo.tree(repoOf(project), dir)
-  } catch (err) {
-    return reply.code(502).send({
-      message: `could not read ${project.root}: ${err instanceof Error ? err.message : String(err)}`,
-    })
-  }
-})
+    return await readingRepo(project, reply, () => repo.tree(repoOf(project), dir))
+  }),
+)
 
-app.get("/api/projects/:id/git/working", async (req, reply) => {
-  const { id } = req.params as { id: string }
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-  try {
-    return await repo.workingTree(repoOf(project))
-  } catch (err) {
-    return reply.code(502).send({
-      message: `could not read ${project.root}: ${err instanceof Error ? err.message : String(err)}`,
-    })
-  }
-})
-
-app.get("/api/projects/:id/git/commits/:sha", async (req, reply) => {
-  const { id, sha } = req.params as { id: string; sha: string }
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-  // 400 rather than 404 for a malformed sha: the difference between "that is not
-  // a sha" and "no commit by that name" is the one a stuck UI needs.
-  if (!repo.isSha(sha)) return reply.code(400).send({ message: `${sha} is not a commit sha` })
-
-  const found = await repo.commitDetail(repoOf(project), sha)
-  if (!found) return reply.code(404).send(notFound(`no commit ${sha} in ${project.name}`))
-  return found
-})
+// `git/working` and `git/commits/:sha` used to be here, and went with the
+// repository browser they were built for — nothing in the web package ever
+// called either, and the brief rules out reading a diff outside the
+// conversation that produced it. `repo.workingTree` and `repo.commitDetail`
+// stay: `pnpm smoke` drives both directly, which is where their behaviour was
+// actually pinned even while the routes existed.
 
 // ---------------------------------------------------------------------------
 // Conversations
@@ -560,36 +561,44 @@ app.get("/api/projects/:id/git/commits/:sha", async (req, reply) => {
 // chats: both are sessions, told apart by the directory they ran in.
 // ---------------------------------------------------------------------------
 
-app.get("/api/projects/:id/conversations", async (req, reply) => {
-  const { id } = req.params as { id: string }
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-  try {
-    // The lane is passed in so a chat whose first turn is in flight has a row
-    // even before the SDK has indexed a name for it — see the fallback there.
-    return await withBookkeeping(project, await listConversations(project, chat))
-  } catch (err) {
-    return reply.code(502).send({
-      message: `could not read the session store: ${err instanceof Error ? err.message : String(err)}`,
-    })
-  }
-})
+// These two keep their own `catch` rather than using `readingRepo`, and the
+// difference is not cosmetic: what fails here is the SDK's session store, which
+// for a remote project is a query over ssh to a different thing entirely. A
+// message naming the repository root would point at the wrong object.
 
-app.get("/api/projects/:id/conversations/:sessionId", async (req, reply) => {
-  const { id, sessionId } = req.params as { id: string; sessionId: string }
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-  try {
-    const found = await getConversation(project, sessionId, chat)
-    if (!found) return reply.code(404).send(notFound(`no conversation ${sessionId} in this project`))
-    const [summary] = await withBookkeeping(project, [found.summary])
-    return { ...found, summary }
-  } catch (err) {
-    return reply.code(502).send({
-      message: `could not read that conversation: ${err instanceof Error ? err.message : String(err)}`,
-    })
-  }
-})
+app.get(
+  "/api/projects/:id/conversations",
+  withProject(async (project, _req, reply) => {
+    try {
+      // The lane is passed in so a chat whose first turn is in flight has a row
+      // even before the SDK has indexed a name for it — see the fallback there.
+      return await withBookkeeping(project, await listConversations(project, chat))
+    } catch (err) {
+      return reply.code(502).send({
+        message: `could not read the session store: ${err instanceof Error ? err.message : String(err)}`,
+      })
+    }
+  }),
+)
+
+app.get(
+  "/api/projects/:id/conversations/:sessionId",
+  withProject(async (project, req, reply) => {
+    const { sessionId } = req.params as { sessionId: string }
+    try {
+      const found = await getConversation(project, sessionId, chat)
+      if (!found) {
+        return reply.code(404).send(notFound(`no conversation ${sessionId} in this project`))
+      }
+      const [summary] = await withBookkeeping(project, [found.summary])
+      return { ...found, summary }
+    } catch (err) {
+      return reply.code(502).send({
+        message: `could not read that conversation: ${err instanceof Error ? err.message : String(err)}`,
+      })
+    }
+  }),
+)
 
 /**
  * Reviewing the work, and committing it.
@@ -604,27 +613,17 @@ app.get("/api/projects/:id/conversations/:sessionId", async (req, reply) => {
  * `commitWorkingTree` for what the commit writes down so that reading is still
  * possible, and for what that trade actually costs.
  *
- * Note which route each half hangs off. The DIFF is a conversation's, because
- * "what did this chat change" is a question only a checkpoint can answer. The
- * COMMIT is the project's, because what it takes is the working tree — see
- * `review.ts` for the wedge that came of hanging it off a conversation too.
+ * Note which route the commit hangs off: the PROJECT's, because what it takes is
+ * the working tree — see `review.ts` for the wedge that came of hanging it off a
+ * conversation instead.
+ *
+ * There was a companion `…/conversations/:sessionId/diff` here, answering "what
+ * did this chat change" from its checkpoint. It went unused: a diff is read in
+ * the conversation that produced it, from the transcript, and nothing in the web
+ * package ever called the route. `conversationBaseline` and `runChanges` are
+ * both still live — the commit gate is their real caller.
  */
 
-app.get("/api/projects/:id/conversations/:sessionId/diff", async (req, reply) => {
-  const { id, sessionId } = req.params as { id: string; sessionId: string }
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-  const found = await conversationBaseline(project, sessionId)
-  if (!found) return reply.code(409).send({ message: "this conversation has no checkpoint" })
-
-  const changes = await runChanges(repoOf(project), found.checkpoint)
-  return {
-    root: project.root,
-    diff: changes.diff,
-    paths: changes.paths,
-    mixed: changes.overlap,
-  }
-})
 
 /**
  * What the conversation cost and where it went wrong, as one pasteable document.
@@ -635,12 +634,13 @@ app.get("/api/projects/:id/conversations/:sessionId/diff", async (req, reply) =>
  * last five did. The renderer reports an unfinished turn as unfinished rather
  * than pretending it ended.
  */
-app.get("/api/projects/:id/conversations/:sessionId/profile", async (req, reply) => {
-  const { id, sessionId } = req.params as { id: string; sessionId: string }
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-  return await conversationProfile(log, project, sessionId)
-})
+app.get(
+  "/api/projects/:id/conversations/:sessionId/profile",
+  withProject(async (project, req) => {
+    const { sessionId } = req.params as { sessionId: string }
+    return await conversationProfile(log, project, sessionId)
+  }),
+)
 
 /**
  * Commit what is uncommitted, as a run you can watch.
@@ -667,105 +667,103 @@ app.get("/api/projects/:id/conversations/:sessionId/profile", async (req, reply)
  * review sitting underneath the transcript is not where anybody was looking. See
  * `commitWorkingTree` for what replaced it and what that costs.
  */
-app.post("/api/projects/:id/commit", async (req, reply) => {
-  const { id } = req.params as { id: string }
+app.post(
+  "/api/projects/:id/commit",
+  withProject(async (project, req, reply) => {
+    const body = (req.body ?? {}) as { sessionId?: unknown; force?: unknown; push?: unknown }
+    // Anything that is not a non-empty string is no attribution, including the
+    // `null` the browser sends when no chat is open. A session id off the wire
+    // only ever reaches a trailer and a lookup, so it needs no more shape than
+    // this.
+    const sessionId = typeof body.sessionId === "string" && body.sessionId ? body.sessionId : null
+    const force = body.force === true
+    // Chained onto this press rather than a setting, and INSIDE the same run: the
+    // checkbox says "and send it", which is a thing this press does, not a mode
+    // the project is in. It runs after the commit and only if the commit happened,
+    // so a refused gate never pushes.
+    const alsoPush = body.push === true
 
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
+    // Committing underneath a working agent races its next write, and the diff
+    // would be a half-finished turn. `hold` refuses the whole project below; this
+    // says the narrower case in the conversation's own words before it gets there.
+    if (sessionId && chat.turnForSession(sessionId)) {
+      return reply.code(409).send({ message: "a turn is still in flight for this conversation" })
+    }
 
-  const body = (req.body ?? {}) as { sessionId?: unknown; force?: unknown; push?: unknown }
-  // Anything that is not a non-empty string is no attribution, including the
-  // `null` the browser sends when no chat is open. A session id off the wire
-  // only ever reaches a trailer and a lookup, so it needs no more shape than
-  // this.
-  const sessionId = typeof body.sessionId === "string" && body.sessionId ? body.sessionId : null
-  const force = body.force === true
-  // Chained onto this press rather than a setting, and INSIDE the same run: the
-  // checkbox says "and send it", which is a thing this press does, not a mode
-  // the project is in. It runs after the commit and only if the commit happened,
-  // so a refused gate never pushes.
-  const alsoPush = body.push === true
-
-  // Committing underneath a working agent races its next write, and the diff
-  // would be a half-finished turn. `hold` refuses the whole project below; this
-  // says the narrower case in the conversation's own words before it gets there.
-  if (sessionId && chat.turnForSession(sessionId)) {
-    return reply.code(409).send({ message: "a turn is still in flight for this conversation" })
-  }
-
-  // What the work was asked for, so the drafter can tell intent from incident.
-  // The conversation's opening message, now that there is no backlog row to
-  // carry it — which is the better source anyway: it is what you actually typed
-  // rather than a line somebody summarised it into. With no conversation there
-  // is no intent to give it, and the diff is the whole of what it has to go on.
-  const opening = sessionId
-    ? (await listConversations(project)).find((c) => c.sessionId === sessionId)
-    : undefined
-  // Read on the press rather than cached from when the project was added: the
-  // checks live in the repository, so a run that added one has changed the gate
-  // it is about to be measured by, and reading a copy from boot would apply the
-  // old gate to the diff that changed it.
-  //
-  // Passed as the READER rather than the answer, for the same reason one step
-  // further in: the commit's own repair attempt can edit `.aide/project.md`, so
-  // even a read taken on the press is stale by the time the retry runs. See
-  // `verify` in `CommitWorkingTreeOptions`.
-  const readVerify = async () => (await readProjectDoc(repoOf(project))).verify
-  // Before the hold rather than inside the run: it is one more remote read, a
-  // commit does not create an upstream so the answer cannot go stale in between,
-  // and asking only when the box is ticked keeps it off the path of every commit
-  // that is not pushing.
-  const hasUpstream = alsoPush ? (await repo.pending(repoOf(project))).ahead !== null : false
-  try {
-    // Throws if another conversation holds the checkout, with that
-    // conversation's name in it.
-    const runId = chat.hold({
-      project,
-      sessionId,
-      text: "committing what is uncommitted",
-      model: CONFIG.helperModel,
-      work: (run) =>
-        commitWorkingTree({
-          project,
-          sessionId,
-          request: opening?.firstPrompt ?? "",
-          verify: readVerify,
-          push: alsoPush,
-          hasUpstream,
-          force,
-          // One go at whatever the checks refused, run as a turn in the
-          // conversation this commit is attributed to — which is where its
-          // reasoning and its diff have to be readable, and the only place there
-          // is to put them. A commit pressed with no chat open gets no attempt
-          // and refuses exactly as it always did.
-          //
-          // `run.runId` rather than a fresh one: it keeps the fix inside the run
-          // the browser is already watching, and inside the lock, so nothing can
-          // be admitted into the checkout between the failure and the retry.
-          //
-          // Effort is not read from anywhere. There is nowhere honest to read it
-          // from — it is a per-turn choice in the composer, not conversation
-          // state — and `high` is what that composer defaults to.
-          repair: sessionId
-            ? (request) =>
-                chat.turnUnderHold({
-                  runId: run.runId,
-                  project,
-                  sessionId,
-                  text: request,
-                  effort: "high",
-                })
-            : null,
-          emit: run.emit,
-          delta: run.delta,
-          stopped: run.stopped,
-        }),
-    })
-    return { runId }
-  } catch (err) {
-    return reply.code(409).send({ message: err instanceof Error ? err.message : String(err) })
-  }
-})
+    // What the work was asked for, so the drafter can tell intent from incident.
+    // The conversation's opening message, now that there is no backlog row to
+    // carry it — which is the better source anyway: it is what you actually typed
+    // rather than a line somebody summarised it into. With no conversation there
+    // is no intent to give it, and the diff is the whole of what it has to go on.
+    const opening = sessionId
+      ? (await listConversations(project)).find((c) => c.sessionId === sessionId)
+      : undefined
+    // Read on the press rather than cached from when the project was added: the
+    // checks live in the repository, so a run that added one has changed the gate
+    // it is about to be measured by, and reading a copy from boot would apply the
+    // old gate to the diff that changed it.
+    //
+    // Passed as the READER rather than the answer, for the same reason one step
+    // further in: the commit's own repair attempt can edit `.aide/project.md`, so
+    // even a read taken on the press is stale by the time the retry runs. See
+    // `verify` in `CommitWorkingTreeOptions`.
+    const readVerify = async () => (await readProjectDoc(repoOf(project))).verify
+    // Before the hold rather than inside the run: it is one more remote read, a
+    // commit does not create an upstream so the answer cannot go stale in between,
+    // and asking only when the box is ticked keeps it off the path of every commit
+    // that is not pushing.
+    const hasUpstream = alsoPush ? (await repo.pending(repoOf(project))).ahead !== null : false
+    try {
+      // Throws if another conversation holds the checkout, with that
+      // conversation's name in it.
+      const runId = chat.hold({
+        project,
+        sessionId,
+        text: "committing what is uncommitted",
+        model: CONFIG.helperModel,
+        work: (run) =>
+          commitWorkingTree({
+            project,
+            sessionId,
+            request: opening?.firstPrompt ?? "",
+            verify: readVerify,
+            push: alsoPush,
+            hasUpstream,
+            force,
+            // One go at whatever the checks refused, run as a turn in the
+            // conversation this commit is attributed to — which is where its
+            // reasoning and its diff have to be readable, and the only place there
+            // is to put them. A commit pressed with no chat open gets no attempt
+            // and refuses exactly as it always did.
+            //
+            // `run.runId` rather than a fresh one: it keeps the fix inside the run
+            // the browser is already watching, and inside the lock, so nothing can
+            // be admitted into the checkout between the failure and the retry.
+            //
+            // Effort is not read from anywhere. There is nowhere honest to read it
+            // from — it is a per-turn choice in the composer, not conversation
+            // state — and `high` is what that composer defaults to.
+            repair: sessionId
+              ? (request) =>
+                  chat.turnUnderHold({
+                    runId: run.runId,
+                    project,
+                    sessionId,
+                    text: request,
+                    effort: "high",
+                  })
+              : null,
+            emit: run.emit,
+            delta: run.delta,
+            stopped: run.stopped,
+          }),
+      })
+      return { runId }
+    } catch (err) {
+      return reply.code(409).send({ message: err instanceof Error ? err.message : String(err) })
+    }
+  }),
+)
 
 /**
  * Send the branch upstream. The second half of the commit button, on its own.
@@ -781,29 +779,28 @@ app.post("/api/projects/:id/commit", async (req, reply) => {
  * run — there is no transcript worth writing for one git call, no model, and
  * nothing to attribute — so it answers synchronously with what it did.
  */
-app.post("/api/projects/:id/push", async (req, reply) => {
-  const { id } = req.params as { id: string }
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
+app.post(
+  "/api/projects/:id/push",
+  withProject(async (project, req, reply) => {
+    const holder = chat.holderFor(project.id)
+    if (holder) {
+      return reply.code(409).send({
+        message: `"${firstLine(holder.text)}" is working in this checkout — wait for it to finish`,
+      })
+    }
 
-  const holder = chat.holderFor(project.id)
-  if (holder) {
-    return reply.code(409).send({
-      message: `"${firstLine(holder.text)}" is working in this checkout — wait for it to finish`,
-    })
-  }
-
-  try {
-    const { ahead } = await repo.pending(repoOf(project))
-    const { branch, pushed } = await pushBranch(repoOf(project), ahead !== null)
-    return { branch, pushed }
-  } catch (err) {
-    // 502 rather than 500: the failure is almost always the remote saying no —
-    // a non-fast-forward, no network, no permission — and the message git wrote
-    // is the only useful thing anybody can act on.
-    return reply.code(502).send({ message: err instanceof Error ? err.message : String(err) })
-  }
-})
+    try {
+      const { ahead } = await repo.pending(repoOf(project))
+      const { branch, pushed } = await pushBranch(repoOf(project), ahead !== null)
+      return { branch, pushed }
+    } catch (err) {
+      // 502 rather than 500: the failure is almost always the remote saying no —
+      // a non-fast-forward, no network, no permission — and the message git wrote
+      // is the only useful thing anybody can act on.
+      return reply.code(502).send({ message: err instanceof Error ? err.message : String(err) })
+    }
+  }),
+)
 
 /**
  * Done. The one thing in this product an agent cannot reach.
@@ -813,20 +810,22 @@ app.post("/api/projects/:id/push", async (req, reply) => {
  * a third one would have. Nothing is removed by it — the conversation is the
  * record — so `reopen` below genuinely undoes it.
  */
-app.post("/api/projects/:id/conversations/:sessionId/close", async (req, reply) => {
-  const { id, sessionId } = req.params as { id: string; sessionId: string }
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-  return closeChat(project, sessionId)
-})
+app.post(
+  "/api/projects/:id/conversations/:sessionId/close",
+  withProject(async (project, req) => {
+    const { sessionId } = req.params as { sessionId: string }
+    return await closeChat(project, sessionId)
+  }),
+)
 
-app.post("/api/projects/:id/conversations/:sessionId/reopen", async (req, reply) => {
-  const { id, sessionId } = req.params as { id: string; sessionId: string }
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-  await reopenChat(project, sessionId)
-  return reply.code(204).send()
-})
+app.post(
+  "/api/projects/:id/conversations/:sessionId/reopen",
+  withProject(async (project, req, reply) => {
+    const { sessionId } = req.params as { sessionId: string }
+    await reopenChat(project, sessionId)
+    return reply.code(204).send()
+  }),
+)
 
 /**
  * Send a message. `sessionId` may be null, which starts a new conversation.
@@ -834,95 +833,95 @@ app.post("/api/projects/:id/conversations/:sessionId/reopen", async (req, reply)
  * Returns as soon as the turn is admitted, with a runId to subscribe to — the
  * answer arrives on the event stream, not in this response.
  */
-app.post("/api/projects/:id/chat", async (req, reply) => {
-  const { id } = req.params as { id: string }
-  const body = (req.body ?? {}) as {
-    sessionId?: string | null
-    text?: string
-    attachments?: Attachment[]
-    mode?: string
-    effort?: string
-    thinking?: boolean
-  }
-  if (!body.text?.trim() && !body.attachments?.length) {
-    return reply.code(400).send({ message: "nothing to send" })
-  }
-
-  const project = await getProject(id)
-  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
-
-  /**
-   * The tree is committed before the next conversation begins.
-   *
-   * Not tidiness. Every conversation measures its diff against a checkpoint
-   * taken when it started, so a chat opened on top of uncommitted work inherits
-   * that work as its baseline — and when the two touch the same file, git cannot
-   * separate them again, so no reading of what THIS chat did can be honest.
-   * Refusing here is what keeps `mixed` empty in the ordinary case.
-   *
-   * The way out is the rail's commit button, which reads this same list and
-   * takes all of it. That is not a detail: this refusal is only fair if the
-   * button that clears it is measured on exactly what is being refused, and for
-   * a long time it was not — it committed a conversation's work, so a tree
-   * dirtied by an editor was refused here and uncommittable there.
-   *
-   * Only for a NEW conversation. Refusing a follow-up would be the opposite of
-   * the rule: finishing the chat you are in is one of the ways out.
-   *
-   * A repo that cannot be read at all lets the message through rather than
-   * blocking it — the exception to fail-closed, because the very next thing this
-   * turn does is take a checkpoint of that same tree, which will fail loudly and
-   * say why. Guessing "dirty" here would answer a broken repository with a
-   * lecture about committing.
-   */
-  if (!body.sessionId) {
-    const outstanding = await repo.pending(repoOf(project)).catch(() => null)
-    if (outstanding && outstanding.files.length > 0) {
-      const n = outstanding.files.length
-      return reply.code(409).send({
-        message:
-          `${n} uncommitted file${n === 1 ? "" : "s"} on ${outstanding.branch ?? "this checkout"}. ` +
-          "Press commit in the rail on the right — it takes everything in that list, whether or " +
-          "not a chat made it — or commit them yourself.",
-      })
+app.post(
+  "/api/projects/:id/chat",
+  withProject(async (project, req, reply) => {
+    const body = (req.body ?? {}) as {
+      sessionId?: string | null
+      text?: string
+      attachments?: Attachment[]
+      mode?: string
+      effort?: string
+      thinking?: boolean
     }
-  }
+    if (!body.text?.trim() && !body.attachments?.length) {
+      return reply.code(400).send({ message: "nothing to send" })
+    }
 
-  // Validated rather than cast: these come from a form, and an unknown mode
-  // would otherwise reach the SDK as an undefined permission mode.
-  //
-  // The fallback is the narrower of the two, and that is the point of having
-  // one. A page that has not reloaded since Manual was removed still sends it,
-  // and the human at that page believes they will be asked before anything
-  // happens — answering that with Auto would be the one surprise here that costs
-  // something. Plan surprises them with a plan.
-  const mode = (CHAT_MODES as readonly string[]).includes(body.mode ?? "")
-    ? (body.mode as ChatMode)
-    : "plan"
-  const effort = (EFFORT_LEVELS as readonly string[]).includes(body.effort ?? "")
-    ? (body.effort as EffortLevel)
-    : "high"
-  // Only an explicit `false` turns it off. A page that has not reloaded since
-  // the toggle existed sends nothing, and the answer for it is the behaviour it
-  // has always had — thinking on — rather than a silent downgrade of every turn
-  // sent from an old tab.
-  const thinking = body.thinking !== false
 
-  try {
-    const runId = await chat.send({
-      project,
-      sessionId: body.sessionId ?? null,
-      text: body.text?.trim() ?? "",
-      attachments: body.attachments ?? [],
-      mode,
-      effort,
-      thinking,
-    })
-    return { runId }
-  } catch (err) {
-    return reply.code(409).send({ message: err instanceof Error ? err.message : String(err) })
-  }
-})
+    /**
+     * The tree is committed before the next conversation begins.
+     *
+     * Not tidiness. Every conversation measures its diff against a checkpoint
+     * taken when it started, so a chat opened on top of uncommitted work inherits
+     * that work as its baseline — and when the two touch the same file, git cannot
+     * separate them again, so no reading of what THIS chat did can be honest.
+     * Refusing here is what keeps `mixed` empty in the ordinary case.
+     *
+     * The way out is the rail's commit button, which reads this same list and
+     * takes all of it. That is not a detail: this refusal is only fair if the
+     * button that clears it is measured on exactly what is being refused, and for
+     * a long time it was not — it committed a conversation's work, so a tree
+     * dirtied by an editor was refused here and uncommittable there.
+     *
+     * Only for a NEW conversation. Refusing a follow-up would be the opposite of
+     * the rule: finishing the chat you are in is one of the ways out.
+     *
+     * A repo that cannot be read at all lets the message through rather than
+     * blocking it — the exception to fail-closed, because the very next thing this
+     * turn does is take a checkpoint of that same tree, which will fail loudly and
+     * say why. Guessing "dirty" here would answer a broken repository with a
+     * lecture about committing.
+     */
+    if (!body.sessionId) {
+      const outstanding = await repo.pending(repoOf(project)).catch(() => null)
+      if (outstanding && outstanding.files.length > 0) {
+        const n = outstanding.files.length
+        return reply.code(409).send({
+          message:
+            `${n} uncommitted file${n === 1 ? "" : "s"} on ${outstanding.branch ?? "this checkout"}. ` +
+            "Press commit in the rail on the right — it takes everything in that list, whether or " +
+            "not a chat made it — or commit them yourself.",
+        })
+      }
+    }
+
+    // Validated rather than cast: these come from a form, and an unknown mode
+    // would otherwise reach the SDK as an undefined permission mode.
+    //
+    // The fallback is the narrower of the two, and that is the point of having
+    // one. A page that has not reloaded since Manual was removed still sends it,
+    // and the human at that page believes they will be asked before anything
+    // happens — answering that with Auto would be the one surprise here that costs
+    // something. Plan surprises them with a plan.
+    const mode = (CHAT_MODES as readonly string[]).includes(body.mode ?? "")
+      ? (body.mode as ChatMode)
+      : "plan"
+    const effort = (EFFORT_LEVELS as readonly string[]).includes(body.effort ?? "")
+      ? (body.effort as EffortLevel)
+      : "high"
+    // Only an explicit `false` turns it off. A page that has not reloaded since
+    // the toggle existed sends nothing, and the answer for it is the behaviour it
+    // has always had — thinking on — rather than a silent downgrade of every turn
+    // sent from an old tab.
+    const thinking = body.thinking !== false
+
+    try {
+      const runId = await chat.send({
+        project,
+        sessionId: body.sessionId ?? null,
+        text: body.text?.trim() ?? "",
+        attachments: body.attachments ?? [],
+        mode,
+        effort,
+        thinking,
+      })
+      return { runId }
+    } catch (err) {
+      return reply.code(409).send({ message: err instanceof Error ? err.message : String(err) })
+    }
+  }),
+)
 
 /**
  * A short name for a chat that has not started.

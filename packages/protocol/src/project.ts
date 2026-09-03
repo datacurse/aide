@@ -29,9 +29,6 @@ export interface Project {
   addedAt: string
 }
 
-/** Where a project's files are. `null` is this machine. */
-export const projectHost = (project: Project): string | null => project.host ?? null
-
 /**
  * What the machine's own folder dialog came back with.
  *
@@ -246,11 +243,3 @@ export function planChecks(
   return plan
 }
 
-/**
- * Validated the same way task frontmatter is, and for the same reason: this file
- * is hand-edited, so a typo must fail loudly rather than silently becoming
- * `undefined` and quietly skipping the bootstrap on every run afterwards.
- *
- * A throw here surfaces as `run.error` at the start of a run, which is exactly
- * where a configuration mistake should appear.
- */

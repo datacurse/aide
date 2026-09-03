@@ -71,6 +71,37 @@ function describeActivity(events: readonly RunEvent[], runId: string | null): st
   if (last.type === "tool.end") return "Thinking"
   if (last.type === "run.started") return "Thinking"
   if (last.type === "run.retry") return "Retrying"
+
+  // "Working" is the right answer for everything left, and the annotation is
+  // what keeps that a decision. This bar names what a turn is doing RIGHT NOW,
+  // so most events are either terminal (the bar is gone by then), one-shot
+  // bookkeeping nobody narrates, or already covered by the open-tool and
+  // open-check passes above. A new event type will not compile here until it has
+  // been sorted into one of those, which is the only way this list stays a
+  // statement rather than whatever was true when it was written.
+  // `permission.*`, `verify.started` and `tool.start` are in here despite being
+  // matched above: that pass looks for an OPEN call across the whole run, so a
+  // resolved permission, a finished check, or a `tool.start` whose `tool.end`
+  // has already landed all fall through to this tail like anything else. The
+  // last of those is the one worth knowing about — the compiler found it, not a
+  // reading of the code.
+  const noNarration:
+    | "assistant.start"
+    | "checkpoint.taken"
+    | "commit.landed"
+    | "context.usage"
+    | "permission.request"
+    | "permission.resolved"
+    | "push.landed"
+    | "run.error"
+    | "run.finished"
+    | "tool.denied"
+    | "tool.start"
+    | "turn.checkpoint"
+    | "turn.stale"
+    | "verify.skipped"
+    | "verify.started" = last.type
+  void noNarration
   return "Working"
 }
 

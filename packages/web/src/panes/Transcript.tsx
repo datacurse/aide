@@ -50,7 +50,9 @@ const INLINE_MARK = "mr-1 inline size-3 align-[-0.15em]"
  * the only thing on screen saying the tool had not wedged was the seconds
  * beside it, and a number that changes twice a second is easy to read as a
  * timestamp. The ring is the same idiom `WorkingBar` and `RunDial` already use
- * for the same claim, borrowed here rather than reinvented.
+ * for the same claim — though "borrowed" overstates it: this and `WorkingBar`'s
+ * are the same four Tailwind classes written out twice, and a change to one is a
+ * change somebody has to remember to make to the other.
  *
  * A bordered `span` rather than an `svg`: `animate-spin` on a stroked icon
  * wobbles unless the artwork is exactly centred in its viewBox, and this needs
@@ -523,6 +525,23 @@ function toLines(events: RunEvent[], live?: LiveText | null): Line[] {
           errors: e.status === "cancelled" ? [] : (e.errors ?? []),
         })
         break
+      default: {
+        // Drawn by nothing, ON PURPOSE, and the assignment is what makes that a
+        // statement rather than an oversight. Every other event above turns into
+        // a row; a new one added to `RunEventBody` and forgotten here used to
+        // render as nothing at all — no error, no blank row, no failing check,
+        // just an event the transcript silently did not mention.
+        //
+        // So the two that legitimately draw nothing are named, and anything else
+        // reaching this arm fails to compile until somebody decides which it is.
+        // `assistant.start` exists only for its timestamp (see `RunEventBody`),
+        // and `run.started` carries the session id for the resume handle — the
+        // reader learns nothing from a row saying a run it is already reading
+        // has begun.
+        const drawnByNothing: "assistant.start" | "run.started" = e.type
+        void drawnByNothing
+        break
+      }
     }
   }
 

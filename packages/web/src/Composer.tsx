@@ -232,18 +232,6 @@ export function Composer({
   /** The mode this conversation was last driven at, or null if unknown. */
   inheritedMode: ChatMode | null
   /**
-   * Whether this conversation gets a row on the board.
-   *
-   * This used to be the isolation toggle, and choosing it wrong used to matter:
-   * it decided whether the agent got a worktree of its own or edited the tree
-   * you were looking at. Every conversation edits that tree now, so all this
-   * decides is whether the work is VISIBLE on the board — which is worth a
-   * control, but not a warning.
-   *
-   * Still first-message-only. A row is paired with a session at the moment the
-   * SDK names it, and there is no second moment to do it in.
-   */
-  /**
    * Why this box cannot send, or null.
    *
    * Two rules reach here, both the daemon's: one chat has the project's checkout

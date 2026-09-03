@@ -1605,6 +1605,106 @@ console.log("\nproject identity")
   check("a remote path keeps its case", projectIdFor("/root/Code", "tg") !== projectIdFor("/root/code", "tg"))
 }
 
+console.log("\none way to read the head of a run log")
+{
+  const { scanHead } = await import("./spend.js")
+
+  // `sessionOfRun` and `isLiveFormat` were the same bounded head-scan written
+  // twice, and the two copies had already drifted over which failure each
+  // swallowed. What follows pins the behaviours both of them depend on.
+  const logPath = join(root, "head-scan.ndjson")
+  const line = (o: object) => `${JSON.stringify(o)}\n`
+  await writeFile(
+    logPath,
+    line({ type: "user.message", ts: 1000, text: "hi" }) +
+      "\n" + // a blank line, which must not count against the budget
+      line({ type: "checkpoint.taken", ts: 1001 }) +
+      line({ type: "run.started", ts: 1002, sessionId: "s1", projectId: "p1" }),
+    "utf8",
+  )
+
+  const found = await scanHead(logPath, 8, (e, openedAt) =>
+    e.type === "run.started" ? { id: e.sessionId, openedAt } : undefined,
+  )
+  check("it finds the event it was sent for", found?.id === "s1", JSON.stringify(found))
+  // The distinction the shared version has to preserve: the timestamp reported
+  // is the LOG's first, not the matched event's. Reporting the match would date
+  // every turn from its third line rather than from when it opened.
+  check(
+    "and reports when the log opened, not when the match landed",
+    found?.openedAt === 1000,
+    `${found?.openedAt}`,
+  )
+
+  // The budget is what stops a reader walking megabytes of transcript looking
+  // for an event a dead turn never wrote.
+  const capped = await scanHead(logPath, 2, (e) =>
+    e.type === "run.started" ? "found" : undefined,
+  )
+  check("a budget too small to reach it gives up", capped === null, `${capped}`)
+
+  // A torn line is the one being written right now. Skipping it rather than
+  // aborting is what lets a whole line after it still be read.
+  const tornPath = join(root, "head-torn.ndjson")
+  await writeFile(
+    tornPath,
+    `{"type":"user.message","ts":1,` + "\n" + line({ type: "run.started", ts: 2, sessionId: "s2" }),
+    "utf8",
+  )
+  check(
+    "a torn line is skipped, not fatal",
+    (await scanHead(tornPath, 8, (e) => (e.type === "run.started" ? e.sessionId : undefined))) ===
+      "s2",
+  )
+
+  check(
+    "a log that is not there reads as nothing",
+    (await scanHead(join(root, "no-such.ndjson"), 8, () => true)) === null,
+  )
+}
+
+console.log("\nthe dashboard's prefilter cannot drift from its reducer")
+{
+  // The prefilter skips a line before `JSON.parse` sees it, so an event added to
+  // the reducer and not to the filter is dropped with no error and no failing
+  // check — invisible even to a grep for the new event's name. Both now come
+  // from one list, and this is the property that says so.
+  const src = await readFile(
+    fileURLToPath(new URL("./activity.ts", import.meta.url)),
+    "utf8",
+  )
+  const listed = [...(src.match(/^const COUNTED = \[([\s\S]*?)\] as const/m)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map(
+    (m) => m[1],
+  )
+  // Only the branches inside `bodyOfRun` — `isLiveFormat` further down the file
+  // tests `event.type` too, and those types are deliberately NOT counted.
+  const body = src.slice(src.indexOf("async function bodyOfRun"))
+  const branched = [
+    ...new Set(
+      [...body.slice(0, body.indexOf("\n}")).matchAll(/event\.type === "([^"]+)"/g)].map(
+        (m) => m[1] as string,
+      ),
+    ),
+  ]
+
+  check("the counted list is not empty", listed.length > 0, listed.join(","))
+  check("and the reducer's branches were found", branched.length > 0, branched.join(","))
+  // Every type the reducer branches on must be in the list the filter is built
+  // from, or the line is skipped before `JSON.parse` and the branch is dead. The
+  // reverse is allowed: a listed type may exist only to admit a line.
+  const missing = branched.filter((t) => !listed.includes(t))
+  check(
+    "every event bodyOfRun branches on survives the prefilter",
+    missing.length === 0,
+    missing.length ? `dropped before parse: ${missing.join(",")}` : `${branched.length} branches`,
+  )
+  check(
+    "and the markers are quoted, so a tool result cannot masquerade as one",
+    src.includes('`"${type}"`'),
+    "an unquoted substring matches any line mentioning the words",
+  )
+}
+
 console.log("\nactivity")
 {
   const { localDay, reduceActivity, windowStart } = await import("./activity.js")

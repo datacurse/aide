@@ -10,7 +10,6 @@
  * and returns a string, the other sends no prompt at all and asks the session a
  * single control request, so neither ever sees a message union to normalize.
  */
-import { randomUUID } from "node:crypto"
 import { query, type SDKUserMessage, type Settings } from "@anthropic-ai/claude-agent-sdk"
 import type {
   Attachment,
@@ -223,6 +222,22 @@ export const QUESTION_REFUSAL = [
   "project's checkout, and aide sends turns that nobody is watching.",
   "Put the question and the options in your reply and end the turn instead —",
   "the human answers in the next message.",
+].join(" ")
+
+/**
+ * What a Plan turn is told when it reaches for a tool it may not use yet.
+ *
+ * The same shape as `QUESTION_REFUSAL` and for the same reason: a refusal an
+ * agent cannot act on becomes a retry loop, so it has to name the way forward.
+ * Here that way is the one Plan already has — `ExitPlanMode`, which aide approves
+ * without asking so the turn can finish and the plan can be read in the
+ * transcript. See the handoff branch in `canUseTool` for why it is granted there
+ * rather than put to the human, which is not the obvious answer.
+ */
+export const PLAN_REFUSAL = [
+  "aide's Plan mode does not act: describe the change instead, and call",
+  "ExitPlanMode to hand the plan over and end the turn. The human approves it",
+  "and the same conversation carries it out with this tool available.",
 ].join(" ")
 
 /**
@@ -623,10 +638,14 @@ export const MAX_PROJECT_DOC_CHARS = 32_000
  *
  * The title used to be thrown away â only the body was sent â which discarded
  * the one line that most reliably says what the task is, and left a task with an
- * empty body being handed an empty user message. Composed in one place so the
- * two cannot drift.
+ * empty body being handed an empty user message.
+ *
+ * Named rather than inlined into its one caller below, because "what the model
+ * is actually asked" is worth being able to point at. It used to say it was
+ * composed in one place "so the two cannot drift" — there was a second call site
+ * once, and there has not been for some time.
  */
-export function composeRequest(title: string, prompt: string): string {
+function composeRequest(title: string, prompt: string): string {
   const body = prompt.trim()
   return body ? `# ${title}\n\n${body}` : title
 }
@@ -989,10 +1008,22 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
           return { behavior: "deny", message: QUESTION_REFUSAL }
         }
 
-        // A chat asks. This is the whole difference between the two kinds of
-        // run: a human is present, so a call the SDK could not resolve becomes a
-        // question rather than a refusal. The turn blocks here until the answer
-        // comes back through the browser.
+        // A chat, which is to say a run with a human somewhere near it. That buys
+        // less than it used to and less than it looks: NOTHING here is asked any
+        // more. A chat's turn is no more interruptible than a task's, because the
+        // same turn may have been sent by the commit gate rather than typed, and
+        // a prompt raised by one of those has nobody to answer it.
+        //
+        // What a chat gets instead is a different REFUSAL — one that names the
+        // way forward, lands in a transcript somebody is already reading, and is
+        // answered by the next message. A task run has no such reader, so it
+        // falls through to the fail-closed path below.
+        //
+        // Still keyed on `onPermission` because that callback's presence is what
+        // distinguishes the two kinds of run at this layer. It is no longer
+        // CALLED — see the handoff branch — and if a later change removes the
+        // last reason to carry it, this test becomes `opts.chatMode` and the
+        // option goes with it.
         if (opts.onPermission) {
           // Everything after an approved plan runs unasked, which is the whole
           // point of Plan — the plan WAS the question. One approved plan in this
@@ -1005,8 +1036,8 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
           // that might end up carrying a plan out would have carried
           // `fastBashSettings`' `Bash(*)` rule through the PLANNING turn as
           // well, where an explicit allow rule outranks plan mode's refusal and
-          // "Claude will not act" becomes false. Deciding here costs an IPC
-          // round trip instead.
+          // "Claude will not act" becomes false. Deciding it in this callback
+          // costs nothing and cannot leak backwards into the planning turn.
           if (turnMode === "plan" && planApproved) {
             // The shell is still aide's own decision, and the same one the two
             // lists describe everywhere else: run anything that is not denied.
@@ -1028,15 +1059,52 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
             return { behavior: "deny", message: verdict.reason }
           }
 
-          const requestId = randomUUID()
-          const allowed = await opts.onPermission({ requestId, name, input: toolInput })
-          // The one question that is never skipped: approving the plan is the
-          // gate, so it cannot be a thing the gate lets through.
-          if (allowed && turnMode === "plan" && name === PLAN_HANDOFF_TOOL) {
+          // Allowed WITHOUT asking, which is the opposite of how it reads.
+          //
+          // The obvious version of this branch sends the handoff to the browser,
+          // on the reasoning that `ExitPlanMode` ends the turn so nothing is held
+          // while the human reads. That reasoning is wrong, and it was wrong in
+          // this file for exactly one commit: `canUseTool` is awaited BEFORE the
+          // SDK runs the tool, so the run parks on this line with the project's
+          // lock in hand and the turn very much alive. The tool ends the turn
+          // only once it has ALREADY been approved. Watched doing it — a plan
+          // handoff sat on `needs your approval` for seven minutes holding the
+          // checkout, which is the same wedge `AskUserQuestion` was refused for.
+          // What a tool does AFTERWARDS is not what decides whether waiting on it
+          // blocks; where the `await` sits is.
+          //
+          // So the permission is granted here and the turn is allowed to END. The
+          // plan lands in the transcript, the lock is released, and the human
+          // approves it by replying — the same review, one message later, with
+          // nothing held in the meantime. That reply is also the only approval
+          // that was ever load-bearing: `planApproved` gates the REST of this
+          // turn, and this call is the last thing in it.
+          if (turnMode === "plan" && name === PLAN_HANDOFF_TOOL) {
             planApproved = true
+            return { behavior: "allow", updatedInput: toolInput }
           }
-          if (allowed) return { behavior: "allow", updatedInput: toolInput }
-          return { behavior: "deny", message: "You declined this." }
+
+          // Refused rather than asked, and this is the rule the brief states
+          // rather than a policy of its own: no mode may stop for permission
+          // mid-turn, because aide sends turns nobody typed — the commit gate's
+          // repair attempt is one — and a prompt raised by one of those holds
+          // the project's lock with nobody there to answer it.
+          //
+          // It was enforced for `AskUserQuestion` alone, which was the tool
+          // whose PURPOSE is to block; the general path underneath it was left
+          // routing every unresolved call to the browser. So a Plan turn that
+          // reached for Edit — which is deliberately not on `chatAutoAllowTools`
+          // (see `config.ts`), because a bare name there would approve it before
+          // Plan could refuse it — became the same 937-second wait, on the mode
+          // whose whole promise is that it does not act.
+          //
+          // Plan's answer is `ExitPlanMode`; Auto reaching here wanted something
+          // outside both allowlists, which is aide's refusal to make and not a
+          // question. Either way the turn ends and the human replies to a
+          // transcript rather than to a modal.
+          const reason = turnMode === "plan" ? PLAN_REFUSAL : "not in this run's allowlist"
+          pending.push({ type: "tool.denied", name, input: toolInput, reason })
+          return { behavior: "deny", message: reason }
         }
 
         // A task run refuses. Bash gets a real decision from aide's own policy;

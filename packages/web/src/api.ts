@@ -19,6 +19,27 @@ import type {
   SshListing,
 } from "@aide/protocol"
 
+/**
+ * A conversation, plus the two things aide knows about it that the session file
+ * does not: whether you are finished with it, and what it spent.
+ *
+ * Attached by the daemon rather than stored in the session file: the SDK owns
+ * the transcript, aide owns the lifecycle, and merging them on the wire keeps
+ * the list to one request.
+ *
+ * `spend` is null for a conversation aide never ran a turn of — a chat held in
+ * the CLI or the VS Code extension shows up in the same list, and there is no
+ * event log behind it to measure.
+ */
+/**
+ * Protocol types re-exported so a component can take its data and the call that
+ * fetched it from one import.
+ *
+ * Not a barrel for its own sake: the alternative is every pane importing the
+ * shape from `@aide/protocol` and the fetcher from `./api`, which is two lines
+ * saying one thing. Both spellings work and both are in use — this exists for
+ * the files that would otherwise import from two places to draw one pane.
+ */
 export type {
   Activity,
   ConversationSummary,
@@ -33,18 +54,6 @@ export type {
   SshListing,
 }
 
-/**
- * A conversation, plus the two things aide knows about it that the session file
- * does not: whether you are finished with it, and what it spent.
- *
- * Attached by the daemon rather than stored in the session file: the SDK owns
- * the transcript, aide owns the lifecycle, and merging them on the wire keeps
- * the list to one request.
- *
- * `spend` is null for a conversation aide never ran a turn of — a chat held in
- * the CLI or the VS Code extension shows up in the same list, and there is no
- * event log behind it to measure.
- */
 export type ConversationRow = ConversationSummary & {
   status: ChatStatus
   spend: ChatSpend | null
@@ -176,11 +185,6 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ host, path }),
     }),
-  removeProject: (id: string) => call<void>(`/api/projects/${id}`, { method: "DELETE" }),
-
-  events: (runId: string, fromSeq = 0) =>
-    call<RunEvent[]>(`/api/runs/${runId}/events?fromSeq=${fromSeq}`),
-
   conversations: (projectId: string) =>
     call<ConversationRow[]>(`/api/projects/${projectId}/conversations`),
   /**
@@ -279,8 +283,6 @@ export const api = {
     }),
   interruptChat: (runId: string) =>
     call<{ interrupted: boolean }>(`/api/runs/${runId}/chat-interrupt`, { method: "POST" }),
-
-  branch: (projectId: string) => call<{ branch: string | null }>(`/api/projects/${projectId}/branch`),
 
   /**
    * What is still uncommitted, in the scope a commit would take. Cheap: no

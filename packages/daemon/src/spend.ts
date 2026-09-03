@@ -43,6 +43,64 @@ const HEADER_LINES = 8
  */
 const TAIL_BYTES = 64 * 1024
 
+/**
+ * The first few events of a log, stopping as soon as one answers.
+ *
+ * Every reader of a run log's HEAD wants the same six lines of machinery —
+ * stream it, skip blanks, give up after a bounded number of events, skip a torn
+ * line rather than abort, close the stream whatever happens — and differs only
+ * in how many lines it will look at and what it is looking for. That was written
+ * out twice (`sessionOfRun` here, `isLiveFormat` in `activity.ts`) with the two
+ * copies already disagreeing about which `catch` swallowed what.
+ *
+ * `pick` returns a value to stop and answer with, or undefined to keep reading.
+ * Null means the budget ran out or the log had nothing to say.
+ *
+ * Bounded rather than whole-file, and that bound is a refusal rather than an
+ * optimisation: what these callers look for is in the first handful of events,
+ * so a log that lacks it lacks it, and reading megabytes of transcript to
+ * confirm that is work with a known answer. Streaming rather than a byte prefix
+ * because `user.message` is line 1 and carries pasted screenshots inline as
+ * base64 — a fixed prefix would be entirely inside one attachment.
+ */
+export async function scanHead<T>(
+  path: string,
+  maxLines: number,
+  pick: (event: RunEvent, openedAt: number) => T | undefined,
+): Promise<T | null> {
+  const rl = createInterface({
+    input: createReadStream(path, { encoding: "utf8" }),
+    crlfDelay: Infinity,
+  })
+  try {
+    let seen = 0
+    let openedAt = 0
+    for await (const line of rl) {
+      if (!line.trim()) continue
+      if (++seen > maxLines) return null
+      let event: RunEvent
+      try {
+        event = JSON.parse(line) as RunEvent
+      } catch {
+        // A torn line can only be the one being written right now, in a run too
+        // young to be asked about anyway.
+        continue
+      }
+      // The log's own opening timestamp, which is not the same as the matched
+      // event's: `sessionOfRun` reports when the turn OPENED, and the event it
+      // matches on is two or three lines in.
+      if (!openedAt) openedAt = event.ts
+      const hit = pick(event, openedAt)
+      if (hit !== undefined) return hit
+    }
+    return null
+  } catch {
+    return null
+  } finally {
+    rl.close()
+  }
+}
+
 /** One run log, reduced to what a list row and a profile need from it. */
 export interface RunTotals {
   runId: string
@@ -293,35 +351,11 @@ async function readRun(path: string, runId: string): Promise<RunTotals | null> {
 export async function sessionOfRun(
   path: string,
 ): Promise<{ sessionId: string; projectId: string; at: number } | null> {
-  const rl = createInterface({
-    input: createReadStream(path, { encoding: "utf8" }),
-    crlfDelay: Infinity,
-  })
-  try {
-    let seen = 0
-    let openedAt = 0
-    for await (const line of rl) {
-      if (!line.trim()) continue
-      if (++seen > HEADER_LINES) return null
-      let event: RunEvent
-      try {
-        event = JSON.parse(line) as RunEvent
-      } catch {
-        // A torn line can only be one being written right now, in a run that is
-        // too young to be asked about anyway.
-        continue
-      }
-      if (!openedAt) openedAt = event.ts
-      if (event.type === "run.started" && event.sessionId) {
-        return { sessionId: event.sessionId, projectId: event.projectId, at: openedAt || event.ts }
-      }
-    }
-    return null
-  } catch {
-    return null
-  } finally {
-    rl.close()
-  }
+  return await scanHead(path, HEADER_LINES, (event, openedAt) =>
+    event.type === "run.started" && event.sessionId
+      ? { sessionId: event.sessionId, projectId: event.projectId, at: openedAt || event.ts }
+      : undefined,
+  )
 }
 
 /**

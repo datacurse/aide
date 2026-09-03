@@ -14,6 +14,7 @@ import { GraphCell, ROW_H, graphWidth } from "../GitGraph.js"
 import { ArrowDown, ArrowUp, Tag } from "../icons.js"
 import { Button, Empty, PaneHeader } from "../ui.js"
 import { useKeyed } from "../useKeyed.js"
+import { usePoll } from "../usePoll.js"
 import { useRemembered } from "../useRemembered.js"
 import { FileTree } from "./Files.js"
 
@@ -510,30 +511,35 @@ function History({ projectId }: { projectId: string }) {
   const [depth, rememberDepth] = useKeyed<number>(projectId)
   const page = depth ?? PAGE
 
-  useEffect(() => {
-    let live = true
-    const load = async () => {
+  // Through `usePoll`, which skips a beat while the previous one is still in
+  // flight. This is a `git log` and it can be a REMOTE one, so it is the same
+  // shape as the `gitPending` poll that grew unbounded ssh connections until
+  // `App.tsx` got that guard — see `usePoll` for what that cost. This loop kept
+  // firing on the clock for a while afterwards, which is what a fix applied to
+  // one of two identical callers looks like.
+  //
+  // Keyed on `page` as well as the project, which is what makes the button below
+  // a single `rememberDepth` and nothing else: growing the page IS the fetch for
+  // the longer one, immediately, rather than a press that appears to do nothing
+  // until the next beat comes round up to four seconds later.
+  //
+  // No `live` flag guarding the writes, and it is not needed rather than
+  // forgotten: both name the project they were FETCHED for, which is the whole
+  // reason `useKeyed` takes a key — a late answer lands under its own project,
+  // not under whatever is open when it arrives.
+  usePoll(
+    async () => {
       try {
         const next = await api.gitHistory(projectId, page)
-        if (!live) return
         rememberHistory(projectId, next)
         rememberError(projectId, null)
       } catch (err) {
-        if (!live) return
         rememberError(projectId, err instanceof Error ? err.message : String(err))
       }
-    }
-    // Runs on `page` as well as on the project, which is what makes the button
-    // below a single `rememberDepth` and nothing else: growing the page IS the
-    // fetch for the longer one, immediately, rather than a press that appears
-    // to do nothing until the next poll comes round up to four seconds later.
-    void load()
-    const timer = setInterval(() => void load(), POLL_MS)
-    return () => {
-      live = false
-      clearInterval(timer)
-    }
-  }, [projectId, page, rememberHistory, rememberError])
+    },
+    POLL_MS,
+    [projectId, page, rememberHistory, rememberError],
+  )
 
   return (
     <>

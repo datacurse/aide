@@ -150,11 +150,72 @@ console.log("\nnothing may stop for a human mid-turn")
     QUESTION_REFUSAL.includes("reply") && QUESTION_REFUSAL.includes("end the turn"),
     QUESTION_REFUSAL.slice(0, 60),
   )
-  // `ExitPlanMode` is the deliberate exception and must NOT be swept up by the
-  // same rule: it ends the turn rather than parking it, so nothing is held while
-  // the human reads. Not asserted here — the two are string literals, so tsc
+  // `ExitPlanMode` is the deliberate exception, and the REASON matters because
+  // the obvious one is wrong. It is not "the tool ends the turn, so nothing is
+  // held while the human reads" — that was the reasoning here for one commit and
+  // it cost seven minutes of a held checkout. `canUseTool` is awaited BEFORE the
+  // SDK runs a tool, so asking about the handoff parks the run exactly like any
+  // other question; the tool only ends the turn once it has already been
+  // approved. It is an exception because aide APPROVES it without asking, which
+  // lets the turn end and puts the plan in the transcript to be answered by the
+  // next message. Not asserted here — the tool names are string literals, so tsc
   // rejects the comparison as provably false, which is a stronger guarantee than
   // a runtime check and costs nothing to keep.
+
+  // The rule above was pinned for the ONE tool whose purpose is to block, and
+  // the general path underneath it kept routing every unresolved call in a chat
+  // to the browser. Plan is where that surfaced: Edit is deliberately kept off
+  // `chatAutoAllowTools` (a bare name there approves a tool before the mode can
+  // refuse it), so a Plan turn reaching for Edit fell through and became the
+  // same wait — on the mode whose whole promise is that it does not act.
+  //
+  // What makes this checkable rather than a comment is that the refusal must
+  // name the way out. Plan's way out is to hand the plan over and stop.
+  const { PLAN_REFUSAL } = await import("./agent.js")
+  check(
+    "a plan turn that reaches for a tool is refused, not asked",
+    PLAN_REFUSAL.includes("does not act"),
+    PLAN_REFUSAL.slice(0, 60),
+  )
+  check(
+    "and is told to hand the plan over and end the turn",
+    PLAN_REFUSAL.includes("ExitPlanMode") && PLAN_REFUSAL.includes("end the turn"),
+    "a refusal an agent cannot act on is a retry loop",
+  )
+  check(
+    "and that the work resumes in the same conversation",
+    PLAN_REFUSAL.includes("carries it out"),
+    "otherwise the model reads the refusal as the task being impossible",
+  )
+  check(
+    "the two refusals are not one sentence",
+    PLAN_REFUSAL !== QUESTION_REFUSAL,
+    "sharing a message is how the wrong reason reached the agent last time",
+  )
+}
+
+console.log("\na remote shell call cannot forget its timeout")
+{
+  const { sshCommand } = await import("./git.js")
+
+  // `sshCommand` exists so the ssh argv and `REMOTE_GIT_TIMEOUT_MS` cannot be
+  // taken separately — `remoteFileSize` in `repo.ts` took the first without the
+  // second and could hang `workingTree` once per untracked file. A real call
+  // needs a host, so what is checkable here is the guard that keeps it honest:
+  // handed a LOCAL ref it must throw rather than quietly spawning ssh to reach
+  // this machine's own disk, which would be a slower way to answer a question
+  // `node:fs` answers directly.
+  let threw = false
+  try {
+    await sshCommand("C:/some/local/path", "true")
+  } catch {
+    threw = true
+  }
+  check(
+    "sshCommand refuses a local ref",
+    threw,
+    "otherwise it silently shells out to reach this machine's own disk",
+  )
 }
 
 console.log("\ninherited chat mode")

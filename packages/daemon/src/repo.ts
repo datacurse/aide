@@ -15,12 +15,18 @@ import type {
   GitTreeEntry,
   GitWorkingTree,
 } from "@aide/protocol"
-import { execFile } from "node:child_process"
-import { promisify } from "node:util"
-import { sshConfigPath } from "@aide/protocol/node"
-import { git, gitBatch, gitDiffing, gitOr, refHost, refRoot, type RepoRef } from "./git.js"
-
-const execFileAsync = promisify(execFile)
+import {
+  git,
+  gitBatch,
+  gitDiffing,
+  gitOr,
+  refHost,
+  refPath,
+  refRoot,
+  shellQuote,
+  sshCommand,
+  type RepoRef,
+} from "./git.js"
 
 /**
  * Reading a project's own repository — branch, history, and whatever is sitting
@@ -51,8 +57,7 @@ const execFileAsync = promisify(execFile)
  * so moving a 40MB file across the network to answer it would be absurd.
  */
 async function fileSize(root: RepoRef, path: string): Promise<number | null> {
-  const host = refHost(root)
-  if (!host) {
+  if (!refHost(root)) {
     try {
       return (await stat(join(refRoot(root), path))).size
     } catch {
@@ -63,21 +68,13 @@ async function fileSize(root: RepoRef, path: string): Promise<number | null> {
   // file, which is a side effect on somebody's tree for a display decision.
   // `wc -c` is a read, and it is the same shell this file already reaches the
   // far machine through.
-  const out = await remoteFileSize(host, `${refRoot(root)}/${path}`)
-  return out
-}
-
-/** `wc -c` over ssh. Null for a file that is not there. */
-async function remoteFileSize(host: string, path: string): Promise<number | null> {
-  const quoted = `'${path.replace(/'/g, `'\\''`)}'`
-  const out = await gitOr("", async () => {
-    const { stdout } = await execFileAsync(
-      "ssh",
-      ["-o", "BatchMode=yes", "-F", sshConfigPath(), host, `wc -c < ${quoted}`],
-      { windowsHide: true },
-    )
-    return stdout
-  })
+  //
+  // Through `sshCommand` rather than a hand-built `execFile("ssh", …)`, because
+  // that is what carries `REMOTE_GIT_TIMEOUT_MS`. This runs once per untracked
+  // file — up to fifty times in one `workingTree` — so a host that stops
+  // answering used to hang the whole request rather than one row of it, which is
+  // the failure `git.ts` gave every OTHER remote call a timeout to prevent.
+  const out = await gitOr("", () => sshCommand(root, `wc -c < ${shellQuote(refPath(root, path))}`))
   const n = Number(out.trim())
   return Number.isFinite(n) ? n : null
 }

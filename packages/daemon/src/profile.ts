@@ -304,8 +304,31 @@ export function summarizeRun(runId: string, events: RunEvent[]): RunSummary {
         summary.status = "failed"
         summary.subtype = "run.error"
         break
-      default:
+      default: {
+        // Not part of a turn's TIMING, which is all this summary measures. The
+        // assignment is what keeps that a decision: a bare `default: break` let
+        // a new event type join the union and be silently ignored here, and the
+        // profile is exactly where a missing event shows up as a number that is
+        // quietly too small rather than as anything visibly broken.
+        const notTimed:
+          | "assistant.text"
+          | "assistant.thinking"
+          | "checkpoint.taken"
+          | "commit.drafted"
+          | "commit.drafting"
+          | "commit.landed"
+          | "commit.step"
+          | "context.usage"
+          | "push.landed"
+          | "run.started"
+          | "turn.checkpoint"
+          | "turn.stale"
+          | "verify.result"
+          | "verify.skipped"
+          | "verify.started" = e.type
+        void notTimed
         break
+      }
     }
   }
 

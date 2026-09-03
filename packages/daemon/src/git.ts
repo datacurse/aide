@@ -80,7 +80,7 @@ export const repoOf = (project: { root: string; host?: string }): RepoRef =>
  * `listRemoteDirectories` in `ssh.ts`, where getting this wrong silently listed
  * the wrong directory instead of failing.
  */
-const shellQuote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`
+export const shellQuote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`
 
 /**
  * `GIT_OPTS`, plus a timeout when the call goes over a network. See
@@ -331,6 +331,35 @@ export async function readRepoFile(ref: RepoRef, ...parts: string[]): Promise<st
     // fail loudly at the very next git call anyway.
     return null
   }
+}
+
+/**
+ * One shell command on the machine a `RepoRef` names, with the timeout every
+ * remote call needs.
+ *
+ * The timeout is the half that gets forgotten, which is why this exists rather
+ * than another hand-built argv. `remoteFileSize` in `repo.ts` wrote its own
+ * `execFile("ssh", …)` with `windowsHide` and nothing else, so `workingTree`
+ * could wait forever on a host that had stopped answering — once per untracked
+ * file, up to fifty times in one request — which is exactly the wedge
+ * `REMOTE_GIT_TIMEOUT_MS` was added to close after it held a project's lock for
+ * an hour. Keeping the argv and the timeout together means a caller cannot take
+ * the first without the second.
+ *
+ * `command` is parsed by the REMOTE shell, so anything interpolated into it has
+ * to go through `shellQuote` first. A local ref throws rather than shelling out:
+ * every caller has a direct `node:fs` answer for that case, and quietly spawning
+ * ssh to reach this machine's own disk would be a slower way to be wrong.
+ */
+export async function sshCommand(ref: RepoRef, command: string): Promise<string> {
+  const host = refHost(ref)
+  if (!host) throw new Error(`sshCommand needs a remote ref, got ${refRoot(ref)}`)
+  const { stdout } = await run(
+    "ssh",
+    ["-o", "BatchMode=yes", "-F", sshConfigPath(), host, command],
+    withRemoteTimeout(ref, GIT_OPTS),
+  )
+  return stdout
 }
 
 /**

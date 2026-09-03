@@ -33,10 +33,11 @@ import type {
   Project,
   ProjectActivity,
   RunEvent,
+  RunEventType,
   ToolUse,
 } from "@aide/protocol"
 import { runsDir } from "@aide/protocol/node"
-import { RunLogCache, runIndex, type RunTotals } from "./spend.js"
+import { RunLogCache, runIndex, scanHead, type RunTotals } from "./spend.js"
 
 /** A day in ms, for the window arithmetic. */
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -117,6 +118,38 @@ export interface RunBody {
 const EMPTY_BODY = (): RunBody => ({ tools: {}, checks: [], commits: 0, asks: 0 })
 
 /**
+ * The event types `bodyOfRun` counts, and the source of its prefilter.
+ *
+ * One list rather than two, because the two were a silent-failure pair: the
+ * prefilter below skips a line before `JSON.parse` sees it, so an event added to
+ * the reducer and not to the filter is dropped with no error, no failed check,
+ * and nothing a grep for the new event's name would find. Deriving the strings
+ * from the list means adding a counter cannot forget to widen the filter.
+ *
+ * `as const` so the entries are literal types: a name that is not a real
+ * `RunEventType` fails to compile here rather than silently matching nothing.
+ */
+const COUNTED = [
+  "tool.start",
+  "tool.end",
+  "verify.result",
+  "commit.landed",
+  "permission.request",
+] as const satisfies readonly RunEventType[]
+
+/**
+ * What a counted line looks like on the wire, as a substring test.
+ *
+ * The quotes matter: `"tool.start"` cannot match a tool RESULT that happens to
+ * contain the words, which a bare `tool.start` would. This is the one place the
+ * events are matched as text rather than as parsed objects, and it is worth the
+ * awkwardness — most lines in a large log are assistant prose or a tool result,
+ * and parsing every one of them to find that out costs more than the test that
+ * skips them.
+ */
+const COUNTED_MARKERS = COUNTED.map((type) => `"${type}"`)
+
+/**
  * Everything the dashboard needs from one run log's BODY, in one pass.
  *
  * One pass rather than one per figure, and that is the whole reason this is
@@ -142,17 +175,9 @@ async function bodyOfRun(path: string): Promise<RunBody> {
   })
   try {
     for await (const line of rl) {
-      // Cheap prefilter before JSON.parse. Most lines in a large log are
-      // assistant text or a tool result, and parsing every one of them to
-      // discover that costs more than the substring tests that skip them.
-      if (
-        !line.includes('"tool.') &&
-        !line.includes('"verify.result"') &&
-        !line.includes('"commit.landed"') &&
-        !line.includes('"permission.request"')
-      ) {
-        continue
-      }
+      // Cheap prefilter before JSON.parse — see `COUNTED`, which is where the
+      // list of what survives it lives, next to the reducer that consumes them.
+      if (!COUNTED_MARKERS.some((marker) => line.includes(marker))) continue
       let event: RunEvent
       try {
         event = JSON.parse(line) as RunEvent
@@ -320,37 +345,16 @@ const HEAD_SCAN = 4
  * `run.queued` log fails on its first line and costs one read of one line.
  */
 async function isLiveFormat(path: string): Promise<boolean> {
-  const rl = createInterface({
-    input: createReadStream(path, { encoding: "utf8" }),
-    crlfDelay: Infinity,
-  })
-  try {
-    let seen = 0
-    for await (const line of rl) {
-      if (!line.trim()) continue
-      if (++seen > HEAD_SCAN) return false
-      let event: RunEvent
-      try {
-        event = JSON.parse(line) as RunEvent
-      } catch {
-        continue
-      }
-      // The events that open a log this aide writes. `run.started` is absent by
-      // construction — that is what made this log unindexed in the first place.
-      if (
-        event.type === "user.message" ||
-        event.type === "checkpoint.taken" ||
-        event.type === "commit.step"
-      ) {
-        return true
-      }
-    }
-    return false
-  } catch {
-    return false
-  } finally {
-    rl.close()
-  }
+  const hit = await scanHead(path, HEAD_SCAN, (event) =>
+    // The events that open a log this aide writes. `run.started` is absent by
+    // construction — that is what made this log unindexed in the first place.
+    event.type === "user.message" ||
+    event.type === "checkpoint.taken" ||
+    event.type === "commit.step"
+      ? true
+      : undefined,
+  )
+  return hit ?? false
 }
 
 /**

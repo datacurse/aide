@@ -1,23 +1,20 @@
 /**
  * The machines in `~/.aide/ssh_config`, and looking around one of them.
  *
- * This is the half of "add a project over ssh" that WORKS, and it is worth being
- * precise about which half that is, because the shape of the file invites the
- * assumption that the rest follows.
+ * This file is the BROWSING half of "add a project over ssh": listing your
+ * hosts, walking a remote filesystem, and saying whether a directory over there
+ * is a git repository.
  *
- * aide can list your hosts, walk a remote filesystem, and tell you whether a
- * directory over there is a git repository. What it cannot yet do is RUN a
- * project from one: every run spawns the Agent SDK's `claude` binary with `cwd`
- * set to the project root and shells out to a local `git -C <root>`, so a
- * registry entry pointing at another machine would be handed to `execFile` as a
- * local path and fail at the first checkpoint. See `addRemoteProject` for what
- * that would take.
+ * It used to open by saying that running a project from another machine was not
+ * possible, which was true when it was written and stopped being true three
+ * changes later — see `addRemoteProject` at the bottom, which now records what
+ * each of those three cost. A header that describes a limit the file itself has
+ * since removed is worse than no header: it is read first and believed.
  *
- * So the browsing below is a real, finished piece of that road and not the road.
- * It is separated from `picker.ts` rather than folded into it because the two
- * answer different questions — that one opens a window on your screen, this one
- * runs a command on a machine somewhere else — and because a remote listing has
- * a failure mode the local dialog does not have: it can hang.
+ * Separated from `picker.ts` rather than folded into it because the two answer
+ * different questions — that one opens a window on your screen, this one runs a
+ * command on a machine somewhere else — and because a remote listing has a
+ * failure mode the local dialog does not have: it can hang.
  */
 import { execFile, spawn } from "node:child_process"
 import { readFile, writeFile, mkdir } from "node:fs/promises"

@@ -187,18 +187,3 @@ export interface Profile {
   markdown: string
 }
 
-/**
- * A conversation's transcript, normalized into the same `RunEvent` shape the
- * live run stream uses — so the transcript renderer is shared rather than
- * reimplemented, and a replayed session reads exactly like a live one.
- *
- * `seq` is assigned on read and is stable only within one response; these
- * events are derived from the session file, not from aide's own event log.
- */
-export interface ConversationTranscript {
-  summary: ConversationSummary
-  /** True when the transcript was cut short by the message cap. */
-  truncated: boolean
-  /** How many messages the session actually holds. */
-  totalMessages: number
-}

@@ -55,7 +55,7 @@ export interface Health {
   /**
    * Milliseconds since the last mutating request finished.
    *
-   * `busy.writes === 0` is not on its own a safe moment to restart. A land is
+   * `busy.writes === 0` is not on its own a safe moment to restart. A commit is
    * one request, but the browser follows it with a burst of others, and the gap
    * between two of them is a window where nothing is in flight and the work is
    * plainly not over. Requiring a quiet stretch turns that gap into a

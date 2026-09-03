@@ -16,9 +16,9 @@ import { Button } from "./ui.js"
  *
  * An overlay rather than a fifth pane. The four panes are the product's whole
  * surface and a profile does not earn one — it is read once, after the fact,
- * about a conversation that is already on screen behind it. `Confirm` in `ui.tsx`
- * established the shape for exactly this: something transient, owned by whatever
- * knows what it is about.
+ * about a conversation that is already on screen behind it. The shape is the one
+ * a transient overlay wants generally: owned by whatever knows what it is about,
+ * rather than hoisted somewhere with a lifetime of its own.
  *
  * Fetched on open and never polled. It reduces every run log the conversation
  * has, and it describes turns that have already ended — so re-reading it on the
@@ -68,8 +68,9 @@ export function ProfileOverlay({
   }
 
   return (
-    // Escape and the backdrop both close, for the reason `Confirm` gives: the
-    // safe answer has to be the easy one to reach.
+    // Escape and the backdrop both close, because the safe answer has to be the
+    // easy one to reach — this overlay only reports, so leaving it costs nothing
+    // and there is no reason to make getting out of it precise.
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-8"
       onClick={onClose}
