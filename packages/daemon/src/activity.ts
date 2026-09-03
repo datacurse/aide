@@ -24,17 +24,22 @@ import { readdir } from "node:fs/promises"
 import { join } from "node:path"
 import { createInterface } from "node:readline"
 import type {
+  ActiveDay,
   Activity,
   ActivityDay,
   CheckRun,
   HourCell,
+  IdleStretch,
   ModelUse,
   Outcomes,
   Project,
   ProjectActivity,
   RunEvent,
   RunEventType,
+  Sitting,
+  TimeSplit,
   ToolUse,
+  WorkSplit,
 } from "@aide/protocol"
 import { runsDir } from "@aide/protocol/node"
 import { RunLogCache, runIndex, scanHead, type RunTotals } from "./spend.js"
@@ -358,6 +363,399 @@ async function isLiveFormat(path: string): Promise<boolean> {
 }
 
 /**
+ * How long a gap between turns before you were no longer at the machine.
+ *
+ * The one judgement call in this file, and it is a threshold rather than a
+ * measurement because nothing in a run log records whether anybody was looking
+ * at the screen. What the logs DO say, measured across this machine's 438 runs:
+ * in-sitting gaps have a median of 57s and a 90th percentile of 8m, which is
+ * the shape of reading a diff and typing the next thing. The distribution is
+ * bimodal with a wide empty middle — the next thing above it is hours — so the
+ * answer is robust to where in that valley the line is drawn. At 15 minutes the
+ * machine reads 80% busy over 49 sittings, at 30 minutes 72% over 37, at 60
+ * minutes 60% over 23; the ratio moves smoothly and no threshold in that range
+ * changes the conclusion.
+ *
+ * 30 minutes because it is the point where single-turn sittings stop being
+ * common (7 of 37, against 13 of 49 at fifteen). A sitting of one turn has no
+ * gaps in it, so it contributes span == active and reports as 100% busy — a
+ * threshold that manufactures those is one that flatters the number.
+ *
+ * Not a setting. A knob here would let the figure be tuned until it said what
+ * you wanted, which for a number whose whole job is to be uncomfortable is the
+ * one thing it must not do — the same reasoning as the brief's one repair
+ * attempt.
+ */
+export const IDLE_BREAK_MS = 30 * 60 * 1000
+
+/**
+ * Consecutive turns clustered into stretches of working at the machine.
+ *
+ * Takes runs in any order and sorts its own copy: `runIndex` is a directory
+ * listing, so it arrives in whatever order the filesystem gives, and clustering
+ * an unsorted list silently produces one sitting per run.
+ *
+ * A turn's interval is `[openedAt, openedAt + activeMs]`. Those can OVERLAP —
+ * one agent per project, but several projects run at once — so the end of a
+ * sitting is the max of the ends rather than the last one seen, or a long turn
+ * followed by a short one would end the sitting early and count the remainder
+ * of the long one as your time.
+ */
+export function sittingsOf(runs: RunTotals[], breakMs = IDLE_BREAK_MS): Sitting[] {
+  const ordered = [...runs].sort((a, b) => a.openedAt - b.openedAt)
+  const out: Sitting[] = []
+
+  let cur: Group | null = null
+  for (const run of ordered) {
+    if (cur && run.openedAt - cur.end <= breakMs) {
+      // max, not assignment: turns in different projects overlap, and a short
+      // turn starting inside a long one must not shorten the sitting.
+      cur.end = Math.max(cur.end, run.openedAt + run.activeMs)
+      cur.runs.push(run)
+      continue
+    }
+    if (cur) out.push(seal(cur))
+    cur = { start: run.openedAt, end: run.openedAt + run.activeMs, runs: [run] }
+  }
+  if (cur) out.push(seal(cur))
+  return out
+}
+
+/** A sitting mid-construction: its bounds, and the turns that fell inside it. */
+interface Group {
+  start: number
+  end: number
+  runs: RunTotals[]
+}
+
+/**
+ * A sitting's two halves, which must PARTITION its span and not merely relate to
+ * it.
+ *
+ * `activeMs` is the UNION of the turn intervals, not their sum, and that is the
+ * correctness bug this function exists to avoid. aide runs one agent per
+ * project but several projects at once, so two turns overlap in wall-clock
+ * time: on this machine the summed durations are 33.0h against a union of
+ * 30.2h, so 2.8h of "agent time" is one minute counted twice. Summing is right
+ * for "how much work did aide do" — which is what the `agent time` tile has
+ * always shown and still does — and wrong for "what fraction of the clock was
+ * it busy", because a numerator that can exceed its own denominator is not a
+ * fraction. Four of this machine's 37 sittings had summed time exceeding their
+ * span outright.
+ *
+ * So `humanMs` is `span - union` exactly, needs no clamp, and the two halves add
+ * to the span by construction rather than by luck — which is the property
+ * `pnpm smoke` asserts, since a split that quietly stopped partitioning would
+ * still render as a plausible bar.
+ */
+function seal(g: Group): Sitting {
+  const spanMs = g.end - g.start
+  const activeMs = unionMs(g.runs)
+  return {
+    start: g.start,
+    end: g.end,
+    spanMs,
+    activeMs,
+    humanMs: spanMs - activeMs,
+    turns: g.runs.length,
+    projects: new Set(g.runs.map((r) => r.projectId)).size,
+  }
+}
+
+/**
+ * Wall-clock during which at least one of these turns was running.
+ *
+ * The classic interval merge. A zero-length turn — one that never ran — is an
+ * empty interval and contributes nothing, which is what keeps a cancelled turn
+ * from reading as a moment of work.
+ */
+function unionMs(runs: RunTotals[]): number {
+  const spans = runs
+    .map((r) => [r.openedAt, r.openedAt + r.activeMs] as const)
+    .sort((a, b) => a[0] - b[0])
+
+  let total = 0
+  let start: number | null = null
+  let end = 0
+  for (const [from, to] of spans) {
+    if (start === null || from > end) {
+      if (start !== null) total += end - start
+      start = from
+      end = to
+    } else if (to > end) end = to
+  }
+  if (start !== null) total += end - start
+  return total
+}
+
+/**
+ * The days that had any work, with every interval accounted to exactly one.
+ *
+ * The scoreboard's denominator, and the reason it is not simply "the window":
+ * 21 of this machine's last 30 days ran nothing at all, and a day you did not
+ * work is not a day aide wasted. Nor is it "the sittings", which is the other
+ * end of the same mistake — a sitting excludes every gap over the break, which
+ * is exactly the time the goal is to reclaim.
+ *
+ * Built by ADDING UP intervals rather than by measuring each day's outer
+ * bounds, and that is the correctness fix rather than a refactor. Bounds are
+ * `end - start` of the day's own sittings, so an idle stretch running from one
+ * day into the next belongs to neither: on this machine the four largest gaps
+ * all cross midnight, and 71.5 of 111.6 recoverable hours were invisible to the
+ * score while being listed underneath it as the top of the worklist. The page
+ * disagreed with itself, and the half that was wrong was the headline.
+ *
+ * So a gap is attributed to the day it STARTS on — the same rule `localDay`
+ * applies to a turn, and the one that keeps an evening's idle with the evening
+ * rather than with the next morning.
+ */
+export function activeDaysOf(sittings: Sitting[], gaps: IdleStretch[]): ActiveDay[] {
+  const byDay = new Map<
+    string,
+    { sittings: Sitting[]; activeMs: number; idleMs: number; turns: number }
+  >()
+  const dayOf = (at: number) => {
+    const key = localDay(at)
+    const row = byDay.get(key) ?? { sittings: [], activeMs: 0, idleMs: 0, turns: 0 }
+    byDay.set(key, row)
+    return row
+  }
+
+  for (const s of sittings) {
+    const row = dayOf(s.start)
+    row.sittings.push(s)
+    row.activeMs += s.activeMs
+    // A sitting's own internal gaps — the seconds and minutes between turns
+    // while you read a diff. Idle in the same sense as the big ones, and the
+    // 15.6h of it on this machine is the half the old shape hid completely.
+    row.idleMs += s.humanMs
+    row.turns += s.turns
+  }
+
+  // The gaps BETWEEN sittings, each landing on the day it began. Only the
+  // recoverable ones: nights and days off are excluded upstream by
+  // `idleStretchesOf`, and a night charged to a day is a score lost by sleeping.
+  for (const gap of gaps) {
+    if (!gap.withinDay) continue
+    // Night can still clip the edge of an otherwise-waking gap; take out only
+    // the overlap, never the whole stretch. Classifying whole gaps is what
+    // produced a 373% score with negative idle.
+    const waking = gap.ms - nightOverlapMs(gap.from, gap.to)
+    if (waking > 0) dayOf(gap.from).idleMs += waking
+  }
+
+  return [...byDay.entries()]
+    .map(([day, row]) => {
+      const starts = row.sittings.map((s) => s.start)
+      const ends = row.sittings.map((s) => s.end)
+      return {
+        day,
+        // A day whose only entry is a trailing gap has no sittings of its own;
+        // it cannot happen while gaps are keyed to their start, but the bounds
+        // must still be numbers rather than Infinity from an empty Math.min.
+        start: starts.length ? Math.min(...starts) : 0,
+        end: ends.length ? Math.max(...ends) : 0,
+        // The span is what the two halves add up to, not the clock between the
+        // first turn and the last. Those differ precisely by the sleep and the
+        // days off, which is the whole point of excluding them.
+        spanMs: row.activeMs + row.idleMs,
+        activeMs: row.activeMs,
+        idleMs: row.idleMs,
+        turns: row.turns,
+        sittings: row.sittings.length,
+      }
+    })
+    .sort((a, b) => a.day.localeCompare(b.day))
+}
+
+/**
+ * The hours counted as sleep: [NIGHT_FROM, NIGHT_TO) local.
+ *
+ * There has to be a rule of this kind and it has to be crude, because nothing in
+ * a run log says whether you were in bed — and without one the goal charges you
+ * for sleeping, which is unwinnable and would make the whole scoreboard a thing
+ * to ignore. Two cruder rules were tried and both failed on this machine's own
+ * data, which is why the window is narrow and why it is measured by OVERLAP
+ * rather than by classifying whole gaps:
+ *
+ * - "begins and ends on the same local day" puts a 1:23am → 1:16pm gap at the
+ *   top of the worklist as 11.9h of winnable idle. This machine's five busiest
+ *   hours are between 1am and 5am, so working past midnight is the norm and the
+ *   calendar boundary lands in the middle of a working night.
+ * - "a gap containing 4am is entirely sleep" removes the whole of a 6:37am →
+ *   00:16am gap — 17.7 hours, nearly all of it daytime — and produced a 373%
+ *   score with negative idle. A gap is not sleep because it touches a night; it
+ *   is sleep only for the part that overlaps one.
+ *
+ * 01:00–08:00 rather than a wider window because this machine demonstrably works
+ * either side of it. The narrow choice is the conservative one for the goal: it
+ * forgives less, so the target stays honest.
+ */
+const NIGHT_FROM = 1
+const NIGHT_TO = 8
+
+/**
+ * How much of a stretch overlaps the sleeping hours.
+ *
+ * Walks night by night rather than doing modular arithmetic on hours, so a gap
+ * of several days is handled by the same code as one of several hours and
+ * daylight saving stays the Date object's problem. Returns 0 for a stretch
+ * entirely inside the waking day, which is the common case.
+ */
+export function nightOverlapMs(from: number, to: number): number {
+  let total = 0
+  // Start at the night that may already be in progress at `from`.
+  const cursor = new Date(from)
+  cursor.setHours(0, 0, 0, 0)
+  cursor.setDate(cursor.getDate() - 1)
+
+  for (let guard = 0; cursor.getTime() < to && guard < 400; guard += 1) {
+    const start = new Date(cursor)
+    start.setHours(NIGHT_FROM, 0, 0, 0)
+    const end = new Date(cursor)
+    end.setHours(NIGHT_TO, 0, 0, 0)
+    total += Math.max(0, Math.min(to, end.getTime()) - Math.max(from, start.getTime()))
+    cursor.setDate(cursor.getDate() + 1)
+  }
+  return total
+}
+
+/**
+ * The gaps between sittings: every stretch with nothing running.
+ *
+ * `withinDay` marks the ones the goal is about, and there is exactly ONE test:
+ * whether the stretch crosses a day on which no work happened. The 43.8-hour
+ * gap in this machine's history spans a Wednesday nobody opened the laptop, and
+ * counting it puts the single largest item on the worklist beyond anything aide
+ * could do about it.
+ *
+ * There is deliberately no second test for sleep, and the version that had one
+ * is the bug this comment exists to prevent coming back. "Mostly night, so
+ * discard the stretch" threw away a 00:40 → 09:30 gap ENTIRELY — including its
+ * 110 waking minutes — because 420 of its 530 minutes were night. Sleep is
+ * removed by measuring the OVERLAP wherever this is consumed, which takes out
+ * exactly the sleeping part and leaves the rest, so a whole-stretch verdict on
+ * top of it can only double-count the exclusion. That is the same mistake as the
+ * 373% score, one layer up.
+ */
+function idleStretchesOf(sittings: Sitting[]): IdleStretch[] {
+  const worked = new Set(sittings.map((s) => localDay(s.start)))
+  const out: IdleStretch[] = []
+  for (let i = 1; i < sittings.length; i += 1) {
+    const before = sittings[i - 1]
+    const after = sittings[i]
+    if (!before || !after) continue
+    out.push({
+      from: before.end,
+      to: after.start,
+      ms: after.start - before.end,
+      withinDay: !crossesIdleDay(before.end, after.start, worked),
+    })
+  }
+  return out.sort((a, b) => b.ms - a.ms)
+}
+
+/**
+ * Whether a stretch contains a whole calendar day with no work on it.
+ *
+ * Only days strictly BETWEEN the two ends count: the day the gap starts on and
+ * the day it ends on both had work by construction, and a gap from Monday
+ * evening to Tuesday morning crosses no idle day at all.
+ */
+function crossesIdleDay(from: number, to: number, worked: ReadonlySet<string>): boolean {
+  const cursor = new Date(from)
+  cursor.setHours(0, 0, 0, 0)
+  cursor.setDate(cursor.getDate() + 1)
+  for (let guard = 0; cursor.getTime() < to && guard < 400; guard += 1) {
+    if (!worked.has(localDay(cursor.getTime()))) return true
+    cursor.setDate(cursor.getDate() + 1)
+  }
+  return false
+}
+
+/** Where the window's wall-clock went. Pure; see `Sitting` for the unit. */
+export function reduceTime(runs: RunTotals[], from: number, now: number): TimeSplit {
+  const sittings = sittingsOf(runs)
+  const engagedMs = sittings.reduce((n, s) => n + s.spanMs, 0)
+  const activeMs = sittings.reduce((n, s) => n + s.activeMs, 0)
+  const humanMs = sittings.reduce((n, s) => n + s.humanMs, 0)
+
+  // Gaps first: the days are built FROM them, so that an idle stretch crossing
+  // midnight lands on a day rather than falling between two.
+  const idleStretches = idleStretchesOf(sittings)
+  const activeDays = activeDaysOf(sittings, idleStretches)
+  const activeDaySpanMs = activeDays.reduce((n, d) => n + d.spanMs, 0)
+
+  // The longest single gap INSIDE a sitting, which needs the runs again rather
+  // than the sittings: a sitting knows its total human time, not how that time
+  // was distributed, and one 25-minute wait reads very differently from fifty
+  // half-minute ones.
+  //
+  // `prevEnd` is the running maximum rather than the last turn's end, so a short
+  // turn nested inside a longer one cannot open a gap that was never there —
+  // the same overlap that made summing wrong above. A gap longer than the break
+  // is a sitting boundary by definition and belongs to `awayMs`.
+  const ordered = [...runs].sort((a, b) => a.openedAt - b.openedAt)
+  let longestGapMs = 0
+  let longestGapAt: number | null = null
+  let prevEnd = 0
+  for (const run of ordered) {
+    const gap = run.openedAt - prevEnd
+    if (prevEnd && gap > longestGapMs && gap <= IDLE_BREAK_MS) {
+      longestGapMs = gap
+      longestGapAt = prevEnd
+    }
+    prevEnd = Math.max(prevEnd, run.openedAt + run.activeMs)
+  }
+
+  const spans = sittings.map((s) => s.spanMs).sort((a, b) => a - b)
+  return {
+    // Newest first: the sitting you care about is the one you just finished.
+    sittings: [...sittings].reverse(),
+    activeDays,
+    engagedMs,
+    activeMs,
+    humanMs,
+    activeDaySpanMs,
+    // Summed from the days rather than `activeDaySpanMs - activeMs`, so it is
+    // the same arithmetic the per-day rows print and cannot disagree with their
+    // total — and so a turn that ran through a night, whose day clamps its own
+    // idle at zero, cannot drag the headline negative.
+    idleWithinDaysMs: activeDays.reduce((n, d) => n + d.idleMs, 0),
+    // Everything in the window that was not working time: days off, and the
+    // nights inside a working stretch. `activeDaySpanMs` has already had the
+    // nights taken out of it, so the two still partition the window exactly —
+    // which is what `pnpm smoke` asserts, since a scoreboard whose parts do not
+    // add up to the whole is one whose target can be hit by losing time
+    // somewhere it is not counted. Clamped because `from` is local midnight
+    // `days` ago, so a window wider than the history would overshoot.
+    awayMs: Math.max(0, now - from - activeDaySpanMs),
+    activeDayCount: activeDays.length,
+    // Ceil, not round. `from` is local midnight `days-1` days back, so the
+    // window is `days` calendar days but only `days - 1` whole 24-hour periods
+    // plus however far into today it is — which rounds DOWN to `days - 1` for
+    // any reading taken before noon. The page then printed "8 active days of
+    // 7", which reads as a bug in the counting rather than in the label.
+    windowDays: Math.max(1, Math.ceil((now - from) / DAY_MS)),
+    // The three-way reading. `reviewMs` is every sitting's internal idle — the
+    // gaps short enough to have kept the sitting together — and `deadMs` is
+    // what is left of the working span once running and reviewing are out of
+    // it. Derived by subtraction rather than re-summing the gaps so it cannot
+    // disagree with the total it sits under.
+    split: {
+      activeMs,
+      reviewMs: humanMs,
+      deadMs: Math.max(0, activeDaySpanMs - activeMs - humanMs),
+    },
+    idleStretches,
+    medianSpanMs: median(spans),
+    longestGapMs,
+    longestGapAt,
+    breakMs: IDLE_BREAK_MS,
+  }
+}
+
+/**
  * The whole dashboard, from an index and a registry. Pure, and therefore tested.
  *
  * Takes `now` rather than reading the clock so the window is reproducible, which
@@ -437,6 +835,10 @@ export function reduceActivity(
       activeMs: 0,
       costUsd: 0,
       tokens: 0,
+      // Filled in below, once every run has been seen: a project's sittings are
+      // clustered over its whole set, so there is nothing to accumulate here.
+      engagedMs: 0,
+      busyMs: 0,
       lastRunAt: null,
       share: 0,
       sessions: new Set<string>(),
@@ -462,10 +864,31 @@ export function reduceActivity(
   const tokens = runs.reduce((n, r) => n + r.tokens, 0)
   // Sorted once and shared by all three percentile reads below.
   const sortedFinished = [...finished].sort((a, b) => a - b)
+  // Each project's sittings, clustered over ITS OWN runs. Slicing the machine's
+  // sittings by project would be the cheaper spelling and a different figure:
+  // a sitting that jumped between two projects would have its whole span
+  // charged to both, and the column would sum to more than the window holds.
+  //
+  // `busyMs` is the union rather than the summed `activeMs` on the row beside
+  // it, for the reason `Sitting.activeMs` gives: a project's own turns can
+  // overlap — the commit gate's repair attempt runs INSIDE the commit's run —
+  // so a row dividing the sum by the span would be mixing two definitions and
+  // could print a share above 100%. Small here (6 seconds across this machine's
+  // history) and exactly the kind of thing that is not small on someone else's.
+  const engagedOf = new Map<string, { engagedMs: number; busyMs: number }>()
+  for (const projectId of byProject.keys()) {
+    const mine = sittingsOf(runs.filter((r) => r.projectId === projectId))
+    engagedOf.set(projectId, {
+      engagedMs: mine.reduce((n, s) => n + s.spanMs, 0),
+      busyMs: mine.reduce((n, s) => n + s.activeMs, 0),
+    })
+  }
   const projectRows = [...byProject.values()]
     .map(({ sessions: chats, ...row }) => ({
       ...row,
       chats: chats.size,
+      engagedMs: engagedOf.get(row.projectId)?.engagedMs ?? 0,
+      busyMs: engagedOf.get(row.projectId)?.busyMs ?? 0,
       // Against the window's tokens, not the machine's: this is "how much of
       // what I did was this project", and the row sits in a table whose other
       // rows are the rest of that same window.
@@ -494,6 +917,7 @@ export function reduceActivity(
       maxMs: sortedFinished[sortedFinished.length - 1] ?? 0,
       counted: sortedFinished.length,
     },
+    time: reduceTime(runs, from, now),
     commits: body.commits,
     asks: body.asks,
     unattributed,

@@ -172,6 +172,82 @@ Decisions already taken, which are not gaps to fill:
   counting tools would double the only expensive thing here — behind the same
   size+mtime cache `spend.ts` uses, so 667 logs are read once and then free
   (737ms cold, 27ms warm).
+- **The dashboard has a GOAL, and the denominator is the whole design.** The
+  question is "how much of my working time is aide running", the target is to
+  drive the idle half down, and everything hard about it is choosing what to
+  divide by — three candidates were built and two were wrong on this machine's
+  own data. The WINDOW is useless: 21 of the last 30 days ran nothing, so it
+  reports 4.6% and mostly measures sleep. `Sitting` (consecutive turns, gaps
+  under `IDLE_BREAK_MS`) is the opposite failure — it EXCLUDES every gap over
+  half an hour, which is precisely the time the goal is about, so it says 66%
+  and cannot improve no matter what changes. What is left is `ActiveDay`: the
+  waking hours of days that had work, first turn to last. 30.6h of aide across
+  86.5h gives 35%, a number with real headroom that sleeping cannot flatter.
+  The 30-minute break survives as the clustering unit: measured, in-sitting gaps
+  have a median of 57s and a p90 of 8m against a next-thing-up of hours, so the
+  distribution is bimodal with a wide empty middle. Not a setting — a knob would
+  let the figure be tuned until it flattered, which for a number whose job is to
+  be uncomfortable is the one thing it must not do.
+- **Two exclusions keep the goal winnable, and both were got wrong first.** A
+  score you lose by sleeping is one nobody looks at twice, so nights and days off
+  come out — but the near-miss versions are what to know. (1) "A gap within one
+  calendar day is recoverable" puts a 1:23am → 1:16pm stretch at the top of the
+  worklist as 11.9h of winnable idle; this machine's five busiest hours are
+  between 1am and 5am, so working past midnight is normal and the calendar
+  boundary lands mid-night. (2) "A gap containing 4am is entirely sleep" removes
+  the whole of a 6:37am → 00:16am gap — 17.7h, nearly all daytime — which
+  produced a **373% score with negative idle**. The fix is `nightOverlapMs`:
+  measure the OVERLAP with 01:00–08:00, never classify a whole stretch. (3)
+  Subtracting that overlap from a day's outer bounds is also wrong — a day worked
+  6:37am to midnight contains no sleep, but its bounds still span its own night,
+  and the subtraction ate a span holding 3.5h of real work, reporting `span 0.0h`
+  against `aide 3.5h`. Night comes out of the GAPS BETWEEN sittings, because only
+  an interval with nothing running can be sleep. Separately, a stretch crossing a
+  day with no work is a day off, not idle: the 43.8h absence in this machine's
+  history was the largest item on the worklist until `crossesIdleDay` existed.
+  `pnpm smoke` pins every one of these, including the arithmetic of
+  `nightOverlapMs` directly — an off-by-one there moves the score and nothing on
+  the page would look wrong.
+- **A day is built by ADDING UP intervals, never by measuring its own bounds.**
+  `ActiveDay.spanMs` is `activeMs + idleMs`, and the version that computed
+  `end - start` of the day's sittings had a hole big enough to invalidate the
+  headline: an idle stretch running from one day into the next belongs to
+  NEITHER day's bounds. On this machine the four largest gaps all cross midnight,
+  so 71.5 of 111.6 recoverable hours were missing from the score **while being
+  listed directly underneath it** as the top of the worklist — the page visibly
+  disagreed with itself and the wrong half was the number in 34px type. Gaps are
+  attributed to the day they START on, the same rule `localDay` gives a turn.
+- **There is ONE exclusion test on a gap, and adding a second is the trap.**
+  `withinDay` asks only whether the stretch crossed a day nobody worked. Sleep is
+  removed by OVERLAP at the point of consumption, so a whole-stretch "mostly
+  night, discard it" verdict on top of that double-counts: it threw away a
+  00:40 → 09:30 gap along with the 110 waking minutes inside it. Every version of
+  this bug — the 373% score, and this one — is the same shape, classifying a
+  whole interval where only part of it qualifies.
+- **"Idle" is two things, and merging them hides the answer.** The gaps inside a
+  sitting are you reading a diff and typing the next thing; the brief calls that
+  the second gate, so it is the product working rather than failing, and driving
+  it to zero would be a worse aide. The gaps between sittings are aide finished
+  with nothing queued. On this machine that is 15.6h against 96.8h — same bucket,
+  nothing in common — so `WorkSplit` reports running / reviewing / dead and the
+  bar draws three segments. The split is at `IDLE_BREAK_MS`, the same threshold
+  the clustering already uses, so there is one number to understand and not two.
+  The reading it produces is the one worth having: the gap is NOT the review.
+- **That share's numerator is a UNION, and the tile above it is a SUM, and they
+  are both right.** aide runs one agent per project but several projects at
+  once, so two turns overlap on the clock: this machine's 30 days hold 33.0h of
+  summed turn duration over 30.2h of wall-clock, and FOUR of its 37 sittings had
+  summed "agent time" exceeding their own span outright. Summing is correct for
+  `Activity.activeMs`, which asks how much work was done; a share of wall-clock
+  needs a numerator that cannot exceed its denominator, so `Sitting.activeMs`
+  merges the intervals instead. The obvious tidy-up — one activeMs for the page
+  — reintroduces a bar that can be more than 100% full. The `agent time` tile
+  says it sums, in its own tooltip, because the page would otherwise appear to
+  disagree with itself. `pnpm smoke` asserts the halves partition their span
+  EXACTLY rather than approximately, over a timeline with nested and concurrent
+  turns. It also pins the failure that is invisible otherwise — `runIndex` is a
+  directory listing, so an unsorted cluster gives one sitting per run, and a
+  machine of one-turn sittings reads as 100% busy.
 - **The punchcard's ramp is by quantile, and its steps are lifted off the empty
   tint.** Both are the difference between a heatmap and a decoration. Linear on
   the peak is the obvious version: with one hour at 27 turns and most occupied

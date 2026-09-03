@@ -349,6 +349,200 @@ function Punchcard({ cells }: { cells: HourCell[] }) {
 }
 
 /**
+ * How close aide is to running whenever you are working. The page's scoreboard.
+ *
+ * The first version of this section reported 66% and treated away time as
+ * context it explicitly refused to score — right for "is aide efficient while I
+ * watch it", wrong for the goal, which is that the idle time IS the thing to
+ * drive down. So the framing is inverted: one number, one target, and a
+ * worklist of the specific stretches that make up the gap.
+ *
+ * The denominator is the hard part and two obvious ones are both unusable. The
+ * WINDOW includes the 21 days of 30 this machine ran nothing — a day you did not
+ * work is not a day aide wasted, and scoring it makes the number unwinnable.
+ * The SITTINGS exclude every gap over half an hour, which is exactly the time
+ * being targeted, so that reading can only ever say 66% and cannot improve. What
+ * is left is the waking hours of days you did work: 30.6h of aide across 86.5h,
+ * so 35% — a number with real headroom that no amount of sleeping can flatter.
+ *
+ * Sleep and days off are subtracted rather than forgiven quietly, and the
+ * section says both figures, because a scoreboard that hides its exclusions is
+ * one nobody can check.
+ */
+function Score({ time }: { time: Activity["time"] }) {
+  const { activeDaySpanMs, activeMs, awayMs } = time
+  // No working days in the window is a real state — a week you did not open
+  // aide — and every share below would divide by zero.
+  if (activeDaySpanMs === 0) {
+    return (
+      <section className="rounded border border-line bg-chrome p-3">
+        <h3 className="font-sans text-[11px] font-semibold tracking-wide text-fg-muted uppercase">
+          how much of your working time aide is running
+        </h3>
+        <p className="mt-2 font-sans text-[11px] text-fg-dim">
+          Nothing ran in this window, so there is no working time to measure against.
+        </p>
+      </section>
+    )
+  }
+
+  const pct = (activeMs / activeDaySpanMs) * 100
+  const { reviewMs, deadMs } = time.split
+  // Three shares of one span, so the segments are the figures rather than an
+  // illustration of them.
+  const share = (n: number) => (n / activeDaySpanMs) * 100
+
+  return (
+    <section className="rounded border border-line bg-chrome p-3">
+      <div className="flex items-baseline justify-between">
+        <h3 className="font-sans text-[11px] font-semibold tracking-wide text-fg-muted uppercase">
+          how much of your working time aide is running
+        </h3>
+        <span
+          className="font-sans text-[10px] text-fg-dim"
+          title={`Measured over the ${time.activeDayCount} day${time.activeDayCount === 1 ? "" : "s"} in this window that had any work, from the first turn to the last, with sleeping hours taken out. Days you did not work at all are excluded — see 'not counted' below.`}
+        >
+          {time.activeDayCount} working day{time.activeDayCount === 1 ? "" : "s"} of{" "}
+          {time.windowDays}
+        </span>
+      </div>
+
+      {/* The number, big. This is the one figure the page exists to move, so it
+          is the thing the eye lands on rather than a percentage buried in a
+          sentence under a chart. */}
+      <div className="mt-3 flex items-baseline gap-3">
+        <span className="font-sans text-[34px] leading-none tabular-nums text-fg">
+          {pct.toFixed(0)}%
+        </span>
+        <span className="font-sans text-[11px] leading-tight text-fg-dim">
+          of your working hours
+          <br />
+          had aide running
+        </span>
+      </div>
+
+      {/* THREE segments, not two, and that is the whole reading. "Idle" was one
+          bucket holding two things that want opposite responses: the minutes
+          between turns while you read a diff — which the brief calls the second
+          gate, so it is the product working — and the hours where aide sat
+          finished with nothing queued. On this machine that is 15.6h against
+          96.8h. They partition the span exactly; `pnpm smoke` asserts it. */}
+      <div className="mt-3 flex h-2.5 gap-[2px] overflow-hidden">
+        <span
+          className="rounded-[2px] bg-graph-1"
+          style={{ width: `${share(activeMs)}%` }}
+          title={`${duration(activeMs)} — a turn was running`}
+        />
+        <span
+          className="rounded-[2px] bg-graph-4"
+          style={{ width: `${share(reviewMs)}%` }}
+          title={`${duration(reviewMs)} — between turns in a sitting: reading, typing, deciding`}
+        />
+        <span
+          className="rounded-[2px] bg-warn"
+          style={{ width: `${share(deadMs)}%` }}
+          title={`${duration(deadMs)} — aide finished, nothing queued`}
+        />
+      </div>
+
+      <div className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-1 font-sans text-[11px]">
+        <span className="flex items-baseline gap-1.5">
+          <span className="size-2 shrink-0 translate-y-[0.1em] rounded-sm bg-graph-1" aria-hidden="true" />
+          <span className="tabular-nums text-fg">{duration(activeMs)}</span>
+          <span className="text-fg-dim">aide running</span>
+        </span>
+        <span className="flex items-baseline gap-1.5">
+          <span className="size-2 shrink-0 translate-y-[0.1em] rounded-sm bg-graph-4" aria-hidden="true" />
+          <span className="tabular-nums text-fg-muted">{duration(reviewMs)}</span>
+          <span className="text-fg-dim">you, between turns</span>
+        </span>
+        <span className="flex items-baseline gap-1.5">
+          <span className="size-2 shrink-0 translate-y-[0.1em] rounded-sm bg-warn" aria-hidden="true" />
+          <span className="tabular-nums text-warn">{duration(deadMs)}</span>
+          <span className="text-fg-dim">dead — the target</span>
+        </span>
+        <span className="flex-1" />
+        <span
+          className="text-fg-dim"
+          title="Days with no work at all, and the hours between 1am and 8am. Neither is something aide can win back, so neither is counted against the score."
+        >
+          {duration(awayMs)} not counted
+        </span>
+      </div>
+
+      {/* The reading in a sentence, because the three-way split is the one
+          thing on this page somebody arrives with a theory about. It names
+          which of the two idle halves is the one to attack. */}
+      <p className="mt-3 border-t border-line pt-3 font-sans text-[11px] leading-relaxed text-fg-dim">
+        Of {duration(activeDaySpanMs)} working,{" "}
+        <span className="text-warn">{duration(deadMs)}</span> was aide sitting finished with
+        nothing queued — {share(deadMs).toFixed(0)}% of the time you were at it. Only{" "}
+        {duration(reviewMs)} went on reading and typing between turns, so the gap is not the
+        review: it is the {time.idleStretches.filter((s) => s.withinDay).length} stretches where
+        nothing was waiting to run.
+      </p>
+    </section>
+  )
+}
+
+/**
+ * The score, day by day. Whether the number above is moving.
+ *
+ * A single percentage over a window says where you are and nothing about the
+ * direction, which for a goal is half the information — and the daily spread is
+ * wide enough to matter: this machine's nine working days run from 21% to 80%,
+ * so the 35% headline describes none of them well.
+ *
+ * Bars are the working span and the fill is aide's share of it, so a short
+ * intense day and a long thin one are visibly different shapes rather than two
+ * percentages that happen to be equal. Height carries hours; fill carries the
+ * score.
+ */
+function ScoreByDay({ days }: { days: Activity["time"]["activeDays"] }) {
+  if (days.length === 0) return null
+  const peak = Math.max(...days.map((d) => d.spanMs))
+
+  return (
+    <section className="rounded border border-line bg-chrome p-3">
+      <h3 className="font-sans text-[11px] font-semibold tracking-wide text-fg-muted uppercase">
+        each working day
+      </h3>
+      <div className="mt-3 flex h-24 items-end gap-1">
+        {days.map((day) => {
+          const pct = day.spanMs ? (day.activeMs / day.spanMs) * 100 : 0
+          return (
+            <div
+              key={day.day}
+              className="group flex h-full flex-1 flex-col justify-end"
+              title={`${shortDay(day.day)} — aide ran ${duration(day.activeMs)} of ${duration(day.spanMs)} working (${pct.toFixed(0)}%), leaving ${duration(day.idleMs)} idle. ${day.turns} turns over ${day.sittings} sitting${day.sittings === 1 ? "" : "s"}.`}
+            >
+              {/* The column is the day's working span; the filled part at the
+                  bottom is aide. Anchored to the baseline so the fill grows the
+                  way the bar does. */}
+              <div
+                className="flex w-full flex-col justify-end overflow-hidden rounded-t-[2px] bg-input"
+                style={{ height: `${Math.max(4, (day.spanMs / peak) * 100)}%` }}
+              >
+                <div className="w-full bg-graph-1" style={{ height: `${pct}%` }} />
+              </div>
+            </div>
+          )
+        })}
+      </div>
+      <div className="mt-1.5 flex items-baseline justify-between font-sans text-[10px] text-fg-dim">
+        <span>{days[0] ? shortDay(days[0].day) : ""}</span>
+        <span className="text-fg-muted">
+          {/* Named so the two encodings are not left to be inferred: the height
+              is hours, the fill is the score, and they move independently. */}
+          bar height = hours worked · fill = aide running
+        </span>
+        <span>{days[days.length - 1] ? shortDay(days[days.length - 1]!.day) : ""}</span>
+      </div>
+    </section>
+  )
+}
+
+/**
  * Where the work went, by project.
  *
  * A table rather than a pie: these are magnitudes to be compared and read
@@ -413,6 +607,21 @@ function Projects({
                 </span>
                 <span className="w-12 shrink-0 text-right tabular-nums text-fg-dim">
                   {duration(row.activeMs)}
+                </span>
+                {/* This project's own busy share, which is the reason the row
+                    carries `engagedMs` at all: the machine-wide 66% is an
+                    average over projects that differ enormously — 62% here
+                    against 36% on one that is mostly read-and-think. A project
+                    with no sittings yet shows nothing rather than 0%. */}
+                <span
+                  className="w-10 shrink-0 text-right tabular-nums text-fg-dim"
+                  title={
+                    row.engagedMs
+                      ? `${duration(row.engagedMs)} at this project, of which ${duration(row.busyMs)} was a turn running.`
+                      : undefined
+                  }
+                >
+                  {row.engagedMs ? `${Math.round((row.busyMs / row.engagedMs) * 100)}%` : "·"}
                 </span>
                 <span className="w-10 shrink-0 text-right tabular-nums text-fg-dim">
                   {row.chats} ch
@@ -780,7 +989,11 @@ export function Dashboard({
               <Stat
                 value={duration(activity.activeMs)}
                 label="agent time"
-                hint="The turns' own time added up — not the hours between them."
+                // Says it SUMS, because the section below prints a smaller
+                // number for what looks like the same thing: two projects
+                // running at once is two turns' duration over one minute of
+                // clock. Without this the page appears to disagree with itself.
+                hint="The turns' own durations added up — not the hours between them, and turns in different projects that ran at the same time are counted twice. See 'where the time went' for the wall-clock reading."
               />
               <Stat value={`${activity.runs}`} label="turns" hint={`Over ${activity.chats} conversations.`} />
               <Stat
@@ -804,6 +1017,13 @@ export function Dashboard({
                 value={compact(activity.tools.reduce((n, t) => n + t.calls, 0))}
               />
             </div>
+
+            {/* First, above everything. The page has a goal now, and the
+                figure that tracks it outranks the totals it used to sit under
+                — those say what happened, this says how far there is to go. */}
+            <Score time={activity.time} />
+
+            <ScoreByDay days={activity.time.activeDays} />
 
             <DailyBars days={activity.daily} />
 

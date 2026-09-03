@@ -1903,6 +1903,368 @@ console.log("\nactivity")
     check("a turn that never ran is not counted", d.counted === 10, `${d.counted}`)
   }
 
+  // Where the wall-clock went. The figure this page exists to answer and the
+  // one whose failure mode is entirely silent: a split that stops partitioning
+  // its span still draws as a perfectly plausible two-segment bar, and every
+  // number on it stays the right order of magnitude.
+  {
+    const { IDLE_BREAK_MS, reduceTime, sittingsOf } = await import("./activity.js")
+    const MIN = 60_000
+    // A turn opening `openedAt` and running `activeMs`, at a minute offset from
+    // a fixed base — so every case below reads as a timeline rather than as
+    // epoch arithmetic.
+    const base = at(0, 9)
+    const turn = (id: string, startMin: number, lenMin: number, projectId = alpha) =>
+      run(id, projectId, "s1", base + startMin * MIN, 0, 0, "opus", "success", lenMin * MIN)
+
+    {
+      // Two turns 5 minutes apart: one sitting, and the gap is yours.
+      const s = sittingsOf([turn("a", 0, 10), turn("b", 15, 5)])
+      check("turns close together are one sitting", s.length === 1, `${s.length}`)
+      check("whose span reaches from first open to last end", s[0]?.spanMs === 20 * MIN)
+      check("agent time is the turns", s[0]?.activeMs === 15 * MIN, `${s[0]?.activeMs}`)
+      check("and the gap between them is yours", s[0]?.humanMs === 5 * MIN, `${s[0]?.humanMs}`)
+    }
+    {
+      // A gap longer than the break splits them. The hours between are away,
+      // and belong to neither sitting.
+      const far = IDLE_BREAK_MS / MIN + 10
+      const s = sittingsOf([turn("a", 0, 5), turn("b", far, 5)])
+      check("a long gap ends the sitting", s.length === 2, `${s.length}`)
+      check("and no sitting absorbs the time between", s[0]?.humanMs === 0 && s[1]?.humanMs === 0)
+    }
+    {
+      // The bug that made summing wrong: two projects running at the same time.
+      // One agent per project, several projects at once — so 10 minutes of
+      // clock can hold 20 minutes of turn duration, and a share built on the
+      // sum would exceed 100%.
+      const s = sittingsOf([turn("a", 0, 10, alpha), turn("b", 0, 10, beta)])
+      check("concurrent turns are one sitting", s.length === 1, `${s.length}`)
+      check("spanning the clock, not the sum", s[0]?.spanMs === 10 * MIN, `${s[0]?.spanMs}`)
+      check(
+        "agent time is the union, so it cannot exceed the span",
+        s[0]?.activeMs === 10 * MIN,
+        `${s[0]?.activeMs} — summing would give ${20 * MIN}`,
+      )
+      check("and none of it is charged to you", s[0]?.humanMs === 0, `${s[0]?.humanMs}`)
+      check("the sitting counts both projects", s[0]?.projects === 2, `${s[0]?.projects}`)
+    }
+    {
+      // A short turn wholly inside a long one. The nested turn must neither
+      // shorten the sitting nor open a gap that never existed.
+      const s = sittingsOf([turn("long", 0, 30, alpha), turn("short", 10, 5, beta)])
+      check("a nested turn does not shorten the sitting", s[0]?.spanMs === 30 * MIN, `${s[0]?.spanMs}`)
+      check("nor invent idle time inside it", s[0]?.humanMs === 0, `${s[0]?.humanMs}`)
+    }
+    {
+      // The property the whole section rests on, over a messier timeline: the
+      // two halves partition the span EXACTLY. Not "approximately", and not
+      // "after a clamp" — a clamp is what hides the sign error this catches.
+      const messy = [
+        turn("a", 0, 10, alpha),
+        turn("b", 4, 12, beta),
+        turn("c", 20, 3, alpha),
+        turn("d", 21, 1, beta),
+        turn("e", 40, 8, alpha),
+      ]
+      const s = sittingsOf(messy)
+      check(
+        "every sitting's halves sum to its span",
+        s.every((x) => x.activeMs + x.humanMs === x.spanMs),
+        JSON.stringify(s.map((x) => [x.spanMs, x.activeMs, x.humanMs])),
+      )
+      check("and none of them is negative", s.every((x) => x.humanMs >= 0 && x.activeMs >= 0))
+      check("nor over-busy", s.every((x) => x.activeMs <= x.spanMs))
+
+      const t = reduceTime(messy, base - 864e5, base + 864e5)
+      check("the totals partition too", t.activeMs + t.humanMs === t.engagedMs)
+      check("engaged is the sittings' spans", t.engagedMs === s.reduce((n, x) => n + x.spanMs, 0))
+    }
+    {
+      // `runIndex` is a directory listing, so runs arrive in whatever order the
+      // filesystem gives. Clustering an unsorted list produces one sitting per
+      // run — a machine that reads as 100% busy, since a one-turn sitting has
+      // no gaps in it. The reducer sorts its own copy; this is what says so.
+      const ordered = [turn("a", 0, 5), turn("b", 10, 5), turn("c", 20, 5)]
+      const shuffled = [ordered[2]!, ordered[0]!, ordered[1]!]
+      check(
+        "runs are clustered in time order, whatever order they arrive in",
+        sittingsOf(shuffled).length === 1,
+        `${sittingsOf(shuffled).length}`,
+      )
+      check(
+        "and the caller's array is not reordered underneath it",
+        shuffled[0]?.runId === "c",
+      )
+    }
+    {
+      // Away is everything outside a working day, and is never a denominator —
+      // but it must not go negative either, which it would for a window wider
+      // than the history it covers.
+      const t = reduceTime([turn("a", 0, 10)], base - 5 * MIN, base + 20 * MIN)
+      check("away is what the window has left over", t.awayMs === 15 * MIN, `${t.awayMs}`)
+      const narrow = reduceTime([turn("a", 0, 10)], base, base + MIN)
+      check("and never negative", narrow.awayMs === 0, `${narrow.awayMs}`)
+    }
+    {
+      // The scoreboard. Its denominator is the working days, and the property
+      // that has to hold is that the score cannot be gamed by NOT working: a
+      // day with no turns must not appear, and the two halves must partition
+      // the working span exactly or a target can be hit by losing time
+      // somewhere it is not counted.
+      const t = reduceTime(
+        // 9am-9:10, then 2pm-2:20 the same day: one working day, two sittings,
+        // and the ~4h50m between them is the recoverable idle.
+        [turn("a", 0, 10), turn("b", 300, 20)],
+        base - 864e5,
+        base + 864e5,
+      )
+      check("a day with work is an active day", t.activeDayCount === 1, `${t.activeDayCount}`)
+      check(
+        "whose span runs first turn to last",
+        t.activeDaySpanMs === 320 * MIN,
+        `${t.activeDaySpanMs}`,
+      )
+      check("aide's share is the union of its turns", t.activeMs === 30 * MIN, `${t.activeMs}`)
+      check(
+        "and the idle is the rest, exactly",
+        t.idleWithinDaysMs === 290 * MIN,
+        `${t.idleWithinDaysMs}`,
+      )
+      check(
+        "the two halves partition the working span",
+        t.activeMs + t.idleWithinDaysMs === t.activeDaySpanMs,
+      )
+      check(
+        "the per-day rows sum to the headline idle",
+        t.activeDays.reduce((n, d) => n + d.idleMs, 0) === t.idleWithinDaysMs,
+      )
+      check(
+        "and no day claims more aide time than it has span",
+        t.activeDays.every((d) => d.activeMs <= d.spanMs),
+      )
+    }
+    {
+      // Sleep is not charged to the goal, and this is the case that broke two
+      // earlier rules. Work at 11pm, then again at 10am: the gap is mostly
+      // night, so it must not appear as recoverable idle — otherwise the score
+      // is lost by going to bed, and the target is unreachable by construction.
+      const late = new Date(2026, 8, 2, 23, 0, 0).getTime()
+      const nightRun = (id: string, startMin: number, lenMin: number) =>
+        run(id, alpha, "s1", late + startMin * MIN, 0, 0, "opus", "success", lenMin * MIN)
+      const t = reduceTime([nightRun("a", 0, 10), nightRun("b", 660, 10)], late - 864e5, late + 864e5)
+      const overnight = t.idleStretches.find((s) => s.ms > 60 * MIN)
+      check("an overnight gap is found", overnight !== undefined)
+      // It IS on the worklist: it happened between two working days, and only a
+      // day off takes a stretch off the list. Sleep is removed from it by
+      // overlap, not by discarding the whole thing — the version that discarded
+      // it threw away the waking hours either side with it.
+      check(
+        "an overnight gap between working days is still counted",
+        overnight?.withinDay === true,
+        "only a day nobody worked takes a stretch off the list",
+      )
+      // 23:10 -> 10:00 is 10h50m, of which 01:00-08:00 is sleep. What is left is
+      // 110 minutes of evening and 120 of morning: real waking time in which
+      // nothing ran, and exactly what the goal is about. Forgiving all of it —
+      // which "mostly night, discard" did — is how a target quietly stops
+      // measuring the thing it is for.
+      check(
+        "only the sleeping part is forgiven",
+        t.idleWithinDaysMs === 230 * MIN,
+        `${t.idleWithinDaysMs / MIN}m, expected 230m (110m evening + 120m morning)`,
+      )
+      check(
+        "the night itself is charged to nobody",
+        t.activeDaySpanMs === (20 + 230) * MIN,
+        `${t.activeDaySpanMs / MIN}m`,
+      )
+      check("the halves still partition", t.activeMs + t.idleWithinDaysMs === t.activeDaySpanMs)
+      check(
+        "and a gap between sittings is dead time, not review",
+        t.split.deadMs === 230 * MIN && t.split.reviewMs === 0,
+        `dead ${t.split.deadMs / MIN}m review ${t.split.reviewMs / MIN}m`,
+      )
+    }
+    {
+      // The case the night subtraction exists for, and the one that only shows
+      // up on a machine that works past midnight — which this one does: its
+      // five busiest hours are between 1am and 5am. Both sittings start on the
+      // same calendar day (00:30 and 09:30), so they are ONE working day whose
+      // span contains the 01:00-08:00 window. Without the subtraction that
+      // sleep is idle charged to the goal.
+      const small = new Date(2026, 8, 2, 0, 30, 0).getTime()
+      const nightRun = (id: string, startMin: number, lenMin: number) =>
+        run(id, alpha, "s1", small + startMin * MIN, 0, 0, "opus", "success", lenMin * MIN)
+      // 00:30-00:40, then 09:30-09:40: 9h10m of clock holding a 7h night.
+      const t = reduceTime([nightRun("a", 0, 10), nightRun("b", 540, 10)], small - 864e5, small + 864e5)
+      check("both sittings fall on one working day", t.activeDayCount === 1, `${t.activeDayCount}`)
+      check(
+        "whose span has the night taken out of it",
+        t.activeDaySpanMs === (550 - 420) * MIN,
+        `${t.activeDaySpanMs / MIN}m, expected ${(550 - 420)}m`,
+      )
+      check(
+        "so only the waking gap is the target",
+        t.idleWithinDaysMs === (550 - 420 - 20) * MIN,
+        `${t.idleWithinDaysMs / MIN}m`,
+      )
+      check("and the halves still partition", t.activeMs + t.idleWithinDaysMs === t.activeDaySpanMs)
+      check("the day never claims more aide than span", t.activeDays.every((d) => d.activeMs <= d.spanMs))
+    }
+    {
+      // A gap that crosses a day nobody worked is a day off, not idle. This is
+      // the 43-hour stretch in this machine's history, which was the largest
+      // item on the worklist before the rule existed — and nothing aide does
+      // can recover a day the laptop stayed shut.
+      const t = reduceTime(
+        [turn("a", 0, 10), turn("b", 60 * 48, 10)],
+        base - 864e5,
+        base + 5 * 864e5,
+      )
+      const long = t.idleStretches.find((s) => s.ms > 24 * 60 * MIN)
+      check("a multi-day absence is found", long !== undefined, `${t.idleStretches.length}`)
+      check(
+        "and is not called recoverable",
+        long?.withinDay === false,
+        "a day with no work at all is not the product's fault",
+      )
+      check("it is two working days, not one span", t.activeDayCount === 2, `${t.activeDayCount}`)
+    }
+    {
+      // An idle stretch that crosses midnight must land ON a day, and this is
+      // the bug the whole shape was rewritten for. When a day's span was
+      // `end - start` of its own sittings, a gap running from one day into the
+      // next belonged to NEITHER: on this machine the four largest gaps all
+      // cross midnight, and 71.5 of 111.6 recoverable hours were missing from
+      // the score while being listed underneath it as the top of the worklist.
+      // The page disagreed with itself and the wrong half was the headline.
+      const evening = new Date(2026, 8, 2, 20, 0, 0).getTime()
+      const acrossRun = (id: string, startMin: number, lenMin: number) =>
+        run(id, alpha, "s1", evening + startMin * MIN, 0, 0, "opus", "success", lenMin * MIN)
+      // 20:00-20:10, then 22:00-22:10 the NEXT day: a 25h50m gap over two
+      // working days, all of it waking except one night.
+      const t = reduceTime(
+        [acrossRun("a", 0, 10), acrossRun("b", 26 * 60, 10)],
+        evening - 864e5,
+        evening + 3 * 864e5,
+      )
+      const crossing = t.idleStretches.find((s) => s.ms > 24 * 60 * MIN)
+      check("a gap crossing midnight is found", crossing !== undefined)
+      check("and it counts, since both ends are working days", crossing?.withinDay === true)
+      check(
+        "its waking hours reach the score",
+        // 25h50m total, minus one 7h night = 18h50m.
+        t.idleWithinDaysMs === (26 * 60 - 10 - 420) * MIN,
+        `${t.idleWithinDaysMs / MIN}m, expected ${26 * 60 - 10 - 420}m`,
+      )
+      check(
+        "the day totals still sum to the headline",
+        t.activeDays.reduce((n, d) => n + d.idleMs, 0) === t.idleWithinDaysMs,
+      )
+      check(
+        "and the three-way split sums to the working span",
+        t.split.activeMs + t.split.reviewMs + t.split.deadMs === t.activeDaySpanMs,
+      )
+    }
+    {
+      // The three-way split is the page's main reading, and the line between
+      // its two idle halves is the sitting break: a gap that kept a sitting
+      // together is you reading a diff, one that ended a sitting is dead time.
+      // Folding them together is what the old single 'idle' figure did.
+      const t = reduceTime(
+        // Two turns 5 minutes apart (review), then a 3-hour gap (dead), then one more.
+        [turn("a", 0, 10), turn("b", 15, 5), turn("c", 200, 10)],
+        base - 864e5,
+        base + 864e5,
+      )
+      check("review is the gap inside the sitting", t.split.reviewMs === 5 * MIN, `${t.split.reviewMs / MIN}m`)
+      check(
+        "dead is the gap that ended it",
+        t.split.deadMs === (200 - 20) * MIN,
+        `${t.split.deadMs / MIN}m`,
+      )
+      check("running is the turns", t.split.activeMs === 25 * MIN, `${t.split.activeMs / MIN}m`)
+      check(
+        "and the three partition the working span",
+        t.split.activeMs + t.split.reviewMs + t.split.deadMs === t.activeDaySpanMs,
+      )
+      check(
+        "review plus dead is the idle the bar draws",
+        t.split.reviewMs + t.split.deadMs === t.idleWithinDaysMs,
+      )
+      check("no part is negative", t.split.deadMs >= 0 && t.split.reviewMs >= 0)
+    }
+    {
+      // The night arithmetic itself, which every figure above leans on. Checked
+      // directly because an off-by-one here moves the score and nothing on the
+      // page would look wrong.
+      const { nightOverlapMs } = await import("./activity.js")
+      const on = (day: number, hour: number, min = 0) =>
+        new Date(2026, 8, day, hour, min, 0).getTime()
+      check("a daytime stretch overlaps no night", nightOverlapMs(on(1, 9), on(1, 17)) === 0)
+      check("an hour inside the night counts", nightOverlapMs(on(1, 2), on(1, 3)) === 60 * MIN)
+      check(
+        "an overnight stretch counts the whole window",
+        nightOverlapMs(on(1, 23), on(2, 9)) === 7 * 60 * MIN,
+        `${nightOverlapMs(on(1, 23), on(2, 9)) / MIN}`,
+      )
+      check(
+        "and several days count several nights",
+        nightOverlapMs(on(1, 0), on(4, 0)) === 21 * 60 * MIN,
+        `${nightOverlapMs(on(1, 0), on(4, 0)) / MIN}`,
+      )
+      check(
+        "a stretch ending mid-night counts only what it covers",
+        nightOverlapMs(on(1, 23), on(2, 3)) === 2 * 60 * MIN,
+        `${nightOverlapMs(on(1, 23), on(2, 3)) / MIN}`,
+      )
+    }
+    {
+      // The longest in-sitting gap names a real wait. A gap wider than the
+      // break is a sitting boundary and belongs to `away`, not to this.
+      const t = reduceTime(
+        [turn("a", 0, 1), turn("b", 12, 1), turn("c", 20, 1)],
+        base - 864e5,
+        base + 864e5,
+      )
+      check("the longest wait is the widest in-sitting gap", t.longestGapMs === 11 * MIN, `${t.longestGapMs}`)
+      check("and it is dated", t.longestGapAt === base + MIN, `${t.longestGapAt}`)
+      const split = reduceTime([turn("a", 0, 1), turn("b", 999, 1)], base - 864e5, base + 864e5)
+      check("a gap that ended the sitting is not a wait", split.longestGapMs === 0, `${split.longestGapMs}`)
+    }
+    {
+      // An empty window divides by nothing. The renderer guards this too, but a
+      // NaN reaching it would already be on the wire.
+      const t = reduceTime([], now - 7 * 864e5, now)
+      check("no sittings is not a crash", t.engagedMs === 0 && t.sittings.length === 0)
+      check("and away is the whole window", t.awayMs === 7 * 864e5, `${t.awayMs}`)
+    }
+    {
+      // The project column. Its share divides `busyMs` by `engagedMs`, both of
+      // which are that project's own — a slice of the machine's sittings would
+      // charge a two-project sitting's whole span to each of them, and the
+      // column would sum to more than the window holds.
+      const mixed = [turn("a", 0, 10, alpha), turn("b", 0, 10, beta), turn("c", 12, 2, alpha)]
+      const rows = reduceActivity(mixed, projects, now, 7, NO_BODY, 0).projects
+      const a = rows.find((p) => p.projectId === alpha)
+      const b = rows.find((p) => p.projectId === beta)
+      check("a project's engaged time is its own", a?.engagedMs === 14 * MIN, `${a?.engagedMs}`)
+      check("and beta's is only its one turn", b?.engagedMs === 10 * MIN, `${b?.engagedMs}`)
+      check(
+        "a busy share can never exceed its span",
+        rows.every((p) => p.busyMs <= p.engagedMs),
+        JSON.stringify(rows.map((p) => [p.busyMs, p.engagedMs])),
+      )
+      check("and busy time is not the summed activeMs", a?.busyMs === 12 * MIN, `${a?.busyMs}`)
+    }
+    check(
+      "the break is half an hour, and not a setting",
+      IDLE_BREAK_MS === 30 * 60_000,
+      `${IDLE_BREAK_MS}`,
+    )
+  }
+
   check("no runs is not a crash", reduceActivity([], projects, now, 7, NO_BODY, 0).runs === 0)
   check("and shares do not divide by zero", reduceActivity([], projects, now, 7, NO_BODY, 0).projects.length === 0)
 
