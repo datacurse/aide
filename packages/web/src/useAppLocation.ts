@@ -78,7 +78,10 @@ function rememberChat(loc: AppLocation): void {
   if (!loc.projectId) return
   try {
     const all = readOpenChats()
-    all[loc.projectId] = formatLocation(loc)
+    // Stored WITHOUT the dashboard prefix. This records which chat a project was
+    // left on, and the dashboard is not a chat — saving it here would mean
+    // arriving at a project from anywhere reopened the dashboard over it.
+    all[loc.projectId] = formatLocation({ ...loc, activity: false })
     window.localStorage.setItem(REMEMBERED_CHATS, JSON.stringify(all))
   } catch {
     /* the selection still holds for this page */
@@ -86,6 +89,19 @@ function rememberChat(loc: AppLocation): void {
 }
 
 export interface AppLocation {
+  /**
+   * The dashboard is open, over everything else.
+   *
+   * A field beside the project rather than a project id of its own, because it
+   * is not a place in the four panes — it is the whole window, and closing it
+   * has to put you back exactly where you were. Keeping the project and chat
+   * alongside is what makes that free: `close` clears this one flag and the
+   * panes behind it were never navigated away from.
+   *
+   * In the URL like everything else, so a reload lands back on it and Back
+   * steps out of it rather than out of the app.
+   */
+  activity: boolean
   projectId: string | null
   /** A conversation the daemon knows about. Null when an unstarted one is open. */
   sessionId: string | null
@@ -102,40 +118,62 @@ export interface AppLocation {
 }
 
 const EMPTY: AppLocation = {
+  activity: false,
   projectId: null,
   sessionId: null,
   draftId: null,
 }
 
 export function parseLocation(hash: string): AppLocation {
-  // "#/p/<projectId>", "#/p/<projectId>/<sessionId>" or "#/p/<projectId>/new/<draftId>".
-  const parts = hash.replace(/^#\/?/, "").split("/").filter(Boolean)
-  if (parts[0] !== "p" || !parts[1]) return EMPTY
-  const projectId = parts[1]
+  // "#/p/<projectId>", "#/p/<projectId>/<sessionId>" or "#/p/<projectId>/new/<draftId>",
+  // optionally under a leading "#/activity/…" when the dashboard is open over it.
+  let parts = hash.replace(/^#\/?/, "").split("/").filter(Boolean)
 
-  if (parts[2] === "new") return { projectId, sessionId: null, draftId: parts[3] ?? null }
+  // The dashboard is a PREFIX rather than a location of its own, so the project
+  // and chat underneath it survive in the URL — which is what lets closing it
+  // put you back where you were, including after a reload.
+  const activity = parts[0] === "activity"
+  if (activity) parts = parts.slice(1)
+
+  if (parts[0] !== "p" || !parts[1]) return { ...EMPTY, activity }
+  const projectId = parts[1]
+  const at = (rest: Omit<AppLocation, "activity" | "projectId">) => ({
+    activity,
+    projectId,
+    ...rest,
+  })
+
+  if (parts[2] === "new") return at({ sessionId: null, draftId: parts[3] ?? null })
   // Saved locations from when this app had panes: "#/p/<id>/chats/<sessionId>"
   // and "#/p/<id>/board". Both land on the project with nothing open rather than
   // on a 404, because the mirror in localStorage outlives the layout.
-  if (parts[2] === "chats") return { projectId, sessionId: parts[3] ?? null, draftId: null }
-  if (parts[2] === "board") return { projectId, sessionId: null, draftId: null }
-  return { projectId, sessionId: parts[2] ?? null, draftId: null }
+  if (parts[2] === "chats") return at({ sessionId: parts[3] ?? null, draftId: null })
+  if (parts[2] === "board") return at({ sessionId: null, draftId: null })
+  return at({ sessionId: parts[2] ?? null, draftId: null })
 }
 
 export function formatLocation(loc: AppLocation): string {
-  if (!loc.projectId) return "#/"
-  if (loc.draftId) return `#/p/${loc.projectId}/new/${loc.draftId}`
-  if (loc.sessionId) return `#/p/${loc.projectId}/${loc.sessionId}`
-  return `#/p/${loc.projectId}`
+  const prefix = loc.activity ? "#/activity" : "#"
+  if (!loc.projectId) return `${prefix}/`
+  if (loc.draftId) return `${prefix}/p/${loc.projectId}/new/${loc.draftId}`
+  if (loc.sessionId) return `${prefix}/p/${loc.projectId}/${loc.sessionId}`
+  return `${prefix}/p/${loc.projectId}`
 }
 
 export function useAppLocation(): [AppLocation, (patch: Partial<AppLocation>) => void] {
   const [loc, setLoc] = useState<AppLocation>(() => {
     const fromHash = parseLocation(window.location.hash)
-    if (fromHash.projectId) return fromHash
+    // `activity` as well as a project: a bare "#/activity" is a complete
+    // location — the dashboard is about every project, so it needs none — and
+    // testing only for a project id would drop it and restore the mirror
+    // instead, which is the one case a shared link to this page consists of.
+    if (fromHash.projectId || fromHash.activity) return fromHash
     try {
       const saved = window.localStorage.getItem(REMEMBERED)
-      if (saved) return parseLocation(saved)
+      // The mirror is for landing back where you were working, which is a
+      // project. A fresh tab should not open onto the dashboard because that is
+      // where the last one happened to be left.
+      if (saved) return { ...parseLocation(saved), activity: false }
     } catch {
       // Private mode, or storage disabled. Not knowing where you were is a
       // smaller problem than failing to start.

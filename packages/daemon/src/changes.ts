@@ -283,6 +283,47 @@ export async function commitRun(
   return (await git(root, ["rev-parse", "HEAD"])).trim()
 }
 
+/**
+ * Send this branch to its upstream.
+ *
+ * A separate act from committing, deliberately. Committing is the gate — you
+ * read the diff and decide — and pushing is what happens to a decision that has
+ * already been made, so collapsing them into one button would put an outward
+ * step behind the review's own press. They are two buttons, and the checkbox
+ * that chains them is a choice made per press rather than a setting.
+ *
+ * `--set-upstream` on the CURRENT branch name when there is no upstream yet,
+ * which is the first push of a new branch and the case where a bare `git push`
+ * says "fatal: The current branch has no upstream branch" and tells you to type
+ * exactly this. Doing it for you is the difference between a button and a
+ * suggestion.
+ *
+ * Not `--force`, not `--force-with-lease`, not ever. A push that needs force is
+ * a history rewrite, which is a decision with no undo — the checkpoint refs are
+ * local, so they cannot recover somebody else's clone. That one stays in a
+ * terminal, where the person doing it has to type what they mean.
+ */
+export async function pushBranch(
+  root: RepoRef,
+  /** From `GitPending.ahead`: null means no upstream, so this sets one. */
+  hasUpstream: boolean,
+): Promise<{ branch: string; pushed: number }> {
+  const branch = await currentBranch(root)
+  if (!branch || branch === "HEAD") {
+    throw new Error("HEAD is detached — check out a branch before pushing")
+  }
+
+  // Counted BEFORE the push, because afterwards the answer is always zero and
+  // the run's own log would have nothing to say about what it did.
+  const ahead = await gitOr(0, async () => {
+    const out = await git(root, ["rev-list", "--count", "HEAD", "--not", "--remotes"])
+    return Number(out.trim()) || 0
+  })
+
+  await git(root, hasUpstream ? ["push"] : ["push", "--set-upstream", "origin", branch])
+  return { branch, pushed: ahead }
+}
+
 const exists = (path: string) => access(path).then(() => true, () => false)
 
 /**

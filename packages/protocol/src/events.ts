@@ -304,6 +304,15 @@ export type RunEventBody =
    * did that button take" without a second call to git.
    */
   | { type: "commit.landed"; sha: string; paths: string[] }
+  /**
+   * What was sent, and where.
+   *
+   * Its own event rather than a `commit.step`, for the same reason `landed` is:
+   * this is the moment work left the machine, and it is the one line in the log
+   * somebody scrolls back to find. `pushed` is counted BEFORE the push, since
+   * afterwards the answer is always zero.
+   */
+  | { type: "push.landed"; branch: string; pushed: number }
   | {
       type: "run.retry"
       attempt: number

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode, type RefObject } from "re
 import type { MessageImage, RunEvent, RunStatus } from "@aide/protocol"
 import {
   ArrowClockwise,
+  ArrowUp,
   Check,
   Circle,
   GitCommit,
@@ -145,6 +146,13 @@ interface CommitLandedLine {
   sha: string
   paths: string[]
 }
+/** What was pushed, and where. The moment work left the machine. */
+interface PushLandedLine {
+  kind: "push-landed"
+  key: string
+  branch: string
+  pushed: number
+}
 /**
  * One of the project's own checks, run by aide rather than by the agent.
  *
@@ -234,6 +242,7 @@ type Line =
   | { kind: "error"; key: string; text: string }
   | CommitStepLine
   | CommitLandedLine
+  | PushLandedLine
   | { kind: "commit-message"; key: string; message: string; model: string }
   | { kind: "stale"; key: string; supervised: boolean }
   | VerifyLine
@@ -427,6 +436,9 @@ function toLines(events: RunEvent[], live?: LiveText | null): Line[] {
           message: e.message,
           model: e.model,
         })
+        break
+      case "push.landed":
+        lines.push({ kind: "push-landed", key: rowKey(e), branch: e.branch, pushed: e.pushed })
         break
       case "commit.landed":
         lines.push({ kind: "commit-landed", key: rowKey(e), sha: e.sha, paths: e.paths })
@@ -1102,11 +1114,30 @@ function CommitLandedRow({ line }: { line: CommitLandedLine }) {
   )
 }
 
+/**
+ * The moment work left the machine.
+ *
+ * One line, not expandable: unlike a commit there is no list of paths to open —
+ * what was sent is exactly the commits the previous rows already describe.
+ */
+function PushLandedRow({ line }: { line: PushLandedLine }) {
+  return (
+    <div className="flex min-w-0 items-baseline gap-2 px-1 py-0.5">
+      <ArrowUp className={`${MARK} text-diff-add-fg`} />
+      <span className="shrink-0 text-diff-add-fg">pushed {line.branch}</span>
+      <span className="shrink-0 text-fg-dim">
+        {line.pushed} commit{line.pushed === 1 ? "" : "s"}
+      </span>
+    </div>
+  )
+}
+
 function renderLine(
   line: Line,
   onPermission?: (requestId: string, allowed: boolean) => void,
 ): ReactNode {
   if (line.kind === "tool") return <ToolRow key={line.key} line={line} />
+  if (line.kind === "push-landed") return <PushLandedRow key={line.key} line={line} />
   if (line.kind === "commit-step")
     return (
       <p key={line.key} className="flex min-w-0 items-baseline gap-2 px-1">

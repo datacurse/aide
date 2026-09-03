@@ -1,4 +1,5 @@
 import type {
+  Activity,
   Attachment,
   ChatSpend,
   ChatStatus,
@@ -19,6 +20,7 @@ import type {
 } from "@aide/protocol"
 
 export type {
+  Activity,
   ConversationSummary,
   FolderPick,
   GitHistory,
@@ -129,6 +131,16 @@ export const api = {
    */
   usage: () => call<PlanUsage>("/api/usage"),
 
+  /**
+   * Activity across every project — the dashboard.
+   *
+   * Not on the app's beat. It reduces every run log on the machine, and it
+   * describes turns that have already ended, so redrawing it twice a second
+   * would burn the work to produce an identical document. The page fetches on
+   * open, on a change of window, and when you press refresh.
+   */
+  activity: (days: number) => call<Activity>(`/api/activity?days=${days}`),
+
   daemonStatus: () => daemonCall("/status") as Promise<DaemonStatus | null>,
   daemonLog: () => daemonCall("/log") as Promise<{ lines: string[] } | null>,
   daemonStart: () => daemonCall("/start", { method: "POST" }) as Promise<{ message: string } | null>,
@@ -187,10 +199,20 @@ export const api = {
    * `force` commits over a failed check. It is a second press, never a setting —
    * see `CommitWorkingTreeOptions.force` for why that distinction is the point.
    */
-  commitProject: (projectId: string, sessionId: string | null, force = false) =>
+  commitProject: (projectId: string, sessionId: string | null, force = false, push = false) =>
     call<{ runId: string }>(`/api/projects/${projectId}/commit`, {
       method: "POST",
-      body: JSON.stringify({ sessionId, force }),
+      body: JSON.stringify({ sessionId, force, push }),
+    }),
+  /**
+   * Send the branch upstream, on its own.
+   *
+   * Not a run: one git call, no model, nothing to attribute, so it answers with
+   * what it did rather than a run id to go and watch.
+   */
+  pushProject: (projectId: string) =>
+    call<{ branch: string; pushed: number }>(`/api/projects/${projectId}/push`, {
+      method: "POST",
     }),
   /** Done. Nothing an agent runs can reach this. */
   closeChat: (projectId: string, sessionId: string) =>

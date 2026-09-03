@@ -3,6 +3,7 @@ import { dirname } from "node:path"
 import fastifyWebsocket from "@fastify/websocket"
 import Fastify from "fastify"
 import type {
+  Activity,
   Attachment,
   ChatMode,
   ChatStatus,
@@ -18,13 +19,14 @@ import type {
 } from "@aide/protocol"
 import { CHAT_MODES, EFFORT_LEVELS } from "@aide/protocol"
 import { runLogPath, sshConfigPath } from "@aide/protocol/node"
+import { activity } from "./activity.js"
 import { MAX_PROJECT_DOC_CHARS } from "./agent.js"
 import {
   chatStatuses,
   closeChat,
   reopenChat,
 } from "./board.js"
-import { currentBranch, runChanges } from "./changes.js"
+import { currentBranch, pushBranch, runChanges } from "./changes.js"
 import { ChatLane } from "./chat.js"
 import { CONFIG } from "./config.js"
 import { EventLog } from "./eventlog.js"
@@ -202,6 +204,34 @@ app.get("/api/health", async (): Promise<Health> => ({
  * Cached in `usage.ts` for a minute, so a second tab costs nothing.
  */
 app.get("/api/usage", async (): Promise<PlanUsage> => planUsage())
+
+/**
+ * Activity across every project — what the dashboard draws.
+ *
+ * Machine-scoped rather than project-scoped, which is why it sits beside usage
+ * up here rather than under `/api/projects/:id`. It is the one question in aide
+ * that is about the whole of `~/.aide/runs` at once.
+ *
+ * One route for the whole page rather than one per tile: every figure comes from
+ * a single pass over the same run index, so splitting it would re-reduce the
+ * same array six times and — worse — let two tiles answer from either side of a
+ * poll boundary and disagree on screen.
+ *
+ * `days` is clamped rather than validated into an error. It arrives from a query
+ * string, so it can be anything; a dashboard that answers a nonsense window with
+ * a 400 is worse than one that answers the nearest sensible window, and there is
+ * no destructive act on the other side of it to protect.
+ */
+app.get("/api/activity", async (req): Promise<Activity> => {
+  const asked = (req.query as { days?: unknown }).days
+  // `Number("")` is 0, not NaN, so an empty `?days=` would clamp to a ONE-day
+  // window rather than falling back to the default — a query string that looks
+  // like it asked for nothing quietly asking for today only. Anything that is
+  // not a non-empty string is no parameter at all.
+  const raw = typeof asked === "string" && asked.trim() !== "" ? Number(asked) : Number.NaN
+  const days = Number.isFinite(raw) ? Math.min(365, Math.max(1, Math.floor(raw))) : 30
+  return activity(await listProjects(), days)
+})
 
 /**
  * Every project, and who has its checkout.
@@ -653,13 +683,18 @@ app.post("/api/projects/:id/commit", async (req, reply) => {
   const project = await getProject(id)
   if (!project) return reply.code(404).send(notFound(`no project ${id}`))
 
-  const body = (req.body ?? {}) as { sessionId?: unknown; force?: unknown }
+  const body = (req.body ?? {}) as { sessionId?: unknown; force?: unknown; push?: unknown }
   // Anything that is not a non-empty string is no attribution, including the
   // `null` the browser sends when no chat is open. A session id off the wire
   // only ever reaches a trailer and a lookup, so it needs no more shape than
   // this.
   const sessionId = typeof body.sessionId === "string" && body.sessionId ? body.sessionId : null
   const force = body.force === true
+  // Chained onto this press rather than a setting, and INSIDE the same run: the
+  // checkbox says "and send it", which is a thing this press does, not a mode
+  // the project is in. It runs after the commit and only if the commit happened,
+  // so a refused gate never pushes.
+  const alsoPush = body.push === true
 
   // Committing underneath a working agent races its next write, and the diff
   // would be a half-finished turn. `hold` refuses the whole project below; this
@@ -680,7 +715,17 @@ app.post("/api/projects/:id/commit", async (req, reply) => {
   // checks live in the repository, so a run that added one has changed the gate
   // it is about to be measured by, and reading a copy from boot would apply the
   // old gate to the diff that changed it.
-  const doc = await readProjectDoc(repoOf(project))
+  //
+  // Passed as the READER rather than the answer, for the same reason one step
+  // further in: the commit's own repair attempt can edit `.aide/project.md`, so
+  // even a read taken on the press is stale by the time the retry runs. See
+  // `verify` in `CommitWorkingTreeOptions`.
+  const readVerify = async () => (await readProjectDoc(repoOf(project))).verify
+  // Before the hold rather than inside the run: it is one more remote read, a
+  // commit does not create an upstream so the answer cannot go stale in between,
+  // and asking only when the box is ticked keeps it off the path of every commit
+  // that is not pushing.
+  const hasUpstream = alsoPush ? (await repo.pending(repoOf(project))).ahead !== null : false
   try {
     // Throws if another conversation holds the checkout, with that
     // conversation's name in it.
@@ -694,7 +739,9 @@ app.post("/api/projects/:id/commit", async (req, reply) => {
           project,
           sessionId,
           request: opening?.firstPrompt ?? "",
-          verify: doc.verify,
+          verify: readVerify,
+          push: alsoPush,
+          hasUpstream,
           force,
           // One go at whatever the checks refused, run as a turn in the
           // conversation this commit is attributed to — which is where its
@@ -727,6 +774,44 @@ app.post("/api/projects/:id/commit", async (req, reply) => {
     return { runId }
   } catch (err) {
     return reply.code(409).send({ message: err instanceof Error ? err.message : String(err) })
+  }
+})
+
+/**
+ * Send the branch upstream. The second half of the commit button, on its own.
+ *
+ * Separate from the commit route rather than only a flag on it, because the two
+ * are separate acts and the common case for this one is a commit that already
+ * happened — the checkbox was not ticked, or the push failed, or the work was
+ * committed before there was a remote. A button that can only push as part of
+ * committing cannot clear either of those.
+ *
+ * Under the project's lock like a commit, and for the same reason: pushing while
+ * an agent writes would send a branch whose tip is about to move. It is NOT a
+ * run — there is no transcript worth writing for one git call, no model, and
+ * nothing to attribute — so it answers synchronously with what it did.
+ */
+app.post("/api/projects/:id/push", async (req, reply) => {
+  const { id } = req.params as { id: string }
+  const project = await getProject(id)
+  if (!project) return reply.code(404).send(notFound(`no project ${id}`))
+
+  const holder = chat.holderFor(project.id)
+  if (holder) {
+    return reply.code(409).send({
+      message: `"${firstLine(holder.text)}" is working in this checkout — wait for it to finish`,
+    })
+  }
+
+  try {
+    const { ahead } = await repo.pending(repoOf(project))
+    const { branch, pushed } = await pushBranch(repoOf(project), ahead !== null)
+    return { branch, pushed }
+  } catch (err) {
+    // 502 rather than 500: the failure is almost always the remote saying no —
+    // a non-fast-forward, no network, no permission — and the message git wrote
+    // is the only useful thing anybody can act on.
+    return reply.code(502).send({ message: err instanceof Error ? err.message : String(err) })
   }
 })
 

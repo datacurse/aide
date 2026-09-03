@@ -43,15 +43,50 @@ const SHELL_METACHARACTERS = /[`$|;&<>\n\r]/
  * `Bash(*)` layer Auto gets, and an approved plan being carried out.
  *
  * `deniedBash` in CONFIG already carries the ways a run ends badly: the servers
- * that never exit, the script that spends money, the fetch-and-execute. These
- * two are a different category — they are the ways a run ends the REVIEW. The
- * product is that you read the diff and you commit it, so a run that commits its
- * own work has removed the gate rather than passed it.
+ * that never exit, the script that spends money, the fetch-and-execute. This one
+ * is a different category — it is the way a run ends the REVIEW. The product is
+ * that you read the diff and you commit it, so a run that commits its own work
+ * has removed the gate rather than passed it.
+ *
+ * `git push` is NOT here, and the distinction is worth stating because it was
+ * wrong for a while. Push is DOWNSTREAM of the gate: nothing is pushable until
+ * it is committed, and committing is the human pressing the button — so by the
+ * time a run can push, a person has already read that diff and approved it.
+ * Blocking push therefore protects no review that has not already happened. What
+ * it does instead is strand approved work on the machine that made it, which is
+ * exactly what it did: a remote project on `tg` had its commit reviewed and
+ * taken, and then could not get it to the remote, so the deploy ran from a local
+ * checkout that no longer matched origin. A gate placed after the decision it is
+ * supposed to guard is not a gate, it is a dead end.
  *
  * Here rather than in agent.ts because it now has two consumers, and because
  * `pnpm smoke` can assert it without loading the SDK.
  */
-export const HUMAN_ONLY_COMMANDS = ["git commit", "git push"]
+export const HUMAN_ONLY_COMMANDS = ["git commit"]
+
+/**
+ * Why one of those is refused, in aide's own words.
+ *
+ * Separate from the `deniedBash` sentence because the two categories are
+ * separate, and sharing a message made the refusal actively misleading: an agent
+ * that ran a human-only command was told it "either never exits, or spends
+ * money, or runs code this allowlist cannot see", none of which is true of it.
+ * Watched on a remote project — the agent read that as a runaway-command guard
+ * rather than a rule about the review, and went looking for a form that would
+ * get through: a heredoc, then a message file, then a different invocation, four
+ * denials before it gave up. A refusal that names the real reason ends that at
+ * one, and a refusal an agent cannot act on is how a gate turns into a loop.
+ *
+ * It names what to do instead, because there IS something: leave the work
+ * uncommitted, say so, and let the human press the button. That is not a
+ * consolation prize — it is the product.
+ */
+const HUMAN_ONLY_REASON =
+  "`git commit` is the human's, not a run's: you leave the work uncommitted and a " +
+  "person reads the diff and presses commit in aide. That review is the whole product, " +
+  "so there is no form of this command that will be allowed — say what you changed and " +
+  "stop, rather than looking for one. (`git push` is allowed: it only ever moves commits " +
+  "a human already approved.)"
 
 export interface BashVerdict {
   allow: boolean
@@ -93,11 +128,16 @@ export function checkBashCommand(
 
   const hit = denied.find((d) => hasPrefix(command, d))
   if (hit) {
+    // Which of the two categories, because they are refused for opposite
+    // reasons and an agent acts on the sentence it is given. Checked against the
+    // constant rather than a flag on the caller, so a caller that concatenates
+    // the two lists — both of them do — cannot lose the distinction.
     return {
       allow: false,
-      reason:
-        `\`${hit}\` is not permitted in this run: it either never exits, or spends money, ` +
-        "or runs code this allowlist cannot see",
+      reason: HUMAN_ONLY_COMMANDS.includes(hit)
+        ? HUMAN_ONLY_REASON
+        : `\`${hit}\` is not permitted in this run: it either never exits, or spends money, ` +
+          "or runs code this allowlist cannot see",
     }
   }
 

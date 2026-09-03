@@ -473,6 +473,16 @@ console.log("\nwhat is left to commit — the indicator, and the gate it drives"
     "there is no file a human can watch change and never be allowed to commit",
   )
   check("and it knows the branch", before.branch === "main", before.branch ?? "(detached)")
+  // `ahead` rides in this call's existing batch so the push button can say what
+  // it would send without costing the hardest-polled call a second connection.
+  // Null is the load-bearing case and this repo is it: no remote, so there is
+  // nothing to be ahead OF. Reporting 0 there would read as "in step" and
+  // disable the button on exactly the branch that has never been pushed.
+  check(
+    "a repo with no upstream reports null, not zero",
+    before.ahead === null,
+    String(before.ahead),
+    )
 
   await writeFile(join(root, "app.ts"), "export const n = 99\n", "utf8")
   const dirty = await pending(root)
@@ -509,13 +519,17 @@ console.log("\nwhat is left to commit — the indicator, and the gate it drives"
 
 console.log("\nbash policy")
 {
-  const allow = ["pnpm", "npm", "git status", "git diff"]
+  const allow = ["pnpm", "npm", "git status", "git diff", "git push"]
   const deny = ["pnpm dev", "pnpm probe", "npx"]
   const verdict = (cmd: unknown) => checkBashCommand(cmd, allow, deny)
 
   check("allows pnpm typecheck", verdict("pnpm typecheck").allow)
   check("allows a bare allowed word", verdict("pnpm").allow)
   check("allows git diff with args", verdict("git diff --stat").allow)
+  // The one write in the list, and the reason it is safe is not that it is
+  // harmless — it is that it can only move commits a human already approved.
+  check("allows git push on an allowlist that names it", verdict("git push origin main").allow)
+  check("but not a git subcommand nobody listed", !verdict("git reset --hard").allow)
   check("denies an unlisted command", !verdict("curl https://example.com").allow)
   check("denies a near-miss prefix", !verdict("pnpmx run").allow, "prefix must end at a word")
   check("denies pnpm dev", !verdict("pnpm dev").allow, "it never exits")
@@ -536,8 +550,8 @@ console.log("\ncarrying out an approved plan")
 {
   // A null allowlist is the shape a chat gets once the human has approved a
   // plan and asked for it to be carried out without further questions. Nobody
-  // is watching, so what still has to hold is that the two refusals hold: the
-  // ways a run ends badly, and the two that end the REVIEW.
+  // is watching, so what still has to hold is that the refusals hold: the ways
+  // a run ends badly, and the one that ends the REVIEW.
   const deny = [...["pnpm dev", "pnpm probe", "npx"], ...HUMAN_ONLY_COMMANDS]
   const verdict = (cmd: unknown) => checkBashCommand(cmd, null, deny)
 
@@ -546,14 +560,56 @@ console.log("\ncarrying out an approved plan")
   check("still denies pnpm dev", !verdict("pnpm dev").allow, "it never exits")
   check("still denies npx", !verdict("npx cowsay").allow)
   check("denies git commit", !verdict("git commit -m x").allow, "the human commits, not the run")
-  check("denies git push", !verdict("git push").allow)
-  check("git status is not git push", verdict("git status").allow, "prefix must end at a word")
+  // Push is DOWNSTREAM of the gate, so allowing it removes no review: nothing is
+  // pushable until a human has already read that diff and pressed commit.
+  // Denying it stranded approved work on the machine that made it.
+  check(
+    "allows git push",
+    verdict("git push").allow,
+    "it only ever moves commits a human already approved",
+  )
+  check("allows git push with a remote and branch", verdict("git push origin main").allow)
+  check("git status is not git commit", verdict("git status").allow, "prefix must end at a word")
   // The blunt half of the rule survives the allowlist going away, and it has to:
   // an unattended run is exactly where `pnpm ls; git push` must not resolve to
   // an allowed leading word.
   check("denies chaining past a denied command", !verdict("pnpm ls; git push").allow)
   check("denies substitution", !verdict("echo $(git push)").allow)
   check("an empty command is still nothing", !verdict("   ").allow)
+
+  // The two categories are refused for OPPOSITE reasons, and an agent acts on
+  // the sentence rather than on the boolean. Both call sites concatenate the
+  // lists, so for a while everything got `deniedBash`'s wording: an agent that
+  // ran a human-only command was told it "never exits, or spends money", none of
+  // which was true, and it read that as a runaway-command guard worth working
+  // around — four denials in a row, each a different invocation, hunting for a
+  // form that would pass. Asserting the boolean alone is what let that ship.
+  const commitReason = verdict("git commit -m x").reason
+  check(
+    "a human-only refusal says whose the commit is",
+    commitReason.includes("human") && commitReason.includes("presses commit"),
+    commitReason.slice(0, 55),
+  )
+  check(
+    "and says no form of it will work, so the agent stops looking",
+    commitReason.includes("no form of this command"),
+    "a refusal an agent cannot act on becomes a retry loop",
+  )
+  check(
+    "and points at the one that IS allowed",
+    commitReason.includes("git push"),
+    "an agent that has just been refused should not have to guess whether push is next",
+  )
+  check(
+    "a runaway command still gets the OTHER reason",
+    verdict("pnpm dev").reason.includes("never exits"),
+    verdict("pnpm dev").reason.slice(0, 55),
+  )
+  check(
+    "and the two are not the same sentence",
+    verdict("pnpm dev").reason !== commitReason,
+    "sharing one message is exactly how the wrong reason reached the agent",
+  )
 }
 
 console.log("\nnothing may stop for a human mid-turn")
@@ -904,6 +960,55 @@ console.log("\nthe checks a commit has to get past")
       .length === 0,
     "a human who pressed stop is not waiting out a ten-minute build",
   )
+}
+
+console.log("\nthe gate is re-read after the fix, not just the tree")
+{
+  const { commitWorkingTree } = await import("./review.js")
+
+  // `.aide/project.md` is a file in the tree the commit is about to take, so the
+  // one repair attempt can rewrite the GATE as well as the code — and when the
+  // gate is what is broken, that is the only fix there is. Watched failing for
+  // real: a project whose `verify:` called `pnpm` on a host with no pnpm, where
+  // the agent correctly rewrote the block to call `node_modules/.bin` directly
+  // and the retry ran `pnpm exec tsc -b` a second time anyway. One automatic
+  // attempt that cannot reach the thing it needs to change is not an attempt.
+  //
+  // The stub is the whole test: `verify` is a reader, so counting how many times
+  // it is CALLED is how you tell a gate that re-reads from one that was frozen
+  // when the run started.
+  await writeFile(join(root, "gate-work.txt"), "something to commit\n", "utf8")
+  let reads = 0
+  let repairs = 0
+  const commands = ["git nope-not-a-command", "git --version"]
+  const spend = await commitWorkingTree({
+    project: { id: "p", name: "n", root, addedAt: "" },
+    sessionId: null,
+    request: "",
+    // Fails on the first pass, passes on the second — exactly what fixing the
+    // gate itself looks like from in here.
+    verify: async () => [{ command: commands[reads++] ?? "git --version", unless: [] }],
+    force: false,
+    // The throwaway repo has no remote, and this is not what is under test here.
+    push: false,
+    hasUpstream: false,
+    repair: async () => {
+      repairs += 1
+      return { status: "success", costUsd: 0, modelUsage: {}, errors: [] }
+    },
+    emit: () => {},
+    delta: () => {},
+    stopped: () => false,
+  })
+
+  check("the gate was asked for twice, not once", reads === 2, `${reads}`)
+  check("and the one repair attempt ran", repairs === 1, `${repairs}`)
+  check(
+    "so a commit whose fix corrected the gate goes through",
+    Boolean(spend),
+    "with the gate read once, the retry re-runs the command the fix removed and refuses forever",
+  )
+  await git(root, ["reset", "--hard", "HEAD~1"])
 }
 
 console.log("\ntelling a turn it left the daemon behind")
@@ -1736,6 +1841,140 @@ console.log("\nproject identity")
   // on Windows is `C:\root` — nor lower-cased, because POSIX paths are
   // case-sensitive and `/root/Code` is a different directory from `/root/code`.
   check("a remote path keeps its case", projectIdFor("/root/Code", "tg") !== projectIdFor("/root/code", "tg"))
+}
+
+console.log("\nactivity")
+{
+  const { localDay, reduceActivity, windowStart } = await import("./activity.js")
+  const { projectIdFor } = await import("./registry.js")
+
+  // A fixed local noon, so nothing here depends on when the suite is run. Noon
+  // rather than midnight: a test anchored to a day boundary passes or fails on
+  // which side of it the machine's timezone falls.
+  const now = new Date(2026, 8, 2, 12, 0, 0).getTime()
+  const at = (daysAgo: number, hour = 12) =>
+    new Date(2026, 8, 2 - daysAgo, hour, 0, 0).getTime()
+
+  const run = (
+    id: string,
+    projectId: string,
+    sessionId: string,
+    openedAt: number,
+    costUsd: number,
+    tokens: number,
+    model = "opus",
+  ) => ({
+    runId: id,
+    sessionId,
+    projectId,
+    openedAt,
+    activeMs: 1000,
+    costUsd,
+    tokens,
+    byModel: { [model]: { costUsd, tokens } },
+  })
+
+  const alpha = projectIdFor("C:/tmp/alpha")
+  const beta = projectIdFor("C:/tmp/beta")
+  const projects = [
+    { id: alpha, name: "alpha", root: "C:/tmp/alpha", addedAt: "2026-08-01T00:00:00Z" },
+    { id: beta, name: "beta", root: "/root/beta", host: "tg", addedAt: "2026-08-01T00:00:00Z" },
+  ]
+
+  const runs = [
+    run("r1", alpha, "s1", at(0), 1, 100),
+    run("r2", alpha, "s1", at(1), 2, 200),
+    run("r3", alpha, "s2", at(2), 3, 300),
+    run("r4", beta, "s3", at(3), 4, 400, "sonnet"),
+    // Outside a 7-day window, inside a 30-day one. This is the run that catches
+    // an off-by-one in the window arithmetic.
+    run("r5", alpha, "s4", at(8), 8, 800),
+    // A project the registry no longer has.
+    run("r6", "deadbeef0000", "s5", at(1), 5, 500),
+  ]
+
+  const week = reduceActivity(runs, projects, now, 7, [], 0)
+
+  check("a run from today is in the window", week.runs === 5, `${week.runs}`)
+  check("and one from eight days ago is not", !week.daily.some((d) => d.day === localDay(at(8))))
+  check(
+    "a 30-day window reaches back further",
+    reduceActivity(runs, projects, now, 30, [], 0).runs === 6,
+  )
+
+  // The arithmetic that has to hold or the page lies: every breakdown sums to
+  // the headline it sits under. Verified against the real logs at 373 runs and
+  // $859.57 when this was written; pinned here so it stays true.
+  const sumBy = (ns: number[]) => ns.reduce((a, b) => a + b, 0)
+  check(
+    "the project table sums to the total",
+    Math.abs(sumBy(week.projects.map((p) => p.costUsd)) - week.costUsd) < 1e-9,
+  )
+  check(
+    "the daily bars sum to the total",
+    Math.abs(sumBy(week.daily.map((d) => d.costUsd)) - week.costUsd) < 1e-9,
+  )
+  check(
+    "the model split sums to the total tokens",
+    sumBy(week.models.map((m) => m.tokens)) === week.tokens,
+  )
+  check("shares sum to 1", Math.abs(sumBy(week.projects.map((p) => p.share)) - 1) < 1e-9)
+
+  // Conversations, not runs: three runs over two sessions in alpha, and the
+  // count that matters for "how many pieces of work" is the sessions.
+  const alphaRow = week.projects.find((p) => p.projectId === alpha)
+  check("a project counts chats, not turns", alphaRow?.chats === 2, `${alphaRow?.chats}`)
+  check("and counts its turns too", alphaRow?.runs === 3, `${alphaRow?.runs}`)
+  check("the newest run dates the row", alphaRow?.lastRunAt === at(0))
+
+  // A removed project keeps its history rather than vanishing, or the table
+  // would stop summing to the total above it.
+  const gone = week.projects.find((p) => p.projectId === "deadbeef0000")
+  check("a removed project still has a row", gone !== undefined)
+  check("and is named as unknown rather than dropped", gone?.name === null)
+  check("a remote project carries its host", week.projects.find((p) => p.projectId === beta)?.host === "tg")
+
+  // The empty days are the signal. A chart that omits them draws a solid week
+  // over a week that had four days in it.
+  check("every day in the window gets a bucket", week.daily.length === 7, `${week.daily.length}`)
+  check("including the ones with nothing in them", week.daily.some((d) => d.runs === 0))
+  check("oldest first", (week.daily[0]?.day ?? "") < (week.daily[6]?.day ?? ""))
+  check("and today is last", week.daily[6]?.day === localDay(now))
+
+  // Lifetime ignores the window entirely — it is the one figure on the page
+  // that answers "since when", so a window filter leaking into it would make
+  // the number shrink as you narrowed the view.
+  check("lifetime counts every run", week.lifetime.runs === 6)
+  check("lifetime cost ignores the window", Math.abs(week.lifetime.costUsd - 23) < 1e-9)
+  check("and lifetime starts at the oldest run", week.lifetime.since === at(8))
+
+  // The window a query string asks for, as `/api/activity` reads it. Kept in
+  // step with the route by hand, which is worth it for the one case that is
+  // wrong in the obvious spelling: `Number("")` is 0, not NaN, so an empty
+  // `?days=` clamps to a ONE-day window instead of falling back to the default
+  // — a parameter that looks absent quietly asking for today only.
+  const askedDays = (asked: unknown) => {
+    const n = typeof asked === "string" && asked.trim() !== "" ? Number(asked) : Number.NaN
+    return Number.isFinite(n) ? Math.min(365, Math.max(1, Math.floor(n))) : 30
+  }
+  check("an empty ?days= is the default, not one day", askedDays("") === 30, `${askedDays("")}`)
+  check("an absent one too", askedDays(undefined) === 30)
+  check("nonsense too", askedDays("banana") === 30)
+  check("zero and below clamp up", askedDays("0") === 1 && askedDays("-5") === 1)
+  check("and a huge window clamps down", askedDays("99999") === 365)
+
+  check("no runs is not a crash", reduceActivity([], projects, now, 7, [], 0).runs === 0)
+  check("and shares do not divide by zero", reduceActivity([], projects, now, 7, [], 0).projects.length === 0)
+
+  // Local days, not UTC. A turn taken at 1am belongs to that date for the
+  // person who took it; `toISOString()` files it under the day before for
+  // anyone west of Greenwich, and only for the turns taken late at night.
+  check("a 1am run stays on its own local day", localDay(at(0, 1)) === localDay(at(0, 23)))
+  check(
+    "a window starts at local midnight",
+    new Date(windowStart(now, 7)).getHours() === 0,
+  )
+  check("and spans the right number of days", (now - windowStart(now, 7)) / 86400000 > 6)
 }
 
 console.log(`\n${failures === 0 ? "all checks passed" : `${failures} FAILED`}`)

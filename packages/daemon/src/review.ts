@@ -1,6 +1,12 @@
 import type { ModelSpend, Project, RunDelta, RunEventBody, VerifyCheck } from "@aide/protocol"
 import { planChecks } from "@aide/protocol"
-import { commitRun, recentSubjects, treeChanges, withSessionTrailer } from "./changes.js"
+import {
+  commitRun,
+  pushBranch,
+  recentSubjects,
+  treeChanges,
+  withSessionTrailer,
+} from "./changes.js"
 import { readCheckpoint } from "./checkpoint.js"
 import type { HeldTurnOutcome } from "./chat.js"
 import { CONFIG } from "./config.js"
@@ -80,8 +86,21 @@ export interface CommitWorkingTreeOptions {
   sessionId: string | null
   /** What the work was asked for, so the drafter can tell intent from incident. */
   request: string
-  /** The project's own checks, from `.aide/project.md`. Empty means no gate. */
-  verify: readonly VerifyCheck[]
+  /**
+   * The project's own checks, from `.aide/project.md`. Empty means no gate.
+   *
+   * A FUNCTION rather than an array, because `.aide/project.md` lives in the
+   * tree this commit is about to take, so the repair attempt below can rewrite
+   * the gate as well as the code — and when the gate is what is broken, that is
+   * the only fix there is. Held as an array, the retry re-ran the commands the
+   * run started with and the fix was invisible to it: watched doing exactly
+   * that, on a project whose `verify:` called `pnpm` on a host that has no
+   * pnpm. The agent correctly rewrote the block to call `node_modules/.bin`
+   * directly, and the gate answered by running `pnpm exec tsc -b` a second time
+   * and refusing the commit again. One automatic attempt that cannot reach the
+   * thing it needs to change is not an attempt.
+   */
+  verify: () => Promise<readonly VerifyCheck[]>
   /**
    * Commit even though the checks failed.
    *
@@ -92,6 +111,16 @@ export interface CommitWorkingTreeOptions {
    * past it is a decision somebody made.
    */
   force: boolean
+  /**
+   * Send the branch upstream once the commit has landed.
+   *
+   * Chained onto this press rather than a mode, because "and send it" is a
+   * decision about this change — not a property the project has. It runs after
+   * the commit and only if there was one, so a refused gate cannot push.
+   */
+  push: boolean
+  /** From `GitPending.ahead`: false means the branch has no upstream yet. */
+  hasUpstream: boolean
   /**
    * One automatic attempt at whatever the checks refused, or null for none.
    *
@@ -253,6 +282,11 @@ export async function commitWorkingTree(
     // Re-read, because the fix rewrote the tree this was measured on. Skipping
     // it would check the old paths, draft a message from the old diff, and stage
     // a list that does not include the file the fix created.
+    //
+    // The GATE is re-read too, at the top of the next `verifyTree` — the fix may
+    // have edited `.aide/project.md`, which is a file in this same tree. Both
+    // readings have to move together or the loop measures a new tree with an old
+    // ruler.
     emit({ type: "commit.step", label: "reading what is uncommitted, after the fix" })
     changes = await treeChanges(repoOf(project))
     if (!changes.diff.trim()) {
@@ -296,6 +330,29 @@ export async function commitWorkingTree(
     message: message.text,
   })
   emit({ type: "commit.landed", sha, paths: changes.paths })
+
+  // After the commit and only if it happened, which is the whole meaning of the
+  // checkbox: "and send it". A gate that refused never reaches this line, so
+  // there is no path on which unreviewed work leaves the machine.
+  //
+  // Its failure does NOT undo the commit, and says so. A push can fail for
+  // reasons that have nothing to do with the work — no network, a rejected
+  // non-fast-forward, an upstream that moved — and throwing here would report a
+  // commit that definitely landed as a commit that failed. The tree is clean,
+  // the sha exists, and what is left is one button press.
+  if (opts.push) {
+    emit({ type: "commit.step", label: "pushing" })
+    try {
+      const { branch, pushed } = await pushBranch(repoOf(project), opts.hasUpstream)
+      emit({ type: "push.landed", branch, pushed })
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err)
+      emit({
+        type: "commit.step",
+        label: `committed ${sha.slice(0, 7)}, but the push failed — ${why}`,
+      })
+    }
+  }
   return spent
 }
 
@@ -341,9 +398,14 @@ async function verifyTree(
   changed: readonly string[],
 ): Promise<CheckOutcome | null> {
   const { emit } = opts
-  if (opts.verify.length === 0) return null
+  // Read on every pass, not once per run: the fix may have rewritten the gate,
+  // and re-reading the tree while keeping the old commands is the same mistake
+  // the tree re-read exists to prevent, one level up. See `verify` on the
+  // options.
+  const checks = await opts.verify()
+  if (checks.length === 0) return null
 
-  const plan = planChecks(opts.verify, changed)
+  const plan = planChecks(checks, changed)
   // Emitted before anything runs, so the list on screen is the whole declared
   // gate from the first moment — four rows, some of them already answered.
   for (const { command, reason } of plan.skipped) {

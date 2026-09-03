@@ -10,6 +10,7 @@
  * Anything that needs the filesystem lives in `@aide/protocol/node`.
  */
 export * from "./names.js"
+export * from "./activity.js"
 export * from "./events.js"
 export * from "./todo.js"
 export * from "./project.js"

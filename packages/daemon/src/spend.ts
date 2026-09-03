@@ -47,6 +47,17 @@ const TAIL_BYTES = 64 * 1024
 export interface RunTotals {
   runId: string
   sessionId: string
+  /**
+   * The project the turn ran in, off the same `run.started` the session comes
+   * from.
+   *
+   * Free to carry — that event has always held it and this file has always
+   * parsed it — and it is what lets a run be attributed to a project without
+   * reading the registry or the session store. `activity.ts` is the caller that
+   * needs it: `spendBySession` groups by conversation, and a conversation
+   * belongs to a project only via a lookup that a deleted project fails.
+   */
+  projectId: string
   /** epoch ms of the log's first event — when the turn opened, not when it ended. */
   openedAt: number
   /** The SDK's own duration for the turn. Zero while the turn is still running. */
@@ -54,6 +65,15 @@ export interface RunTotals {
   costUsd: number
   /** Input, output, cache read and cache write together. See `spendBySession`. */
   tokens: number
+  /**
+   * Cost and tokens split by model, straight off `run.finished.modelUsage`.
+   *
+   * Kept rather than only summed because the split is the one part of a turn's
+   * spend that summing destroys, and it answers a question the totals cannot:
+   * whether the money went on the model doing the work or on the small one
+   * naming chats. Empty for a turn that never finished.
+   */
+  byModel: Record<string, { costUsd: number; tokens: number }>
 }
 
 /**
@@ -172,10 +192,12 @@ async function readRun(path: string, runId: string): Promise<RunTotals | null> {
   const totals: RunTotals = {
     runId,
     sessionId: head.sessionId,
+    projectId: head.projectId,
     openedAt: head.at,
     activeMs: 0,
     costUsd: 0,
     tokens: 0,
+    byModel: {},
   }
 
   const end = await terminalEvent(path)
@@ -185,9 +207,19 @@ async function readRun(path: string, runId: string): Promise<RunTotals | null> {
   if (end?.type === "run.finished") {
     totals.activeMs = end.durationMs
     totals.costUsd = end.totalCostUsd
-    for (const use of Object.values(end.modelUsage)) {
-      totals.tokens +=
+    for (const [model, use] of Object.entries(end.modelUsage)) {
+      const tokens =
         use.inputTokens + use.outputTokens + use.cacheReadInputTokens + use.cacheCreationInputTokens
+      totals.tokens += tokens
+      // `+=` into whatever is there: the SDK has been seen to report a model
+      // twice in one run's usage, and the second entry would otherwise replace
+      // the first rather than add to it — which loses tokens the total above
+      // has already counted, so the split would not sum to the whole.
+      const before = totals.byModel[model]
+      totals.byModel[model] = {
+        costUsd: (before?.costUsd ?? 0) + use.costUSD,
+        tokens: (before?.tokens ?? 0) + tokens,
+      }
     }
   }
   return totals
@@ -195,6 +227,11 @@ async function readRun(path: string, runId: string): Promise<RunTotals | null> {
 
 /**
  * The session a run log belongs to, and when that log opened.
+ *
+ * Returns null for a run that never reached `run.started`: a turn that died
+ * before the SDK's first message, and — on this machine, 266 times over — a log
+ * written by the old task queue, which no longer exists. See `unattributedRuns`
+ * in `activity.ts` for why the dashboard does not report those as lost runs.
  *
  * Read only as far as `run.started`; breaking the loop closes the stream.
  * Reading a fixed prefix of bytes instead would have been simpler and quietly
@@ -204,7 +241,7 @@ async function readRun(path: string, runId: string): Promise<RunTotals | null> {
  */
 export async function sessionOfRun(
   path: string,
-): Promise<{ sessionId: string; at: number } | null> {
+): Promise<{ sessionId: string; projectId: string; at: number } | null> {
   const rl = createInterface({
     input: createReadStream(path, { encoding: "utf8" }),
     crlfDelay: Infinity,
@@ -225,7 +262,7 @@ export async function sessionOfRun(
       }
       if (!openedAt) openedAt = event.ts
       if (event.type === "run.started" && event.sessionId) {
-        return { sessionId: event.sessionId, at: openedAt || event.ts }
+        return { sessionId: event.sessionId, projectId: event.projectId, at: openedAt || event.ts }
       }
     }
     return null

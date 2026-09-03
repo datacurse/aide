@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { api, type GitPending, type Health, type ProjectView } from "./api.js"
 import { CHIME_KEY } from "./chime.js"
 import { DaemonBar } from "./Daemon.js"
+import { Dashboard } from "./Dashboard.js"
 import { carryDraft, draftKey, openNewChat } from "./drafts.js"
 import { useAppLocation } from "./useAppLocation.js"
 import { useKeyed } from "./useKeyed.js"
@@ -23,7 +24,7 @@ export function App() {
    * you were and Back steps through what you had open. A chat is either a
    * session the daemon knows or one that has not been sent; see useAppLocation.
    */
-  const [{ projectId, sessionId, draftId }, navigate] = useAppLocation()
+  const [{ activity, projectId, sessionId, draftId }, navigate] = useAppLocation()
   /**
    * What the project has left to commit.
    *
@@ -271,7 +272,7 @@ export function App() {
    * projects list reports the commit as holding the repo, `committing` above is
    * false and the button reads as pressable over a commit already running.
    */
-  const commitWork = async () => {
+  const commitWork = async (push: boolean) => {
     if (!projectId) return
     setStarting(true)
     setError(null)
@@ -282,13 +283,35 @@ export function App() {
       // this project forced, silently.
       const force = verifyRefused
       setVerifyRefused(false)
-      const { runId } = await api.commitProject(projectId, sessionId, force)
+      const { runId } = await api.commitProject(projectId, sessionId, force, push)
       setCommitRunId(runId)
       await refresh()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setStarting(false)
+    }
+  }
+
+  /**
+   * Push, on its own, with no run behind it.
+   *
+   * Synchronous from the browser's point of view — one git call, no model — so
+   * unlike a commit there is no run id to follow and the refresh at the end is
+   * the whole of the feedback: the rail's `ahead` drops and the button goes.
+   */
+  const [pushing, setPushing] = useState(false)
+  const pushWork = async () => {
+    if (!projectId) return
+    setPushing(true)
+    setError(null)
+    try {
+      await api.pushProject(projectId)
+      await refresh()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setPushing(false)
     }
   }
 
@@ -360,6 +383,24 @@ export function App() {
     }
   }
 
+  // The dashboard takes the window. It REPLACES the panes rather than covering
+  // them, because the four panes poll — `refresh` above runs on a 1.5s beat and
+  // a remote `gitPending` is an ssh connection — and leaving them mounted behind
+  // a full-screen page would spend a connection every beat and a half on a rail
+  // nobody can see. The polling stops with them; `projectId` and the open chat
+  // stay in the URL, so closing puts you back exactly where you were.
+  //
+  // Nothing in flight is lost by this: a run belongs to the daemon, not to the
+  // page, which is the property the whole app is built on.
+  if (activity) {
+    return (
+      <Dashboard
+        onClose={() => navigate({ activity: false })}
+        onOpenProject={(id) => navigate({ activity: false, projectId: id })}
+      />
+    )
+  }
+
   return (
     // No title bar. Nothing up there was worth a row of height across the whole
     // window — the app's name is in the tab, and the daemon controls are a
@@ -382,6 +423,15 @@ export function App() {
               acts wearing one word only if you hide the difference. */}
           <Button onClick={() => setRemote(true)} title="Add a project from another machine">
             ssh
+          </Button>
+          {/* On the PROJECTS header because that is what it is about — every
+              project at once, which is the one question none of the four panes
+              can answer. It needs no project selected and takes none. */}
+          <Button
+            onClick={() => navigate({ activity: true })}
+            title="Activity across every project — where the time and the money went"
+          >
+            stats
           </Button>
         </PaneHeader>
         <div className="flex-1 overflow-auto py-1">
@@ -568,7 +618,12 @@ export function App() {
         commitBlocked={commitBlocked}
         committing={committing}
         verifyRefused={verifyRefused}
-        onCommit={() => void commitWork()}
+        onCommit={(push) => void commitWork(push)}
+        onPush={() => void pushWork()}
+        pushing={pushing}
+        // The same lock as a commit, and for the same reason: pushing while an
+        // agent writes would send a branch whose tip is about to move.
+        pushBlocked={commitBlocked}
       />
 
       {remote && (

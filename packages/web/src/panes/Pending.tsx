@@ -1,4 +1,4 @@
-import { useEffect } from "react"
+import { useEffect, useState } from "react"
 import type {
   GitCommit,
   GitFileChange,
@@ -121,6 +121,9 @@ export function PendingRail({
   committing,
   verifyRefused,
   onCommit,
+  onPush,
+  pushing,
+  pushBlocked,
 }: {
   projectId: string | null
   pending: GitPending | null
@@ -146,9 +149,34 @@ export function PendingRail({
    * shown what is wrong.
    */
   verifyRefused: boolean
-  onCommit: () => void
+  onCommit: (push: boolean) => void
+  /**
+   * Send the branch upstream, on its own.
+   *
+   * Separate from `onCommit` because pushing and committing are separate acts —
+   * the gate is the commit, and a push only ever moves what that gate already
+   * let through. The common case for this button is a commit that has already
+   * happened: the box was not ticked, or the push failed, or the work was
+   * committed before there was a remote to send it to.
+   */
+  onPush: () => void
+  pushing: boolean
+  /** Why a push cannot happen from here, or null. Same contract as `commitBlocked`. */
+  pushBlocked: string | null
 }) {
   const files = pending?.files ?? []
+  /**
+   * Ticked once and remembered, because "and push" is nearly always the same
+   * answer for a given project — but it is still read at the moment of the press
+   * rather than stored anywhere, so it is a habit rather than a setting. Nothing
+   * about it survives a reload, which is the point: a checkbox that silently
+   * pushes months later is a setting wearing a checkbox's clothes.
+   */
+  const [pushAfterCommit, setPushAfterCommit] = useState(false)
+  // Null means no upstream at all, which is not the same as being in step: the
+  // first push of a new branch has nothing to count and everything to send.
+  const ahead = pending?.ahead ?? null
+  const canPush = ahead === null || ahead > 0
   return (
     <aside className="flex w-64 shrink-0 flex-col border-l border-line bg-chrome">
       {/* No count in the header. The sentence two rows down says "9 files
@@ -172,9 +200,36 @@ export function PendingRail({
           {pending === null ? (
             <Note>Reading the working tree…</Note>
           ) : files.length === 0 ? (
-            <Note>
+            <div className="shrink-0 border-b border-line px-3 py-2 font-sans text-[11px] leading-relaxed text-fg-dim">
               Nothing uncommitted on {pending.branch ?? "this checkout"}. A new chat can start.
-            </Note>
+              {/* The push button lives HERE, on the clean tree, because that is
+                  when it is the only thing left to do: the work is committed, a
+                  human already approved it, and it has not left the machine.
+                  Hidden rather than disabled when there is nothing to send —
+                  a greyed-out button on a branch that is in step is a question
+                  nobody asked. */}
+              {canPush && (
+                <div className="mt-2">
+                  <Button
+                    tone="primary"
+                    onClick={onPush}
+                    locked={pushBlocked}
+                    disabled={pushing}
+                    title={
+                      ahead === null
+                        ? `Publish ${pending.branch ?? "this branch"} — it has no upstream yet, so this sets one.`
+                        : `Send ${ahead} commit${ahead === 1 ? "" : "s"} upstream.`
+                    }
+                  >
+                    {pushing
+                      ? "pushing…"
+                      : ahead === null
+                        ? "publish branch"
+                        : `push ${ahead}`}
+                  </Button>
+                </div>
+              )}
+            </div>
           ) : (
             <>
               <div className="shrink-0 border-b border-line px-3 py-2 font-sans text-[11px] leading-relaxed text-fg-dim">
@@ -192,10 +247,10 @@ export function PendingRail({
                     about it — is beside this rail. Read that, then press again to commit anyway.
                   </div>
                 )}
-                <div className="mt-2">
+                <div className="mt-2 flex items-center gap-2">
                   <Button
                     tone={verifyRefused ? "danger" : "primary"}
-                    onClick={onCommit}
+                    onClick={() => onCommit(pushAfterCommit)}
                     // Locked by the run that has the checkout; disabled by our
                     // own commit already being in flight. Only the first has
                     // something else holding it, and only the first is worth a
@@ -210,6 +265,22 @@ export function PendingRail({
                   >
                     {committing ? "committing…" : verifyRefused ? "commit anyway" : "commit"}
                   </Button>
+                  {/* Beside the button rather than under it, because it changes
+                      what that press DOES. A checkbox on its own line reads as a
+                      third thing on the rail; here it reads as an adverb on the
+                      verb next to it. */}
+                  <label
+                    className="flex cursor-pointer select-none items-center gap-1 text-[11px] text-fg-dim"
+                    title="After the commit lands, send the branch upstream. The commit happens either way — if the push fails, the log says so and the work is still committed."
+                  >
+                    <input
+                      type="checkbox"
+                      className="accent-accent"
+                      checked={pushAfterCommit}
+                      onChange={(e) => setPushAfterCommit(e.target.checked)}
+                    />
+                    and push
+                  </label>
                 </div>
               </div>
               {/* Sized to its contents and capped, rather than given the top half

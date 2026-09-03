@@ -132,9 +132,17 @@ export const CONFIG = {
    * Bash commands the agent may run, matched as leading-word prefixes by
    * `policy.ts`. Single commands only — no pipes, no chaining.
    *
-   * The git entries are usually auto-allowed by the SDK's own read-only set
+   * The read-only git entries are usually auto-allowed by the SDK's own set
    * before they ever reach us; they are listed so the policy reads as complete
    * rather than depending on that.
+   *
+   * `git push` is the one that writes, and it is here on purpose. Nothing is
+   * pushable until it has been committed, and committing is the human pressing
+   * the button — so a run that can push is only ever moving commits somebody has
+   * already read and approved. Leaving it out did not protect a review; it
+   * stranded approved work on the machine that made it, which is what happened
+   * to a remote project on `tg`. See `HUMAN_ONLY_COMMANDS`, which still holds
+   * `git commit`, because that IS the gate.
    */
   allowedBash: list("AIDE_ALLOWED_BASH", [
     "pnpm",
@@ -143,6 +151,7 @@ export const CONFIG = {
     "git diff",
     "git log",
     "git show",
+    "git push",
   ]),
 
   /**

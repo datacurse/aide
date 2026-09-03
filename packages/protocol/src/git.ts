@@ -186,6 +186,21 @@ export interface GitPending {
   /** Null when HEAD is detached — the indicator says so rather than guessing. */
   branch: string | null
   files: GitFileChange[]
+  /**
+   * Commits on this branch that the upstream does not have — what push would
+   * send.
+   *
+   * Here rather than only on `GitOverview` because the push button lives on this
+   * rail, and a button that cannot say whether it has anything to do is a button
+   * you press to find out. It rides in `pending`'s existing batch, so it costs no
+   * extra round trip on the call that polls hardest.
+   *
+   * Null means there is no upstream to be ahead OF — a branch nobody has pushed
+   * yet, or a repo with no remote. Deliberately not 0: "nothing to push" and
+   * "nowhere to push it" want different buttons, and collapsing them is how you
+   * get a disabled button on the branch that most needs pushing.
+   */
+  ahead: number | null
 }
 
 /**

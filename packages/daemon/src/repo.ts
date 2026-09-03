@@ -222,17 +222,29 @@ export async function pending(root: RepoRef): Promise<GitPending> {
   // screen — so on a remote project the saving is 1.4s on every beat, which is
   // the difference between a rail that lags behind the tree and one that does
   // not.
-  const [namedOut, z] = await gitBatch(root, [
+  const [namedOut, z, countsOut] = await gitBatch(root, [
     ["rev-parse", "--abbrev-ref", "HEAD"],
     // `--untracked-files=all` so new files are listed one by one. The default
     // collapses them into a bare directory name, which cannot be diffed and
     // reads in the UI as one mystery entry instead of the six files it is.
     ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    // A third command in the SAME batch, so the push button knows whether it has
+    // anything to send without costing this — the hardest-polled call in the
+    // daemon — a second connection. Same form as `overview`'s: asked directly
+    // rather than read off `status --branch`, whose header drops the counts when
+    // they are zero and so cannot tell "in step" from "no upstream".
+    ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
   ])
   const named = (namedOut ?? "").trim() || "HEAD"
+  // A failed command yields "" from `gitBatch`, which is exactly what no
+  // upstream looks like — and null is the honest answer for it, not 0. See
+  // `GitPending.ahead`.
+  const counts = (countsOut ?? "").trim()
+  const aheadRaw = counts ? Number(counts.split(/\s+/)[0]) : Number.NaN
   return {
     branch: named === "HEAD" ? null : named,
     files: parseStatus(z ?? ""),
+    ahead: Number.isFinite(aheadRaw) ? aheadRaw : null,
   }
 }
 

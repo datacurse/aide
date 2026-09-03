@@ -48,6 +48,8 @@ record. They are all rows in the same list, in that order of urgency.
 | The commit run: check, fix once, write a message, commit | `packages/daemon/src/review.ts` |
 | Which chats are ticked off (`~/.aide/board.json`) | `packages/daemon/src/board.ts` |
 | What is left of the plan, and when it resets | `packages/daemon/src/usage.ts` |
+| Activity across every project, reduced from the run logs | `packages/daemon/src/activity.ts` |
+| That reduction drawn as a page | `packages/web/src/Dashboard.tsx` |
 | What a run's shell may and may not do | `packages/daemon/src/policy.ts` |
 
 Decisions already taken, which are not gaps to fill:
@@ -62,6 +64,28 @@ Decisions already taken, which are not gaps to fill:
   in it opens anything: no commit view, no file tree of an old commit, no diff of
   a change that already landed. A diff is read in the conversation that produced
   it.
+- **The dashboard is a page, not a fifth pane, and it counts rather than opens.**
+  `#/activity`, reached from `stats` on the projects header. Every pane is scoped
+  to ONE project; "where did the week go across everything" is the one question
+  none of them can answer, and it is asked when you are between pieces of work
+  rather than inside one — so it takes the whole window for thirty seconds and
+  hands it back, instead of costing every pane a fifth of its width forever. It
+  REPLACES the panes rather than covering them, because they poll and a remote
+  `gitPending` is an ssh connection; nothing is lost by unmounting them, since a
+  run belongs to the daemon and the URL keeps the project and the open chat, so
+  `close` returns you exactly where you were. It is not the browser ruled out
+  above wearing a new hat: every row is a COUNT, and the only thing clickable is
+  a project, which navigates to its panes. Nothing opens a commit, a file or a
+  diff. It is derived on read by `activity.ts` from the run logs and stored
+  nowhere, so no figure on it can drift from its source; the arithmetic is pure
+  in `reduceActivity` and `pnpm smoke` asserts the property that would otherwise
+  fail silently — every breakdown summing to the headline above it. Two numbers
+  on it are deliberately not the obvious computation: the day bucket is LOCAL
+  (`toISOString` files a 1am turn under the day before, and only for turns taken
+  late at night), and `unattributed` counts only logs in the current event
+  vocabulary — logs-on-disk minus logs-indexed reports 294 of 667 on this
+  machine, of which 266 are `run.queued` residue from the task queue that no
+  longer exists.
 - **The rail's lower half has two readings, and you pick one.** `history` and
   `files`, tabbed, sharing the space rather than stacking — they answer the same
   kind of question, orientation, and a rail split three ways gives each too few
@@ -298,6 +322,19 @@ Decisions already taken, which are not gaps to fill:
   INSIDE the commit's own run — `ChatLane.turnUnderHold` — so it appears in the
   run you are watching and the project's lock is never let go between the
   failure and the retry. A commit pressed with no chat open gets no attempt.
+- **The retry re-reads the GATE as well as the tree.** `verify:` lives in
+  `.aide/project.md`, which is a file in the tree the commit is about to take, so
+  the one repair attempt can rewrite the checks as well as the code — and when
+  the checks are what is broken, that is the only fix there is. `verify` is
+  therefore a reader on `CommitWorkingTreeOptions`, called on every pass, not an
+  array read once when the run started. Held as an array it produced a gate no
+  attempt could clear: on a project whose `verify:` called `pnpm` on a host with
+  no pnpm, the agent correctly rewrote the block to call `node_modules/.bin`
+  directly and the retry ran `pnpm exec tsc -b` a second time anyway, refusing
+  the commit twice over a fix that was already on disk. Same shape as the wedge
+  in the brief — two readings of one tree that have to move together. `pnpm
+  smoke` counts how many times the reader is CALLED, which is the only way to
+  tell a re-read from a frozen copy.
 - **Two modes: Plan and Auto.** Manual and Edit-automatically are gone. Nothing
   aide runs may need a human mid-turn, because the fix above is a turn nobody
   typed. Re-adding a mode that asks means re-opening that.
@@ -446,9 +483,45 @@ aide snapshots the tree before each run (`refs/aide/checkpoints/<session>`), so 
 bad run is recoverable — but recovery is a human typing a restore command over
 their own work, which is not free. It is a safety net, not a licence.
 
-**Do not commit.** Your changes are reviewed as a diff and committed by a human
-from the UI. `git commit` is not in the shell allowlist, and reaching for it is a
-sign something has been misunderstood.
+**Do not commit. Pushing is fine.** Your changes are reviewed as a diff and
+committed by a human from the UI, so `git commit` is in `HUMAN_ONLY_COMMANDS` and
+reaching for it is a sign something has been misunderstood — there is no
+invocation that gets through, so a denial is the answer rather than a puzzle.
+That refusal says so in its own words, separately from the `deniedBash` one,
+because for a while they shared a sentence: a denied agent was told the command
+"never exits, or spends money", read that as a runaway-command guard rather than
+a rule about the review, and tried four different forms — a heredoc, a message
+file, a plain invocation — before giving up.
+
+**Commit and push are two buttons, and a checkbox chains them.** `commit` is the
+gate. `push` is its own press on the clean tree — because the common case for it
+is a commit that already happened: the box was not ticked, the push failed, or
+the work was committed before there was a remote. A button that could only push
+as part of committing could clear none of those. The checkbox ("and push") is
+read at the moment of the press and stored nowhere, so it is a habit rather than
+a setting — one that silently pushed months later would be a setting wearing a
+checkbox's clothes. A chained push runs INSIDE the commit's run, after
+`commit.landed`, and its failure does not undo the commit: a push can fail for
+reasons that have nothing to do with the work, and reporting a commit that landed
+as one that failed is worse than saying "committed, but the push failed". The
+button reads `ahead` off `GitPending`, which rides in that call's existing batch
+so it costs no extra round trip; `ahead: null` means no upstream and shows
+`publish branch`, which is why null is not collapsed to 0 — that would disable the
+button on the one branch that has never been pushed. Never `--force`: a push that
+needs it is a history rewrite, and the checkpoint refs are local so they cannot
+recover somebody else's clone.
+
+`git push` is deliberately NOT human-only, and the distinction is the point.
+Push is DOWNSTREAM of the gate: nothing is pushable until it has been committed,
+and committing is the human pressing the button, so a run that can push is only
+ever moving commits somebody has already read and approved. Blocking it
+protected no review that had not already happened — it stranded approved work on
+the machine that made it, which is exactly what it did to a remote project on
+`tg`, where a reviewed commit could not reach origin and the deploy ran from a
+local checkout that no longer matched it. A gate placed after the decision it
+guards is not a gate, it is a dead end. `pnpm smoke` asserts push is allowed on
+both paths, that commit is not, that the two refusal reasons differ, and that the
+commit refusal names push as the thing that IS allowed.
 
 Everything under `.aide/` is fair game, `project.md` included — a change to what
 the project refuses to be should land in the same commit as the code. There is no
