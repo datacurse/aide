@@ -25,7 +25,7 @@ import type { EventLog } from "./eventlog.js"
 import { git, gitOr, refRoot, repoOf, type RepoRef } from "./git.js"
 import { readProjectDoc } from "./registry.js"
 import { LocalRunner, SshRunner, type Runner } from "./runner.js"
-import { forgetConversations } from "./sessions.js"
+import { forgetConversations, type LiveChats } from "./sessions.js"
 import { currentSourceId, staleSince } from "./source.js"
 import type { FromWorker, ToWorker } from "./worker/main.js"
 
@@ -89,6 +89,17 @@ const REMOTE_AGENT = process.env["AIDE_REMOTE_AGENT"] ?? "$HOME/.aide/agent/aide
  * the daemon back to fork-per-turn with no other change.
  */
 
+/**
+ * A turn in flight, as everything outside this file sees it.
+ *
+ * This is `LiveTurn` in `sessions.ts` — the same object, named once on each side
+ * of the seam — and `ChatLane` satisfies `LiveChats` with it. The readers used to
+ * be handed three closures over `turnForSession` instead, each dropping different
+ * fields: a `runId` for the summary row, the whole turn for the not-yet-on-disk
+ * fallback, and a `{working, blocked}` pair for the board. They were three
+ * projections of one Map, which is the shape where two get updated and the third
+ * is forgotten — so there is one now, and the compiler checks the lane against it.
+ */
 export interface ChatTurn {
   runId: string
   projectId: string
@@ -251,7 +262,7 @@ export interface SendOptions {
   thinking: boolean
 }
 
-export class ChatLane {
+export class ChatLane implements LiveChats {
   #turns = new Map<string, TurnRecord>()
   #workers = new Set<SessionWorker>()
   /**
@@ -299,9 +310,15 @@ export class ChatLane {
     }))
   }
 
-  /** The in-flight turn for a conversation, if any. */
-  turnForSession(sessionId: string): ChatTurn | undefined {
-    return this.turns().find((t) => t.sessionId === sessionId)
+  /**
+   * The in-flight turn for a conversation, or null if nothing is running.
+   *
+   * Null rather than `find`'s own `undefined`, to match `holderFor` beside it:
+   * these are the two halves of one question and they answered "nothing" with two
+   * different values, which every caller then had to normalize on its own.
+   */
+  turnForSession(sessionId: string): ChatTurn | null {
+    return this.turns().find((t) => t.sessionId === sessionId) ?? null
   }
 
   /**
@@ -528,7 +545,6 @@ export class ChatLane {
     // run to nobody is the truth about a commit nobody asked for in a chat.
     this.log.append(runId, {
       type: "run.started",
-      taskId: "",
       projectId: project.id,
       model: opts.model,
       cwd: project.root,
@@ -841,7 +857,6 @@ export class ChatLane {
 
     const job: RunAgentOptions = {
       runId,
-      taskId: "",
       projectId: project.id,
       // A chat turn is the message, with no title composed in front of it.
       title: opts.text,

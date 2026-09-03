@@ -87,12 +87,64 @@ export interface RunTotals {
 }
 
 /**
+ * A reading of one run log, remembered until that log changes underneath it.
+ *
  * Run logs are append-only and a finished one never changes again, so a log is
- * read once per daemon and then remembered. Keyed by size and mtime rather than
- * by name: that is what makes the turn currently in flight — the one log that
- * does change — reread on the next poll instead of frozen at its first reading.
+ * read once per daemon and then free. Keyed by size and mtime rather than by
+ * name: that is what makes the turn currently in flight — the one log that does
+ * change — reread on the next poll instead of frozen at its first reading.
+ *
+ * Shared rather than written once per reader, because there are two of them with
+ * different appetites: this file reads each log's head and tail, `activity.ts`
+ * reads the body, and both need the same invalidation. The rule is subtle enough
+ * (an mtime key is what makes the LIVE log correct, not just what makes the
+ * finished ones fast) that two copies of it is two places for it to be got wrong
+ * — and a body cache that stopped noticing the in-flight log would leave the
+ * dashboard reporting a turn's tool calls as of whenever it was first asked.
+ *
+ * Each reader keeps its own Map. They are different value types read at different
+ * costs, and one shared map keyed by path would make the cheap reader pay to
+ * evict the expensive one's entries.
  */
-const cache = new Map<string, { key: string; totals: RunTotals | null }>()
+export class RunLogCache<T> {
+  #entries = new Map<string, { key: string; value: T }>()
+
+  /**
+   * `read` is called only when the log is new or has changed since last time.
+   *
+   * Returns null for a log that cannot be `stat`ed — deleted between the
+   * directory listing and here, which is a real race on a machine where a run can
+   * end at any moment — so a caller can tell "gone" from "read as nothing".
+   */
+  async get(path: string, file: string, read: (path: string) => Promise<T>): Promise<T | null> {
+    let key: string
+    try {
+      const info = await stat(path)
+      key = `${info.size}:${info.mtimeMs}`
+    } catch {
+      return null
+    }
+    const hit = this.#entries.get(file)
+    if (hit?.key === key) return hit.value
+    const value = await read(path)
+    this.#entries.set(file, { key, value })
+    return value
+  }
+
+  /**
+   * Forget every log that is no longer on disk.
+   *
+   * A deleted log is not coming back, and a daemon that runs for weeks should not
+   * go on holding the history of a directory it no longer matches.
+   */
+  retain(present: ReadonlySet<string>): void {
+    for (const file of [...this.#entries.keys()]) {
+      if (!present.has(file)) this.#entries.delete(file)
+    }
+  }
+}
+
+const cache = new RunLogCache<RunTotals | null>()
 
 /**
  * How long a scan of the directory itself stands.
@@ -133,24 +185,11 @@ async function scanRuns(): Promise<RunTotals[]> {
   for (const file of files) {
     if (!file.endsWith(".ndjson")) continue
     present.add(file)
-    const path = join(runsDir(), file)
-    let key: string
-    try {
-      const info = await stat(path)
-      key = `${info.size}:${info.mtimeMs}`
-    } catch {
-      continue
-    }
-    const hit = cache.get(file)
-    const totals =
-      hit?.key === key ? hit.totals : await readRun(path, file.slice(0, -".ndjson".length))
-    cache.set(file, { key, totals })
+    const runId = file.slice(0, -".ndjson".length)
+    const totals = await cache.get(join(runsDir(), file), file, (path) => readRun(path, runId))
     if (totals) out.push(totals)
   }
-  // A log that has been deleted is not coming back, and a daemon that runs for
-  // weeks should not go on holding the history of a directory it no longer
-  // matches.
-  for (const file of [...cache.keys()]) if (!present.has(file)) cache.delete(file)
+  cache.retain(present)
   return out
 }
 

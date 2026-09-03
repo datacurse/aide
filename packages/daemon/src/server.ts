@@ -6,12 +6,14 @@ import type {
   Activity,
   Attachment,
   ChatMode,
+  ChatSpend,
   ChatStatus,
   ClientMessage,
   EffortLevel,
   FolderPick,
   Health,
   PlanUsage,
+  Project,
   RunEvent,
   ServerMessage,
   SshHost,
@@ -152,13 +154,6 @@ app.addHook("onResponse", async (req) => finishWrite(req.id))
 // A client that hangs up mid-request never gets a response, and without this its
 // id would sit in the set forever and the daemon would look permanently busy.
 app.addHook("onRequestAbort", async (req) => finishWrite(req.id))
-
-/** Which conversation, if any, currently has a chat turn running. */
-const activeChatRun = (sessionId: string): string | null =>
-  chat.turnForSession(sessionId)?.runId ?? null
-
-/** The whole turn, for the case where the transcript does not exist yet. */
-const liveChatTurn = (sessionId: string) => chat.turnForSession(sessionId) ?? null
 
 const notFound = (msg: string) => ({ statusCode: 404, error: "Not Found", message: msg })
 
@@ -382,16 +377,32 @@ app.delete("/api/projects/:id", async (req, reply) => {
 })
 
 /**
- * What the chat lane knows about a conversation.
+ * A conversation summary with aide's own bookkeeping attached.
  *
- * `turnForSession` returns the turn IN FLIGHT, so null here does not mean the
- * conversation is gone — it means nothing is running.
+ * Both conversation routes want the same three things joined: the row from the
+ * SDK's session store, the status from the board and the lock, and the spend from
+ * the event logs. They differ only in how many rows they are joining — the list
+ * does N, the open conversation does one — so the join lives here rather than
+ * being written twice and drifting.
+ *
+ * The status and the spend are attached OUT here rather than inside
+ * `listConversations`, which is deliberately a reader of the SDK's session store
+ * and nothing else. The board and the run logs are aide's own and do not belong
+ * in it.
  */
-const liveChat = (sessionId: string) => {
-  const turn = chat.turnForSession(sessionId)
-  return turn ? { working: true, blocked: turn.blocked } : null
+async function withBookkeeping<T extends { sessionId: string }>(
+  project: Project,
+  rows: readonly T[],
+): Promise<Array<T & { status: ChatStatus; spend: ChatSpend | null }>> {
+  // Together: the board is a small JSON read and the spend is an mtime-keyed scan
+  // that is warm after the first poll, and neither needs the other's answer.
+  const [statuses, spend] = await Promise.all([chatStatuses(project, rows, chat), spendBySession()])
+  return rows.map((row) => ({
+    ...row,
+    status: statuses[row.sessionId] ?? UNTRACKED,
+    spend: spend.get(row.sessionId) ?? null,
+  }))
 }
-
 
 /**
  * The branch a commit would land on. Shown on the button so it is never a guess.
@@ -554,22 +565,9 @@ app.get("/api/projects/:id/conversations", async (req, reply) => {
   const project = await getProject(id)
   if (!project) return reply.code(404).send(notFound(`no project ${id}`))
   try {
-    // Status is attached here rather than inside `listConversations`, which is
-    // deliberately a reader of the SDK's session store and nothing else. The
-    // board is aide's own bookkeeping and does not belong in it.
-    // The lock is passed in so a chat whose first turn is in flight has a row
+    // The lane is passed in so a chat whose first turn is in flight has a row
     // even before the SDK has indexed a name for it — see the fallback there.
-    const list = await listConversations(project, activeChatRun, chat.holderFor(project.id))
-    const statuses = await chatStatuses(project, list, liveChat)
-    // Spend is attached here for the same reason status is: it is aide's own
-    // bookkeeping, read out of aide's event logs, and `listConversations` is a
-    // reader of the SDK's session store and nothing else.
-    const spend = await spendBySession()
-    return list.map((c) => ({
-      ...c,
-      status: statuses[c.sessionId] ?? UNTRACKED,
-      spend: spend.get(c.sessionId) ?? null,
-    }))
+    return await withBookkeeping(project, await listConversations(project, chat))
   } catch (err) {
     return reply.code(502).send({
       message: `could not read the session store: ${err instanceof Error ? err.message : String(err)}`,
@@ -582,18 +580,10 @@ app.get("/api/projects/:id/conversations/:sessionId", async (req, reply) => {
   const project = await getProject(id)
   if (!project) return reply.code(404).send(notFound(`no project ${id}`))
   try {
-    const found = await getConversation(project, sessionId, activeChatRun, liveChatTurn)
+    const found = await getConversation(project, sessionId, chat)
     if (!found) return reply.code(404).send(notFound(`no conversation ${sessionId} in this project`))
-    const statuses = await chatStatuses(project, [found.summary], liveChat)
-    const spend = await spendBySession()
-    return {
-      ...found,
-      summary: {
-        ...found.summary,
-        status: statuses[sessionId] ?? UNTRACKED,
-        spend: spend.get(sessionId) ?? null,
-      },
-    }
+    const [summary] = await withBookkeeping(project, [found.summary])
+    return { ...found, summary }
   } catch (err) {
     return reply.code(502).send({
       message: `could not read that conversation: ${err instanceof Error ? err.message : String(err)}`,

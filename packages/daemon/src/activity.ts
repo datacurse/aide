@@ -20,7 +20,7 @@
  * function over a handmade index.
  */
 import { createReadStream } from "node:fs"
-import { readdir, stat } from "node:fs/promises"
+import { readdir } from "node:fs/promises"
 import { join } from "node:path"
 import { createInterface } from "node:readline"
 import type {
@@ -36,7 +36,7 @@ import type {
   ToolUse,
 } from "@aide/protocol"
 import { runsDir } from "@aide/protocol/node"
-import { runIndex, type RunTotals } from "./spend.js"
+import { RunLogCache, runIndex, type RunTotals } from "./spend.js"
 
 /** A day in ms, for the window arithmetic. */
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -189,14 +189,14 @@ async function bodyOfRun(path: string): Promise<RunBody> {
 }
 
 /**
- * What each run log's body held, remembered the way `spend.ts` remembers totals.
+ * What each run log's body held, remembered the way `spend.ts` remembers totals
+ * — literally, now: the same `RunLogCache`, so the invalidation rule that makes
+ * the in-flight log correct exists once rather than in two copies.
  *
- * Keyed by size and mtime rather than by name, so the one log that changes — the
- * turn in flight — is reread on the next ask and every finished one is read
- * exactly once for the life of the daemon. That is what makes a body scan
- * affordable at all: 27MB across 667 logs on this machine, read once, then free.
+ * That is what makes a body scan affordable at all: 27MB across 667 logs on this
+ * machine, read once, then free.
  */
-const bodyCache = new Map<string, { key: string; body: RunBody }>()
+const bodyCache = new RunLogCache<RunBody>()
 
 /** Everything the window's logs hold in their bodies, merged. */
 async function bodies(runs: RunTotals[]): Promise<{
@@ -212,17 +212,10 @@ async function bodies(runs: RunTotals[]): Promise<{
 
   for (const run of runs) {
     const file = `${run.runId}.ndjson`
-    const path = join(runsDir(), file)
-    let key: string
-    try {
-      const info = await stat(path)
-      key = `${info.size}:${info.mtimeMs}`
-    } catch {
-      continue
-    }
-    const hit = bodyCache.get(file)
-    const body = hit?.key === key ? hit.body : await bodyOfRun(path)
-    bodyCache.set(file, { key, body })
+    // Null is a log that vanished between the index being built and here, which
+    // contributes nothing rather than taking the dashboard down.
+    const body = await bodyCache.get(join(runsDir(), file), file, bodyOfRun)
+    if (!body) continue
 
     for (const [name, use] of Object.entries(body.tools)) {
       const before = tools[name]

@@ -144,9 +144,23 @@ export type RunEventBody =
        */
       supervised: boolean
     }
+  /**
+   * A turn began.
+   *
+   * Carries no `taskId` any more. It was a required string that every producer
+   * set to `""` — tasks and their worktrees are gone, so there was nothing left
+   * to put in it — and no reader anywhere looked at it. A field the compiler
+   * makes you fill in and nothing reads is worse than no field: it reads as
+   * something a new call site ought to supply, and there is no right value.
+   *
+   * Logs already on disk still have it. Nothing breaks on that — every reader
+   * takes the fields it wants off a parsed line rather than matching the shape
+   * whole — and the one place a `kind: "task"` still means something is
+   * `ConversationSummary`, which derives it from a session's cwd rather than
+   * from here. See `classify` in `sessions.ts`.
+   */
   | {
       type: "run.started"
-      taskId: string
       projectId: string
       model: string
       cwd: string

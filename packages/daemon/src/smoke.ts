@@ -16,11 +16,16 @@
  * byte-identical either side of an operation — which is exactly the kind of
  * thing that breaks without anybody noticing for a week.
  *
- * It is deliberately not a test framework. One file, one command, plain output.
+ * It is deliberately not a test framework: one command, plain output, and an
+ * assertion that is a function call rather than a registration. Three files
+ * rather than one, though — `smoke-policy.ts` holds the checks that need no
+ * repository, and `smoke-check.ts` the single `check` and failure count they
+ * share. Everything here needs the repository built below, in the order it is
+ * built, which is why the rest did not follow.
  */
 import { execFile } from "node:child_process"
 import { existsSync } from "node:fs"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { createHash } from "node:crypto"
 import { join, resolve } from "node:path"
@@ -67,16 +72,15 @@ import {
 } from "./checkpoint.js"
 import { STATE_DIR } from "@aide/protocol"
 import type { Project, RunEvent, RunStatus } from "@aide/protocol"
+import { check, report } from "./smoke-check.js"
 
 const run = promisify(execFile)
 const git = async (cwd: string, args: string[]) =>
   (await run("git", ["-C", cwd, ...args], { windowsHide: true })).stdout
 
-let failures = 0
-const check = (label: string, ok: boolean, detail = "") => {
-  console.log(`${ok ? "  ok  " : "  FAIL"} ${label}${detail ? ` — ${detail}` : ""}`)
-  if (!ok) failures += 1
-}
+// The assertion and the tally are shared with `smoke-policy.ts` — see there, and
+// see `smoke-check.ts` for why one counter rather than one per file.
+
 
 const root = await mkdtemp(join(tmpdir(), "aide-smoke-"))
 console.log(`repo: ${root}\n`)
@@ -517,255 +521,13 @@ console.log("\nwhat is left to commit — the indicator, and the gate it drives"
   )
 }
 
-console.log("\nbash policy")
-{
-  const allow = ["pnpm", "npm", "git status", "git diff", "git push"]
-  const deny = ["pnpm dev", "pnpm probe", "npx"]
-  const verdict = (cmd: unknown) => checkBashCommand(cmd, allow, deny)
-
-  check("allows pnpm typecheck", verdict("pnpm typecheck").allow)
-  check("allows a bare allowed word", verdict("pnpm").allow)
-  check("allows git diff with args", verdict("git diff --stat").allow)
-  // The one write in the list, and the reason it is safe is not that it is
-  // harmless — it is that it can only move commits a human already approved.
-  check("allows git push on an allowlist that names it", verdict("git push origin main").allow)
-  check("but not a git subcommand nobody listed", !verdict("git reset --hard").allow)
-  check("denies an unlisted command", !verdict("curl https://example.com").allow)
-  check("denies a near-miss prefix", !verdict("pnpmx run").allow, "prefix must end at a word")
-  check("denies pnpm dev", !verdict("pnpm dev").allow, "it never exits")
-  check("denies pnpm  dev with padding", !verdict("pnpm   dev").allow, "whitespace is collapsed")
-  check("denies pnpm probe", !verdict("pnpm probe").allow, "it spends money")
-  check("denies npx", !verdict("npx cowsay").allow)
-  check("denies a pipe", !verdict("pnpm ls | head").allow)
-  check("denies chaining", !verdict("cd packages && pnpm test").allow)
-  check("denies substitution", !verdict("pnpm $(echo dev)").allow, "the payload hides in the arg")
-  check("denies backticks", !verdict("pnpm `echo dev`").allow)
-  check("denies redirection", !verdict("pnpm ls > /tmp/x").allow)
-  check("denies a newline", !verdict("pnpm ls\nrm -rf /").allow)
-  check("denies a non-string", !verdict(undefined).allow)
-  check("denial says what to do instead", verdict("cd x && pnpm t").reason.includes("--filter"))
-}
-
-console.log("\ncarrying out an approved plan")
-{
-  // A null allowlist is the shape a chat gets once the human has approved a
-  // plan and asked for it to be carried out without further questions. Nobody
-  // is watching, so what still has to hold is that the refusals hold: the ways
-  // a run ends badly, and the one that ends the REVIEW.
-  const deny = [...["pnpm dev", "pnpm probe", "npx"], ...HUMAN_ONLY_COMMANDS]
-  const verdict = (cmd: unknown) => checkBashCommand(cmd, null, deny)
-
-  check("runs a command no allowlist mentions", verdict("rg --files").allow, "this is the point")
-  check("runs node", verdict("node scripts/one-off.mjs").allow)
-  check("still denies pnpm dev", !verdict("pnpm dev").allow, "it never exits")
-  check("still denies npx", !verdict("npx cowsay").allow)
-  check("denies git commit", !verdict("git commit -m x").allow, "the human commits, not the run")
-  // Push is DOWNSTREAM of the gate, so allowing it removes no review: nothing is
-  // pushable until a human has already read that diff and pressed commit.
-  // Denying it stranded approved work on the machine that made it.
-  check(
-    "allows git push",
-    verdict("git push").allow,
-    "it only ever moves commits a human already approved",
-  )
-  check("allows git push with a remote and branch", verdict("git push origin main").allow)
-  check("git status is not git commit", verdict("git status").allow, "prefix must end at a word")
-  // The blunt half of the rule survives the allowlist going away, and it has to:
-  // an unattended run is exactly where `pnpm ls; git push` must not resolve to
-  // an allowed leading word.
-  check("denies chaining past a denied command", !verdict("pnpm ls; git push").allow)
-  check("denies substitution", !verdict("echo $(git push)").allow)
-  check("an empty command is still nothing", !verdict("   ").allow)
-
-  // The two categories are refused for OPPOSITE reasons, and an agent acts on
-  // the sentence rather than on the boolean. Both call sites concatenate the
-  // lists, so for a while everything got `deniedBash`'s wording: an agent that
-  // ran a human-only command was told it "never exits, or spends money", none of
-  // which was true, and it read that as a runaway-command guard worth working
-  // around — four denials in a row, each a different invocation, hunting for a
-  // form that would pass. Asserting the boolean alone is what let that ship.
-  const commitReason = verdict("git commit -m x").reason
-  check(
-    "a human-only refusal says whose the commit is",
-    commitReason.includes("human") && commitReason.includes("presses commit"),
-    commitReason.slice(0, 55),
-  )
-  check(
-    "and says no form of it will work, so the agent stops looking",
-    commitReason.includes("no form of this command"),
-    "a refusal an agent cannot act on becomes a retry loop",
-  )
-  check(
-    "and points at the one that IS allowed",
-    commitReason.includes("git push"),
-    "an agent that has just been refused should not have to guess whether push is next",
-  )
-  check(
-    "a runaway command still gets the OTHER reason",
-    verdict("pnpm dev").reason.includes("never exits"),
-    verdict("pnpm dev").reason.slice(0, 55),
-  )
-  check(
-    "and the two are not the same sentence",
-    verdict("pnpm dev").reason !== commitReason,
-    "sharing one message is exactly how the wrong reason reached the agent",
-  )
-}
-
-console.log("\nnothing may stop for a human mid-turn")
-{
-  const { QUESTION_TOOL, QUESTION_REFUSAL } = await import("./agent.js")
-  const { CONFIG } = await import("./config.js")
-
-  // The rule this pins was unenforced for the whole life of the feature, and the
-  // symptom was not an error: a turn on Auto simply stopped, held a remote
-  // project's checkout, and waited 937 seconds for a click. `canUseTool` routes
-  // every unresolved call in a chat run to the browser, so a tool that is not on
-  // an allowlist becomes a QUESTION rather than a refusal — which is right for
-  // an edit and catastrophic for the one tool whose whole purpose is to block.
-  check(
-    "the question tool is never on the chat allowlist",
-    !CONFIG.chatAutoAllowTools.includes(QUESTION_TOOL),
-    CONFIG.chatAutoAllowTools.join(","),
-  )
-  check(
-    "nor on the task allowlist — a headless run has nobody to ask at all",
-    !CONFIG.allowedTools.includes(QUESTION_TOOL),
-  )
-  // A refusal an agent cannot act on just becomes a retry, and a retry loop
-  // against a blocked tool spends money going nowhere. This one has to name the
-  // thing to do instead, which is: say it in the reply and end the turn.
-  check(
-    "and the refusal says what to do instead",
-    QUESTION_REFUSAL.includes("reply") && QUESTION_REFUSAL.includes("end the turn"),
-    QUESTION_REFUSAL.slice(0, 60),
-  )
-  // `ExitPlanMode` is the deliberate exception and must NOT be swept up by the
-  // same rule: it ends the turn rather than parking it, so nothing is held while
-  // the human reads. Not asserted here — the two are string literals, so tsc
-  // rejects the comparison as provably false, which is a stronger guarantee than
-  // a runtime check and costs nothing to keep.
-}
-
-console.log("\ninherited chat mode")
-{
-  // The session store is shared with the CLI and the VS Code extension, and a
-  // conversation carries the mode it was last driven at. Reading that back is
-  // what stops a chat you were running on Auto elsewhere from quietly reverting
-  // here and asking permission for the next command.
-  check("plan round-trips", chatModeFromSdk("plan") === "plan")
-  check("auto round-trips", chatModeFromSdk("auto") === "auto")
-  // Null is the load-bearing case. It means "no opinion", and the browser keeps
-  // whatever the human last picked — so an unknown mode can never widen one, and
-  // a mode aide has retired can never narrow one either.
-  check(
-    "the mode Manual used to be is no longer inherited",
-    chatModeFromSdk("default") === null,
-    "a CLI chat on default arrives on your own setting, not on a mode aide dropped",
-  )
-  check("nor is the one Edit-automatically was", chatModeFromSdk("acceptEdits") === null)
-  check("dontAsk has no picker entry", chatModeFromSdk("dontAsk") === null, "what task runs use")
-  check("bypassPermissions is never inherited", chatModeFromSdk("bypassPermissions") === null)
-  check("a future mode is not guessed at", chatModeFromSdk("somethingNew") === null)
-  check("junk is not a mode", chatModeFromSdk(undefined) === null && chatModeFromSdk(7) === null)
-}
-
-console.log("\nprotocol stays browser-safe")
-{
-  // The web bundle imports the @aide/protocol barrel. If anything reachable from
-  // it pulls `node:*` or a Node-only library, Vite resolves it happily at dev
-  // time, the browser refuses it at runtime, React never mounts, and you get a
-  // blank white page with nothing in the terminal and nothing in the build.
-  // Cheap to assert, miserable to diagnose.
-  const src = fileURLToPath(new URL("../../protocol/src/", import.meta.url))
-  const seen = new Set<string>()
-  const offenders: string[] = []
-
-  const walk = async (file: string): Promise<void> => {
-    if (seen.has(file)) return
-    seen.add(file)
-    let body: string
-    try {
-      body = await readFile(join(src, file), "utf8")
-    } catch {
-      return
-    }
-    for (const m of body.matchAll(/from "([^"]+)"/g)) {
-      const spec = m[1] ?? ""
-      if (spec.startsWith("node:") || spec === "gray-matter") {
-        offenders.push(`${file} imports ${spec}`)
-      } else if (spec.startsWith("./")) {
-        await walk(spec.slice(2).replace(/\.js$/, ".ts"))
-      }
-    }
-  }
-  await walk("index.ts")
-
-  check(
-    "the barrel reaches no Node-only module",
-    offenders.length === 0,
-    offenders.join("; ") || `${seen.size} modules checked`,
-  )
-  // The counterpart: the Node entry must still exist and still carry the
-  // filesystem half, or the split has quietly collapsed back into one barrel.
-  const nodeEntry = await readFile(join(src, "node.ts"), "utf8")
-  check("the node entry still carries paths", nodeEntry.includes("./paths.js"))
-}
-
-console.log("\nrestarting a stale daemon")
-{
-  // The daemon loads its modules once, so every edit to packages/daemon/src
-  // leaves a process running code that no longer exists. The dev server fixes
-  // that by restarting it — and the previous version of this rule, chokidar
-  // firing on a file write, killed a daemon three lines into a commit and left
-  // the repository half-changed. Hence a pure function, and hence these.
-  //
-  // Runs edit the project's own checkout now, so a daemon developing its own
-  // repository has its source rewritten by the agents it supervises as a matter
-  // of routine rather than by accident.
-  const QUIET = 1500
-  const base: Health = {
-    ok: true,
-    taskModel: "claude-opus-5",
-    bootSourceId: "aaaaaaaaaaaa",
-    sourceId: "bbbbbbbbbbbb",
-    stale: true,
-    supervised: true,
-    busy: { chats: 0, writes: 0 },
-    idleMs: 10_000,
-  }
-  const decide = (patch: Partial<Health>, previous = "bbbbbbbbbbbb" as string | null) =>
-    restartDecision({ ...base, ...patch }, previous, QUIET)
-
-  check("restarts a stale, quiet daemon", decide({}).restart, decide({}).reason)
-  check("leaves a current daemon alone", !decide({ stale: false }).restart)
-
-  // Each of these is a way to destroy work.
-  check("not mid chat turn", !decide({ busy: { chats: 1, writes: 0 } }).restart)
-  check(
-    "not mid commit",
-    !decide({ busy: { chats: 0, writes: 1 } }).restart,
-    "a commit is one request, and killing it leaves the work half-staged",
-  )
-  check(
-    "and it says what it is waiting for",
-    decide({ busy: { chats: 1, writes: 2 } }).reason === "1 chat turn, 2 requests in flight",
-    decide({ busy: { chats: 1, writes: 2 } }).reason,
-  )
-
-  // The gap between two of the browser's requests is not a safe moment.
-  check("not in the gap right after a write", !decide({ idleMs: 200 }).restart)
-  check("but yes once it has been quiet", decide({ idleMs: QUIET }).restart)
-
-  // A tree still being rewritten reports a different fingerprint every tick, and
-  // restarting once per tick through a `git merge` helps nobody.
-  check("not while the tree is still moving", !decide({}, "ccccccccccc").restart)
-  check("not on the very first sighting", !decide({}, null).restart)
-
-  // Unknown must never read as changed: a daemon with no source tree to compare
-  // against is not stale, it is unknowable.
-  check("never restarts on an unreadable source", !decide({ sourceId: null }, null).restart)
-}
+// The checks that need no repository, in the place they used to be written out.
+// A dynamic import rather than a static one at the top, and that is the whole
+// reason it is down here: a static `import` is hoisted and evaluated before the
+// first line of this file runs, so its output would print above `repo: <path>`
+// and above the checkpoint section — the run would still be correct and would
+// read as though the sections had been shuffled.
+await import("./smoke-policy.js")
 
 console.log("\na failed turn says what failed")
 {
@@ -774,7 +536,7 @@ console.log("\na failed turn says what failed")
   // read by nobody. What follows five of them is the same message typed again
   // from memory. These pin the mapping that lost it.
   const { normalizeSdkMessage } = await import("./agent.js")
-  const ctx = { taskId: "", projectId: "p1", cwd: root, fallbackModel: "m" }
+  const ctx = { projectId: "p1", cwd: root, fallbackModel: "m" }
   const finish = (m: Record<string, unknown>) => {
     const out = normalizeSdkMessage({ type: "result", ...m }, ctx)
     const ev = out.find((e) => e.type === "run.finished")
@@ -2055,5 +1817,152 @@ console.log("\nactivity")
   check("and spans the right number of days", (now - windowStart(now, 7)) / 86400000 > 6)
 }
 
-console.log(`\n${failures === 0 ? "all checks passed" : `${failures} FAILED`}`)
-process.exit(failures === 0 ? 0 : 1)
+// ---------------------------------------------------------------------------
+console.log("\nlogs written by an older aide still read")
+// `run.started` used to carry a `taskId`, and 672 logs in `~/.aide/runs` on this
+// machine still have one. Dropping a field from the wire is only safe because
+// every reader takes what it wants off a parsed line rather than matching the
+// shape whole — which is a property of how they are written, not something the
+// compiler enforces, so it is asserted rather than assumed. The failure it
+// guards against is silent: a reader that rejected these would not crash, it
+// would report a machine with hundreds of runs as having none.
+{
+  const { sessionOfRun, terminalEvent } = await import("./spend.js")
+
+  const dir = await mkdtemp(join(tmpdir(), "aide-oldlog-"))
+  const path = join(dir, "old.ndjson")
+  // Exactly the shape aide wrote before the field went, `taskId` included.
+  const lines = [
+    { type: "user.message", text: "do the thing", runId: "old", seq: 1, ts: 1000 },
+    {
+      type: "run.started",
+      taskId: "0004",
+      projectId: "p1",
+      model: "m",
+      cwd: "/tmp/x",
+      sessionId: "sess-old",
+      runId: "old",
+      seq: 2,
+      ts: 1001,
+    },
+    {
+      type: "run.finished",
+      subtype: "success",
+      status: "success",
+      totalCostUsd: 0.5,
+      modelUsage: {},
+      numTurns: 3,
+      durationMs: 4000,
+      permissionDenials: [],
+      runId: "old",
+      seq: 3,
+      ts: 5000,
+    },
+  ]
+  await writeFile(path, `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8")
+
+  const head = await sessionOfRun(path)
+  check(
+    "a log with a taskId still names its conversation",
+    head?.sessionId === "sess-old" && head?.projectId === "p1",
+    "these are most of the logs on this machine; a reader that refused them would report no history at all",
+  )
+  check("and the moment it opened", head?.at === 1000)
+
+  const end = await terminalEvent(path)
+  check(
+    "and still says what it cost",
+    end?.type === "run.finished" && end.totalCostUsd === 0.5 && end.durationMs === 4000,
+  )
+
+  await rm(dir, { recursive: true, force: true })
+}
+
+// ---------------------------------------------------------------------------
+console.log("\nrun logs are read once, except the one being written")
+// The cache both readers of `~/.aide/runs` share. What it buys is measured —
+// 667 logs, 737ms cold and 27ms warm — but that is the half that would be
+// noticed if it broke. The half that would NOT is the invalidation: a cache
+// keyed by name alone is correct for every finished log and silently wrong for
+// the one log that matters, the turn in flight, which it would freeze at
+// whatever it said when first asked. So what these pin is the rereading.
+{
+  const { RunLogCache } = await import("./spend.js")
+
+  const dir = await mkdtemp(join(tmpdir(), "aide-logcache-"))
+  const file = "run.ndjson"
+  const path = join(dir, file)
+  await writeFile(path, "one\n", "utf8")
+
+  const cache = new RunLogCache<string>()
+  let reads = 0
+  const read = async (p: string) => {
+    reads += 1
+    return await readFile(p, "utf8")
+  }
+
+  check("a first read reaches the file", (await cache.get(path, file, read)) === "one\n")
+  await cache.get(path, file, read)
+  check(
+    "and a second does not",
+    reads === 1,
+    "a finished log never changes again, so reading it twice is the cost this exists to remove",
+  )
+
+  // An append, which is what a turn in flight does to its own log on every
+  // event. Both halves of the key move, but SIZE alone would be enough here —
+  // the mtime is what catches the rarer case below.
+  await writeFile(path, "one\ntwo\n", "utf8")
+  check(
+    "a log that grew is read again",
+    (await cache.get(path, file, read)) === "one\ntwo\n" && reads === 2,
+    "this is the live turn, and a stale answer for it is the whole failure this key prevents",
+  )
+
+  // Same length, different bytes. A size-only key calls this unchanged, which is
+  // why the key carries the mtime too.
+  //
+  // The mtime is stamped, not just written: two writes inside one filesystem
+  // timestamp tick land on the same mtime, and this assertion then fails for a
+  // reason that has nothing to do with the cache. That is a flake rather than a
+  // finding — it was watched happening once here — so the clock is moved by hand
+  // instead of hoped at.
+  await writeFile(path, "one\nTWO\n", "utf8")
+  const later = new Date(Date.now() + 2000)
+  await utimes(path, later, later)
+  check(
+    "and so is one that changed without growing",
+    (await cache.get(path, file, read)) === "one\nTWO\n" && reads === 3,
+  )
+
+  // A log deleted between the directory listing and the read. A real race: a run
+  // can end at any moment, and the caller has to be able to skip it rather than
+  // take a whole dashboard down over one missing file.
+  await rm(path)
+  check(
+    "a log that has gone reads as null, not as an error",
+    (await cache.get(path, file, read)) === null,
+  )
+
+  // Eviction. Without it a daemon that runs for weeks holds the history of a
+  // directory it no longer matches — every log ever deleted, still in memory.
+  await writeFile(path, "back\n", "utf8")
+  await cache.get(path, file, read)
+  const beforeRetain = reads
+  // Twice, either side of the eviction, over a file nothing has touched in
+  // between: the first is a hit, so the second can only reach the file if
+  // `retain` genuinely dropped the entry. Asserting on the delta rather than on
+  // a running total, which is a number that has to be recounted by hand every
+  // time an assertion is added above.
+  cache.retain(new Set())
+  await cache.get(path, file, read)
+  check(
+    "and one dropped from the index is forgotten",
+    reads === beforeRetain + 1,
+    "retain is what keeps a long-lived daemon from holding logs that no longer exist",
+  )
+
+  await rm(dir, { recursive: true, force: true })
+}
+
+report()

@@ -26,7 +26,6 @@ import { HUMAN_ONLY_COMMANDS, checkBashCommand } from "./policy.js"
 
 export interface RunAgentOptions {
   runId: string
-  taskId: string
   projectId: string
   /** The task title. Composed into the user turn â it is part of the request. */
   title: string
@@ -444,7 +443,6 @@ function toDeltas(message: unknown): RunDelta[] {
 }
 
 export interface NormalizeContext {
-  taskId: string
   projectId: string
   cwd: string
   /** Used when the message does not name a model of its own. */
@@ -488,7 +486,6 @@ export function normalizeSdkMessage(
     return [
       {
         type: "run.started",
-        taskId: ctx.taskId,
         projectId: ctx.projectId,
         model: String(m["model"] ?? ctx.fallbackModel),
         cwd: ctx.cwd,
@@ -1124,7 +1121,6 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
       }
 
       for (const event of normalizeSdkMessage(message, {
-        taskId: opts.taskId,
         projectId: opts.projectId,
         cwd: opts.cwd,
         fallbackModel: opts.model,

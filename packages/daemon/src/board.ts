@@ -3,6 +3,7 @@ import type { ChatStatus, Project } from "@aide/protocol"
 import { aideHome, boardPath } from "@aide/protocol/node"
 import { readCheckpoint, restoreCommand } from "./checkpoint.js"
 import { repoOf } from "./git.js"
+import { NO_TURNS, type LiveChats } from "./sessions.js"
 
 /**
  * Which conversations you have ticked off.
@@ -67,14 +68,6 @@ async function readLinks(): Promise<LinkFile> {
 async function writeLinks(links: LinkFile): Promise<void> {
   await mkdir(aideHome(), { recursive: true })
   await writeFile(boardPath(), `${JSON.stringify(links, null, 2)}\n`, "utf8")
-}
-
-/** What the chat lane knows about a conversation. Null when it has no live turn. */
-export interface LiveChat {
-  /** A turn is in flight. */
-  working: boolean
-  /** A tool call is waiting on a human. */
-  blocked: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -150,19 +143,24 @@ export async function reopenChat(project: Project, sessionId: string): Promise<v
 export async function chatStatuses(
   project: Project,
   sessions: readonly { sessionId: string }[],
-  live: (sessionId: string) => LiveChat | null,
+  /** The lock — the same view the session reader gets, so the two cannot disagree. */
+  live: LiveChats = NO_TURNS,
 ): Promise<Record<string, ChatStatus>> {
   const board = boardFor(await readLinks(), project.id)
 
   const out: Record<string, ChatStatus> = {}
   for (const { sessionId } of sessions) {
     const done = board.done[sessionId] != null
-    const chat = live(sessionId)
+    // A turn in flight IS "working" — there is no separate flag to read, which is
+    // what the `{working, blocked}` projection this used to take was hiding: it
+    // could be built with `working: false` over a live turn, and nothing would
+    // have caught it.
+    const turn = live.turnForSession(sessionId)
     out[sessionId] = {
       // Working outranks done: a chat you ticked off and then asked one more
       // thing of is running, whatever the tick says.
-      state: chat?.working ? "working" : done ? "closed" : null,
-      blocked: chat?.blocked ?? false,
+      state: turn ? "working" : done ? "closed" : null,
+      blocked: turn?.blocked ?? false,
       done,
     }
   }

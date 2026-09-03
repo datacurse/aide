@@ -26,6 +26,7 @@ record. They are all rows in the same list, in that order of urgency.
 | --- | --- |
 | The four panes and the polling loop | `packages/web/src/App.tsx` |
 | The chat list, the capture box, the done tick | `packages/web/src/panes/Conversations.tsx` |
+| The open conversation, and the turn streaming into it | `packages/web/src/panes/Conversation.tsx` |
 | Unstarted chats, drafts, pasted images (IndexedDB) | `packages/web/src/drafts.ts` |
 | What a parked chat is called before it has run | `packages/web/src/naming.ts` |
 | An event log rendered as a conversation | `packages/web/src/panes/Transcript.tsx` |
@@ -51,9 +52,58 @@ record. They are all rows in the same list, in that order of urgency.
 | Activity across every project, reduced from the run logs | `packages/daemon/src/activity.ts` |
 | That reduction drawn as a page | `packages/web/src/Dashboard.tsx` |
 | What a run's shell may and may not do | `packages/daemon/src/policy.ts` |
+| The checks that need no repository, and the shared tally | `packages/daemon/src/smoke-policy.ts`, `smoke-check.ts` |
 
 Decisions already taken, which are not gaps to fill:
 
+- **`pnpm smoke` is three files, and it is not split further on purpose.** What
+  came out is the group that needs no repository — the shell policy, the plan
+  rules, the browser-safety check, the restart decision — into `smoke-policy.ts`,
+  with `smoke-check.ts` holding the one `check` and the one failure count so
+  there is still a single tally and a single exit code. What did NOT come out is
+  most of the file, and the reason is the thing to know before trying again: it
+  drives ONE throwaway repository through a deliberate sequence — a checkpoint,
+  a commit measured against it, a branch and a merge for the history view to
+  draw — where each section is set up by the ones above it and several assert a
+  NON-effect, that an operation left `git status` and the index byte-identical.
+  Splitting those means a repository per file, which is slower and quietly tests
+  something weaker: that the operations work alone, rather than that they
+  compose. `smoke-policy.ts` is imported for its side effects, DYNAMICALLY and
+  at the point in the file where its sections used to be written out, because a
+  static import is hoisted and its output would print above `repo: <path>` — the
+  run would still be correct and would read as though the sections had been
+  shuffled. When changing any of this, the check that matters is that the
+  assertion count does not move: it was 334, and every one of the 325 that
+  predate this session still prints the same line.
+- **`taskId` is gone from the wire and kept in the session reader, and that is
+  not an inconsistency.** They were two different fields wearing one name. The
+  wire one — `run.started.taskId`, `RunAgentOptions.taskId` — was a required
+  string every producer set to `""` and no reader ever looked at, which is worse
+  than absent: it reads as something a new call site ought to supply, and there
+  is no right value. The other is derived from a session's cwd by `classify`, and
+  it still means something, because `~/.claude/projects/` holds transcripts from
+  when a task WAS a worktree and relabelling those as chats would be a lie about
+  what happened. Nothing new can produce one. The 672 logs on this machine that
+  still carry the old field read fine, because every reader takes the fields it
+  wants off a parsed line rather than matching the shape whole — `pnpm smoke`
+  pins that against a log in the old format, since a reader that refused them
+  would not crash, it would report a machine with hundreds of runs as empty.
+- **The chat list and the open chat are two files, and the near-identical money
+  formatters across the web package are deliberate.** `Conversations.tsx` is the
+  LIST, `Conversation.tsx` is the one you have open; they were one file of two
+  thousand lines that shared nothing but an import block, twenty-two entries of
+  which belonged to only one of them. They hold separate state, are addressed by
+  different halves of the URL, and speak only through props `App.tsx` passes
+  down. The formatters stayed with the list because that is who prints them.
+  What looks like the obvious next tidy-up — one `money` for the package — is
+  the one to leave alone: there are THREE and each is a different decision.
+  `ui.tsx` gives a lone figure four places below a dollar, because on a single
+  chat row $0.004 and $0.04 are different facts. `Dashboard.tsx`'s `columnMoney`
+  forces two, because in a column `$0.4367` beside `$47.60` puts the decimal
+  points in different places and the eye can no longer compare magnitudes.
+  `Conversations.tsx` floors to `<$0.01`, because rounding a real spend to
+  `$0.00` says the work was free, which the brief forbids of any cost figure.
+  Merging them would silently undo whichever two lost.
 - **No worktrees and no branches.** Every run works the project's own checkout,
   one at a time. See the brief for why.
 - **No merge, no `land`.** Recoverability is the checkpoint, not an unmerged

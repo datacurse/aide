@@ -72,7 +72,6 @@ function announce(): void {
     runId,
     body: {
       type: "run.started",
-      taskId: job?.taskId ?? "",
       projectId: job?.projectId ?? "",
       model: job?.model ?? "",
       cwd,

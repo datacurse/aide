@@ -221,10 +221,8 @@ function classify(cwd: string): { kind: ConversationSummary["kind"]; taskId: str
  */
 export async function listConversations(
   project: Project,
-  /** Which conversations have a turn in flight. Injected so this file stays a reader. */
-  activeRunFor: (sessionId: string) => string | null = () => null,
-  /** The turn running in this project right now, if any — see the fallback below. */
-  liveTurn: LiveTurn | null = null,
+  /** The lock. Injected so this file stays a reader of the session store. */
+  live: LiveChats = NO_TURNS,
 ): Promise<ConversationSummary[]> {
   // The far side's store for a remote project, this machine's for a local one.
   // Same shape either way — it is the same SDK call, just executed where the
@@ -255,7 +253,7 @@ export async function listConversations(
         lastModified: s.lastModified,
         createdAt: s.createdAt ?? null,
         bytes: s.fileSize ?? 0,
-        activeRunId: activeRunFor(s.sessionId),
+        activeRunId: live.turnForSession(s.sessionId)?.runId ?? null,
         // Left null for the list. Filling it here would mean a file read per
         // conversation on every poll, to answer a question only the open
         // conversation asks; `getConversation` fills it for that one.
@@ -273,8 +271,9 @@ export async function listConversations(
   // no row in the list and nothing selected — for the rest of the turn, because
   // the list is fetched on things you did rather than on a beat, and the next
   // thing that asks is the run ending.
-  const live = liveTurn?.sessionId ? liveSummary(project, liveTurn.sessionId, liveTurn) : null
-  if (live && !rows.some((c) => c.sessionId === live.sessionId)) rows.push(live)
+  const holder = live.holderFor(project.id)
+  const running = holder?.sessionId ? liveSummary(project, holder.sessionId, holder) : null
+  if (running && !rows.some((c) => c.sessionId === running.sessionId)) rows.push(running)
 
   return rows.sort((a, b) => b.lastModified - a.lastModified)
 }
@@ -282,19 +281,15 @@ export async function listConversations(
 export async function getConversation(
   project: Project,
   sessionId: string,
-  activeRunFor: (sessionId: string) => string | null = () => null,
-  /** The turn running for this conversation right now, if there is one. */
-  liveTurnFor: (sessionId: string) => LiveTurn | null = () => null,
+  live: LiveChats = NO_TURNS,
 ): Promise<{ summary: ConversationSummary; events: RunEvent[]; truncated: boolean; totalMessages: number } | null> {
-  const listed = (await listConversations(project, activeRunFor)).find(
-    (c) => c.sessionId === sessionId,
-  )
+  const listed = (await listConversations(project, live)).find((c) => c.sessionId === sessionId)
   // Neither absent from the listing nor absent from disk means it does not
   // exist — see summaryFromFile and liveSummary.
   const summary =
     listed ??
-    (await summaryFromFile(project, sessionId, activeRunFor)) ??
-    liveSummary(project, sessionId, liveTurnFor(sessionId))
+    (await summaryFromFile(project, sessionId, live)) ??
+    liveSummary(project, sessionId, live.turnForSession(sessionId))
   if (!summary) return null
 
   const messages = project.host
@@ -320,7 +315,6 @@ export async function getConversation(
     // around it; normalizeSdkMessage expects the envelope, which is what a
     // SessionMessage already is.
     for (const body of normalizeSdkMessage(message, {
-      taskId: summary.taskId ?? "",
       projectId: project.id,
       cwd: summary.cwd,
       fallbackModel: "",
@@ -349,6 +343,40 @@ export interface LiveTurn {
   startedAt: number
   /** The message that opened the turn. */
   text: string
+  /** A tool call is waiting on a human. The only thing that is stopped ON you. */
+  blocked: boolean
+}
+
+/**
+ * The lock, as the readers see it.
+ *
+ * One interface rather than the three closures this used to be handed — a
+ * `runId` getter for the summary, a whole turn for the not-on-disk fallback, and
+ * a `{working, blocked}` projection for the board. All three were `turnForSession`
+ * with different fields dropped, so the type they need is the lane's own pair of
+ * questions: which turn belongs to a conversation, and which one holds a project.
+ *
+ * It matters that this is ONE object rather than three arguments. Every reader
+ * here answers from the lock, and the brief's wedge is a gate whose precondition
+ * and whose release read different objects; three closures over one Map is that
+ * shape in miniature, and it is exactly the shape that lets two of them be
+ * updated and the third forgotten. `ChatLane` satisfies this directly, so there
+ * is nothing to keep in step.
+ *
+ * `NO_TURNS` is the reader for a caller that has no lane — the tests, and
+ * `getConversation`'s own internal listing, which wants the rows and not the
+ * liveness.
+ */
+export interface LiveChats {
+  /** The turn in flight for a conversation, or null if it is not running. */
+  turnForSession(sessionId: string): LiveTurn | null
+  /** The turn holding a project's checkout, or null if it is free. */
+  holderFor(projectId: string): LiveTurn | null
+}
+
+export const NO_TURNS: LiveChats = {
+  turnForSession: () => null,
+  holderFor: () => null,
 }
 
 /**
@@ -423,7 +451,7 @@ function liveSummary(
 async function summaryFromFile(
   project: Project,
   sessionId: string,
-  activeRunFor: (sessionId: string) => string | null,
+  live: LiveChats,
 ): Promise<ConversationSummary | null> {
   const file = await findSessionFile(sessionId)
   if (!file) return null
@@ -466,7 +494,7 @@ async function summaryFromFile(
     lastModified: mtime,
     createdAt: head.createdAt,
     bytes: size,
-    activeRunId: activeRunFor(sessionId),
+    activeRunId: live.turnForSession(sessionId)?.runId ?? null,
     lastMode: null,
   }
 }

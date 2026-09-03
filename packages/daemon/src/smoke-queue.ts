@@ -491,12 +491,29 @@ console.log("\ndone, and undone")
 // and that a running turn outranks it.
 {
   const { closeChat, reopenChat, chatStatuses } = await import("./board.js")
+  const { NO_TURNS } = await import("./sessions.js")
+  type LiveChats = import("./sessions.js").LiveChats
 
-  const none = () => null
   const sessions = [{ sessionId: "sess-done" }, { sessionId: "sess-open" }]
 
+  /**
+   * A lane with exactly one turn in flight.
+   *
+   * Built as a `LiveChats` rather than as the `{working, blocked}` pair this used
+   * to take, which is the point of the change it is covering: a projection could
+   * be handed `working: false` over a live turn and nothing would notice. Here a
+   * turn either exists for a session or it does not.
+   */
+  const running = (sessionId: string, blocked = false): LiveChats => ({
+    turnForSession: (s) =>
+      s === sessionId
+        ? { runId: "run-live", projectId: project.id, sessionId, startedAt: 0, text: "", blocked }
+        : null,
+    holderFor: () => null,
+  })
+
   await closeChat(project, "sess-done")
-  let statuses = await chatStatuses(project, sessions, none)
+  let statuses = await chatStatuses(project, sessions, NO_TURNS)
   check("a ticked chat reads as closed", statuses["sess-done"]?.state === "closed")
   check("and says so as a flag too", statuses["sess-done"]?.done === true)
   check(
@@ -509,9 +526,7 @@ console.log("\ndone, and undone")
   // Working outranks done. A chat you ticked off and then asked one more thing
   // of is running, whatever the tick says — and showing it as finished while an
   // agent is mid-turn in your checkout is the one reading that could mislead.
-  statuses = await chatStatuses(project, sessions, (s) =>
-    s === "sess-done" ? { working: true, blocked: false } : null,
-  )
+  statuses = await chatStatuses(project, sessions, running("sess-done"))
   check(
     "a new turn on a finished chat reads as working",
     statuses["sess-done"]?.state === "working",
@@ -519,8 +534,22 @@ console.log("\ndone, and undone")
   )
   check("though it is still marked done", statuses["sess-done"]?.done === true)
 
+  // The other half of what the lock carries, and the half that used to travel in
+  // a projection of its own: a turn stopped on a permission prompt is the one
+  // thing in the list that is stopped ON you.
+  statuses = await chatStatuses(project, sessions, running("sess-open", true))
+  check(
+    "a turn waiting on a click says so",
+    statuses["sess-open"]?.blocked === true && statuses["sess-open"]?.state === "working",
+  )
+  check(
+    "and a chat with no turn is never blocked",
+    statuses["sess-done"]?.blocked === false,
+    "blocked is only ever true of the run in flight",
+  )
+
   await reopenChat(project, "sess-done")
-  statuses = await chatStatuses(project, sessions, none)
+  statuses = await chatStatuses(project, sessions, NO_TURNS)
   check(
     "unticking it undoes the whole thing",
     statuses["sess-done"]?.state === null && statuses["sess-done"]?.done === false,
@@ -623,7 +652,6 @@ console.log("\nthe profile")
     at(0, { type: "user.message", text: "do the thing" }),
     at(100, {
       type: "run.started",
-      taskId: "",
       projectId: project.id,
       model: "m",
       cwd: root,
