@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react"
-import type { ActivityDay, ProjectActivity } from "@aide/protocol"
+import type { ActivityDay, HourCell, ProjectActivity } from "@aide/protocol"
 import { api, type Activity } from "./api.js"
 import { ArrowClockwise } from "./icons.js"
 import { Button, Empty, money } from "./ui.js"
@@ -48,6 +48,32 @@ const WINDOWS = [7, 30, 90] as const
 const SERIES = ["bg-graph-1", "bg-graph-2", "bg-graph-3", "bg-graph-4"] as const
 
 /**
+ * The heatmap's ramp: one hue, light → dark, ending at `--color-graph-1`.
+ *
+ * Sequential rather than categorical, because the punchcard's job is MAGNITUDE
+ * — how much work happened in this hour — and the categorical set would say
+ * "these cells are different kinds of thing", which they are not. The rule the
+ * skill states and the reason it exists: a rainbow heatmap makes the reader
+ * decode a legend to compare two cells, where a single hue is read directly.
+ *
+ * Five steps, checked for monotonic luminance (0.081 → 0.482). Monotonicity is
+ * the sequential check the way ΔE is the categorical one: a ramp that goes
+ * lighter then darker inverts the reading of half its cells and nothing on
+ * screen would say so. The empty step is a surface tint rather than the first
+ * colour, so "nothing happened" cannot be mistaken for "a little happened".
+ *
+ * The ramp starts well ABOVE that tint — step 1 is 1.96× its luminance —
+ * because the first version began at #173a5e, only 1.5× the empty cell, and on
+ * a grid where most cells hold one or two turns that rendered the majority of
+ * the data as very nearly background. A sequential ramp has to spend its range
+ * where the values are, and for a punchcard that is the bottom.
+ */
+const HEAT = ["#24537f", "#2e6ba6", "#3a86cc", "#5b9ce6", "#8fbaff"] as const
+const HEAT_EMPTY = "#232323"
+
+const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const
+
+/**
  * Money in a COLUMN, always two decimals.
  *
  * `money()` from `ui.tsx` gives four places under a dollar, which is right where
@@ -70,8 +96,18 @@ function compact(n: number): string {
   return `${Math.round(n)}`
 }
 
-/** `2h 40m`, `18m`. Never `0.44 hours`, which nobody reads as anything. */
+/**
+ * `2h 40m`, `18m`, `9.4s`, `340ms`. Never `0.44 hours`.
+ *
+ * Seconds and milliseconds matter because this formats commit checks as well as
+ * turn totals, and those live at the small end: rounding to whole minutes drew
+ * `pnpm typecheck` (1.5s) and `pnpm smoke` (13s) both as `0m`, a column of
+ * zeroes beside bars that plainly differed. One formatter across the page rather
+ * than two, so the same duration never appears in two spellings.
+ */
 function duration(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`
   const mins = Math.round(ms / 60_000)
   if (mins < 60) return `${mins}m`
   return `${Math.floor(mins / 60)}h ${mins % 60}m`
@@ -209,6 +245,110 @@ function DailyBars({ days }: { days: ActivityDay[] }) {
 }
 
 /**
+ * When the work happens: weekday × hour, as a heatmap.
+ *
+ * The punchcard, and the thing whose absence made the first version of this page
+ * so thin. `runIndex` has always carried a full timestamp per run; reducing it
+ * to one bar per day threw away both questions the shape answers — what time of
+ * day you work, and whether the weekend differs from the week. On the machine
+ * this was built for the answer is emphatic and was completely invisible: the
+ * five busiest cells are all Saturday and Sunday, four of them between 1am and
+ * 5am.
+ *
+ * A heatmap because the job is magnitude over a GRID, which is the one case the
+ * form heuristic sends here rather than to bars: two ordinal axes at once, and
+ * 168 values that would be an unreadable bar chart and a meaningless line.
+ *
+ * Hour labels every six, not every hour — 24 labels under a 24-column grid at
+ * this width is a grey smear, and the quarter marks are what you actually
+ * navigate by.
+ */
+function Punchcard({ cells }: { cells: HourCell[] }) {
+  // Cells are indexed rather than searched per draw: `find` inside a 168-cell
+  // render is 28k comparisons for a grid that arrives in a known order.
+  const at = new Map(cells.map((c) => [`${c.weekday}:${c.hour}`, c.runs]))
+
+  /**
+   * The step boundaries, by QUANTILE of the non-empty cells rather than by a
+   * linear share of the peak.
+   *
+   * Linear-on-the-peak is the obvious version and it collapses on this data:
+   * one busy hour of 27 turns against a grid where most occupied cells hold one
+   * or two puts ~90% of them in step 1, so the map is two colours and the ramp
+   * is decoration. Quantiles spend the five steps where the cells actually are,
+   * which is what makes the difference between a quiet hour and a busy one
+   * visible at all.
+   *
+   * Computed off non-empty cells only — including the ~120 zeroes would put the
+   * first three boundaries all at zero and undo the whole thing.
+   */
+  const occupied = cells
+    .map((c) => c.runs)
+    .filter((n) => n > 0)
+    .sort((a, b) => a - b)
+  const cut = (q: number) => occupied[Math.min(occupied.length - 1, Math.floor(q * occupied.length))] ?? 1
+
+  // Boundaries at the 20th/40th/60th/80th percentile of occupied cells, computed
+  // once rather than inside `step` — which runs 168 times per render.
+  const bounds = [cut(0.2), cut(0.4), cut(0.6), cut(0.8)]
+
+  const step = (runs: number) => {
+    if (runs === 0) return HEAT_EMPTY
+    let i = 0
+    while (i < bounds.length && runs > (bounds[i] ?? 0)) i += 1
+    return HEAT[Math.min(HEAT.length - 1, i)] ?? HEAT[0]
+  }
+
+  return (
+    <section className="rounded border border-line bg-chrome p-3">
+      <div className="flex items-baseline justify-between">
+        <h3 className="font-sans text-[11px] font-semibold tracking-wide text-fg-muted uppercase">
+          when the work happens
+        </h3>
+        {/* The legend a sequential ramp needs: two words and the ramp itself,
+            rather than five numeric buckets nobody reads. */}
+        <span className="flex items-center gap-1 font-sans text-[10px] text-fg-dim">
+          less
+          <span className="flex gap-[2px]">
+            {[HEAT_EMPTY, ...HEAT].map((c) => (
+              <span key={c} className="size-2 rounded-[1px]" style={{ background: c }} />
+            ))}
+          </span>
+          more
+        </span>
+      </div>
+
+      <div className="mt-3 flex flex-col gap-[2px]">
+        {WEEKDAYS.map((label, weekday) => (
+          <div key={label} className="flex items-center gap-[3px]">
+            <span className="w-7 shrink-0 font-sans text-[10px] text-fg-dim">{label}</span>
+            {Array.from({ length: 24 }, (_, hour) => {
+              const runs = at.get(`${weekday}:${hour}`) ?? 0
+              return (
+                <span
+                  key={hour}
+                  className="h-3.5 flex-1 rounded-[1px]"
+                  style={{ background: step(runs) }}
+                  title={`${label} ${`${hour}`.padStart(2, "0")}:00 — ${runs} turn${runs === 1 ? "" : "s"}`}
+                />
+              )
+            })}
+          </div>
+        ))}
+        <div className="mt-0.5 flex items-center gap-[3px]">
+          <span className="w-7 shrink-0" />
+          {Array.from({ length: 24 }, (_, hour) => (
+            <span key={hour} className="flex-1 text-center font-sans text-[9px] text-fg-dim">
+              {hour % 6 === 0 ? hour : ""}
+            </span>
+          ))}
+        </div>
+      </div>
+    </section>
+  )
+}
+
+/**
  * Where the work went, by project.
  *
  * A table rather than a pie: these are magnitudes to be compared and read
@@ -287,6 +427,177 @@ function Projects({
             </button>
           )
         })}
+      </div>
+    </section>
+  )
+}
+
+/**
+ * How turns ended, and how long they took.
+ *
+ * Two facts the four headline totals actively hide. "386 turns" says nothing
+ * about how many of them you stopped — 206 of the 656 in this machine's full
+ * history were cancelled — and a single summed "agent time" describes no turn
+ * that ever ran, since the median is 95s and the 90th percentile 701s.
+ *
+ * The outcome bar is a part-to-whole stacked bar, which is the form for a
+ * handful of parts of one total, and it is direct-labelled underneath rather
+ * than given a legend box: three segments with their own names beside their own
+ * counts needs no key.
+ *
+ * Status colours, not the categorical set. These are STATES — succeeded, you
+ * stopped it, it broke — and the skill reserves the status palette for exactly
+ * this so that "failed" is never also "series 3" somewhere else on the page.
+ */
+function Outcomes({ activity }: { activity: Activity }) {
+  const { success, cancelled, failed } = activity.outcomes
+  const total = success + cancelled + failed
+  const parts = [
+    { key: "succeeded", n: success, bg: "bg-ok", text: "text-ok" },
+    { key: "cancelled", n: cancelled, bg: "bg-warn", text: "text-warn" },
+    { key: "failed", n: failed, bg: "bg-err", text: "text-err" },
+  ].filter((p) => p.n > 0)
+
+  return (
+    <section className="rounded border border-line bg-chrome p-3">
+      <h3 className="font-sans text-[11px] font-semibold tracking-wide text-fg-muted uppercase">
+        how turns ended
+      </h3>
+      {total === 0 ? (
+        <p className="mt-2 font-sans text-[11px] text-fg-dim">No turns finished in this window.</p>
+      ) : (
+        <>
+          {/* gap-[2px] between segments: the skill's surface gap, so two
+              adjacent fills read as two rather than as one two-tone bar. */}
+          <div className="mt-3 flex h-2.5 gap-[2px] overflow-hidden">
+            {parts.map((p) => (
+              <span
+                key={p.key}
+                className={`${p.bg} rounded-[2px]`}
+                style={{ width: `${(p.n / total) * 100}%` }}
+                title={`${p.n} ${p.key} — ${((p.n / total) * 100).toFixed(0)}%`}
+              />
+            ))}
+          </div>
+          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 font-sans text-[11px]">
+            {parts.map((p) => (
+              <span key={p.key} className="flex items-baseline gap-1.5">
+                <span className={`${p.text} tabular-nums`}>{p.n}</span>
+                <span className="text-fg-dim">{p.key}</span>
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+
+      <div className="mt-3 grid grid-cols-3 gap-2 border-t border-line pt-3">
+        {/* The spread, as three figures rather than a histogram. A distribution
+            this skewed (95s median against a 155-minute max) needs the numbers
+            themselves; a histogram of it is one tall bar and a long flat tail. */}
+        <Figure label="median turn" value={duration(activity.durations.p50Ms)} />
+        <Figure label="90th pct" value={duration(activity.durations.p90Ms)} />
+        <Figure label="longest" value={duration(activity.durations.maxMs)} />
+      </div>
+
+      {/* The reading, in a sentence. Every number above is already on screen;
+          what a rate adds is the comparison nobody makes in their head, and it
+          is the one figure here that says whether anything needs attention. */}
+      {total > 0 && (
+        <p className="mt-3 border-t border-line pt-3 font-sans text-[11px] leading-relaxed text-fg-dim">
+          {cancelled === 0 ? (
+            <>You stopped none of them.</>
+          ) : (
+            <>
+              You stopped{" "}
+              <span className="text-warn">{((cancelled / total) * 100).toFixed(0)}%</span> of turns
+              before they finished
+              {activity.asks > 0 && (
+                <>
+                  , and <span className="text-fg-muted">{activity.asks}</span> waited on a
+                  permission prompt
+                </>
+              )}
+              .
+            </>
+          )}
+        </p>
+      )}
+    </section>
+  )
+}
+
+/** A small labelled number, for the secondary rows. */
+function Figure({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex flex-col gap-0.5">
+      <span className="font-sans text-[13px] tabular-nums text-fg">{value}</span>
+      <span className="font-sans text-[10px] tracking-wide text-fg-dim uppercase">{label}</span>
+    </div>
+  )
+}
+
+/**
+ * The commit gate's own record.
+ *
+ * `verify.result` has carried the command, its outcome and its duration since
+ * the gate existed, and nothing has ever shown it. Two things are only visible
+ * here: a check that has started FAILING, and one that has quietly become the
+ * slowest part of committing — on this machine `engine-check.mts` takes 334
+ * seconds against `pnpm typecheck`'s 1.5.
+ *
+ * Failing checks sort first, from the daemon. Sorting by volume instead would
+ * bury the one row you came to find under the four that always pass.
+ */
+function Checks({ rows }: { rows: Activity["checks"] }) {
+  if (rows.length === 0) return null
+  const slowest = Math.max(1, ...rows.map((r) => r.medianMs))
+  return (
+    <section className="rounded border border-line bg-chrome p-3">
+      <h3 className="font-sans text-[11px] font-semibold tracking-wide text-fg-muted uppercase">
+        commit checks
+      </h3>
+      <div className="mt-2 flex flex-col gap-1.5">
+        {rows.slice(0, 8).map((row) => (
+          <div key={row.command} className="flex items-center gap-2 font-sans text-[11px]">
+            {/* rtl + `truncate` clips the FRONT, which is where the shared
+                prefix is: `node_modules/.bin/tsx checks/engine-check.mts` and
+                its four siblings are identical for 30 characters and differ only
+                at the tail, so a normal truncate drew five rows reading
+                `node_modules/.bin/tsx chec…` and made them one row repeated. */}
+            <span
+              dir="rtl"
+              className={`w-44 shrink-0 truncate text-left ${
+                row.failed > 0 ? "text-fg" : "text-fg-muted"
+              }`}
+              title={row.command}
+            >
+              {row.command}
+            </span>
+            <span className="flex h-2 flex-1 overflow-hidden rounded-sm bg-input">
+              <span
+                // Time, not pass rate: the pass/fail counts are already printed
+                // beside it, and how long the gate takes is the thing no other
+                // number on this page says.
+                className="h-full rounded-sm bg-graph-1"
+                style={{ width: `${(row.medianMs / slowest) * 100}%` }}
+              />
+            </span>
+            <span className="w-14 shrink-0 text-right tabular-nums text-fg-dim">
+              {duration(row.medianMs)}
+            </span>
+            <span className="w-10 shrink-0 text-right tabular-nums text-ok">{row.passed}</span>
+            <span
+              className={`w-12 shrink-0 text-right tabular-nums ${
+                row.failed > 0 ? "text-err" : "text-transparent"
+              }`}
+              title={row.failed > 0 ? `${row.failed} refused a commit` : undefined}
+            >
+              {/* The word, for the reason the tools column uses one: this mono
+                  stack has no ✗ glyph and falls back to a capital X. */}
+              {row.failed > 0 ? `${row.failed} fail` : "·"}
+            </span>
+          </div>
+        ))}
       </div>
     </section>
   )
@@ -473,17 +784,39 @@ export function Dashboard({
               />
               <Stat value={`${activity.runs}`} label="turns" hint={`Over ${activity.chats} conversations.`} />
               <Stat
-                value={compact(activity.tokens)}
-                label="tokens"
-                hint="Input, output and cache together."
+                value={`${activity.commits}`}
+                label="commits"
+                tone="text-ok"
+                hint="Commits aide landed in this window, each one a gate you pressed."
+              />
+            </div>
+
+            {/* Tokens and asks demoted from the headline row. Tokens is the
+                least actionable of the five — you cannot spend fewer of them
+                directly, and the dollar figure above already tracks it — and a
+                fifth tile made the row too narrow to read. */}
+            <div className="grid grid-cols-4 gap-3 rounded border border-line bg-chrome px-3 py-2.5">
+              <Figure label="tokens" value={compact(activity.tokens)} />
+              <Figure label="conversations" value={`${activity.chats}`} />
+              <Figure label="turns blocked on you" value={`${activity.asks}`} />
+              <Figure
+                label="tools run"
+                value={compact(activity.tools.reduce((n, t) => n + t.calls, 0))}
               />
             </div>
 
             <DailyBars days={activity.daily} />
 
+            <Punchcard cells={activity.hours} />
+
             {activity.projects.length > 0 && (
               <Projects rows={activity.projects} onOpen={onOpenProject} />
             )}
+
+            <div className="grid grid-cols-2 gap-3">
+              <Outcomes activity={activity} />
+              <Checks rows={activity.checks} />
+            </div>
 
             <ToolsAndModels activity={activity} />
 

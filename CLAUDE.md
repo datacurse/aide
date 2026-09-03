@@ -86,6 +86,34 @@ Decisions already taken, which are not gaps to fill:
   vocabulary — logs-on-disk minus logs-indexed reports 294 of 667 on this
   machine, of which 266 are `run.queued` residue from the task queue that no
   longer exists.
+- **The dashboard reads the log BODIES, and that is what makes it worth having.**
+  The first version reduced 388 timestamped runs to nine daily bars, four totals
+  and two lists, and it was correct and nearly useless — every figure on it was
+  a sum, so nothing on it could surprise you. The logs already held far more:
+  `verify.result` carries each commit check's command, outcome and duration
+  (`pnpm exec tsc -b`, 0 passed and 2 failed, is the broken gate from the
+  `verify:` story still visible in the log; `engine-check.mts` takes 334s against
+  typecheck's 1.5s), `run.finished.status` distinguishes cancelled from failed
+  (206 of 656 lifetime turns were CANCELLED, which one "388 turns" tile cannot
+  say), and `openedAt` was always a full timestamp — reducing it to a day threw
+  away the punchcard, where this machine's five busiest hours are all weekend
+  and four of them between 1am and 5am. The lesson generalises past this page:
+  the shape of the reduction decides the ceiling of the UI, so ask what the
+  source can support before picking what to display. `bodyOfRun` gathers all of
+  it in ONE pass per log — a second traversal of 27MB to count commits after
+  counting tools would double the only expensive thing here — behind the same
+  size+mtime cache `spend.ts` uses, so 667 logs are read once and then free
+  (737ms cold, 27ms warm).
+- **The punchcard's ramp is by quantile, and its steps are lifted off the empty
+  tint.** Both are the difference between a heatmap and a decoration. Linear on
+  the peak is the obvious version: with one hour at 27 turns and most occupied
+  cells at 1–2, it puts ~90% of them on step 1 and the map becomes two colours.
+  And the first ramp began at #173a5e, 1.5× the empty cell's luminance, which
+  drew most of the data as very nearly background — a sequential ramp has to
+  spend its range where the values ARE, which for a punchcard is the bottom.
+  Weekday is shifted to Monday-first in `reduceActivity` rather than in the
+  renderer, because an off-by-one there mislabels every row and reads as a data
+  bug.
 - **The rail's lower half has two readings, and you pick one.** `history` and
   `files`, tabbed, sharing the space rather than stacking — they answer the same
   kind of question, orientation, and a rail split three ways gives each too few

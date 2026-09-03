@@ -66,7 +66,7 @@ import {
   takeTurnCheckpoint,
 } from "./checkpoint.js"
 import { STATE_DIR } from "@aide/protocol"
-import type { Project, RunEvent } from "@aide/protocol"
+import type { Project, RunEvent, RunStatus } from "@aide/protocol"
 
 const run = promisify(execFile)
 const git = async (cwd: string, args: string[]) =>
@@ -1863,16 +1863,22 @@ console.log("\nactivity")
     costUsd: number,
     tokens: number,
     model = "opus",
+    status: RunStatus | null = "success",
+    activeMs = 1000,
   ) => ({
     runId: id,
     sessionId,
     projectId,
     openedAt,
-    activeMs: 1000,
+    activeMs,
     costUsd,
     tokens,
     byModel: { [model]: { costUsd, tokens } },
+    status,
   })
+
+  /** What a window's log bodies contributed. Empty unless a check needs one. */
+  const NO_BODY = { tools: [], checks: [], commits: 0, asks: 0 }
 
   const alpha = projectIdFor("C:/tmp/alpha")
   const beta = projectIdFor("C:/tmp/beta")
@@ -1893,13 +1899,13 @@ console.log("\nactivity")
     run("r6", "deadbeef0000", "s5", at(1), 5, 500),
   ]
 
-  const week = reduceActivity(runs, projects, now, 7, [], 0)
+  const week = reduceActivity(runs, projects, now, 7, NO_BODY, 0)
 
   check("a run from today is in the window", week.runs === 5, `${week.runs}`)
   check("and one from eight days ago is not", !week.daily.some((d) => d.day === localDay(at(8))))
   check(
     "a 30-day window reaches back further",
-    reduceActivity(runs, projects, now, 30, [], 0).runs === 6,
+    reduceActivity(runs, projects, now, 30, NO_BODY, 0).runs === 6,
   )
 
   // The arithmetic that has to hold or the page lies: every breakdown sums to
@@ -1963,8 +1969,80 @@ console.log("\nactivity")
   check("zero and below clamp up", askedDays("0") === 1 && askedDays("-5") === 1)
   check("and a huge window clamps down", askedDays("99999") === 365)
 
-  check("no runs is not a crash", reduceActivity([], projects, now, 7, [], 0).runs === 0)
-  check("and shares do not divide by zero", reduceActivity([], projects, now, 7, [], 0).projects.length === 0)
+  // The punchcard. The weekday shift is the silent one: JS says 0=Sunday and the
+  // grid is drawn Monday-first, so getting it wrong mislabels every row by one
+  // and looks like the data rather than the arithmetic.
+  check("the grid is always 168 cells", week.hours.length === 168, `${week.hours.length}`)
+  check(
+    "including the empty ones",
+    week.hours.filter((h) => h.runs === 0).length > 100,
+  )
+  {
+    // 2026-09-02 is a Wednesday, so Monday-first index 2.
+    const today = new Date(at(0))
+    check("today is a Wednesday", today.getDay() === 3, `${today.getDay()}`)
+    const cell = week.hours.find((h) => h.weekday === 2 && h.hour === 12)
+    check("a noon Wednesday run lands on row 2", cell?.runs === 1, JSON.stringify(cell))
+    // Every run in this fixture is at noon, so no cell outside hour 12 can hold
+    // one. A weekday shift that was off by one would still pass the row check
+    // above on its own; this is what pins the hour half of the coordinate.
+    check(
+      "and nothing lands outside noon",
+      week.hours.filter((h) => h.hour !== 12).every((h) => h.runs === 0),
+    )
+    check(
+      "every run is somewhere in the grid",
+      week.hours.reduce((n, h) => n + h.runs, 0) === week.runs,
+    )
+  }
+
+  // Outcomes. A turn still in flight has no outcome and must be in none of the
+  // three buckets — folding null into `failed` would report every running turn
+  // as broken for as long as it ran.
+  {
+    const mixed = [
+      run("o1", alpha, "s1", at(0), 1, 10, "opus", "success"),
+      run("o2", alpha, "s1", at(0), 1, 10, "opus", "cancelled"),
+      run("o3", alpha, "s1", at(0), 1, 10, "opus", "failed"),
+      run("o4", alpha, "s1", at(0), 1, 10, "opus", null),
+    ]
+    const out = reduceActivity(mixed, projects, now, 7, NO_BODY, 0).outcomes
+    check(
+      "outcomes split three ways",
+      out.success === 1 && out.cancelled === 1 && out.failed === 1,
+      JSON.stringify(out),
+    )
+    check(
+      "and a turn in flight is in none of them",
+      out.success + out.cancelled + out.failed === 3,
+    )
+  }
+
+  // Durations, by nearest rank so every figure is a turn that really took that
+  // long. A zero-duration turn never ran and must not drag the median down.
+  {
+    const spread = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100].map((ms, i) =>
+      run(`d${i}`, alpha, "s1", at(0), 0, 0, "opus", "success", ms),
+    )
+    const d = reduceActivity(
+      [...spread, run("dz", alpha, "s1", at(0), 0, 0, "opus", "cancelled", 0)],
+      projects,
+      now,
+      7,
+      NO_BODY,
+      0,
+    ).durations
+    // Nearest rank over ten values: ceil(0.5 * 10) - 1 = index 4, the 5th
+    // smallest. Every percentile here is therefore a duration some turn really
+    // had, which is the property this page's numbers are supposed to keep.
+    check("p50 is a real value", d.p50Ms === 50, `${d.p50Ms}`)
+    check("p90 is a real value", d.p90Ms === 90, `${d.p90Ms}`)
+    check("max is the longest", d.maxMs === 100, `${d.maxMs}`)
+    check("a turn that never ran is not counted", d.counted === 10, `${d.counted}`)
+  }
+
+  check("no runs is not a crash", reduceActivity([], projects, now, 7, NO_BODY, 0).runs === 0)
+  check("and shares do not divide by zero", reduceActivity([], projects, now, 7, NO_BODY, 0).projects.length === 0)
 
   // Local days, not UTC. A turn taken at 1am belongs to that date for the
   // person who took it; `toISOString()` files it under the day before for

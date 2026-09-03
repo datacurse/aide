@@ -23,7 +23,18 @@ import { createReadStream } from "node:fs"
 import { readdir, stat } from "node:fs/promises"
 import { join } from "node:path"
 import { createInterface } from "node:readline"
-import type { Activity, ActivityDay, ModelUse, Project, ProjectActivity, RunEvent, ToolUse } from "@aide/protocol"
+import type {
+  Activity,
+  ActivityDay,
+  CheckRun,
+  HourCell,
+  ModelUse,
+  Outcomes,
+  Project,
+  ProjectActivity,
+  RunEvent,
+  ToolUse,
+} from "@aide/protocol"
 import { runsDir } from "@aide/protocol/node"
 import { runIndex, type RunTotals } from "./spend.js"
 
@@ -94,8 +105,34 @@ function daysInWindow(from: number, days: number): string[] {
  * a steady scan and a heap spike. A torn or oversized line is skipped, because
  * the only line that can be torn is the one being written by a run in flight.
  */
-async function toolsInRun(path: string): Promise<Record<string, { calls: number; failed: number }>> {
-  const out: Record<string, { calls: number; failed: number }> = {}
+/** What one log's body contributes, gathered in a single read of it. */
+export interface RunBody {
+  tools: Record<string, { calls: number; failed: number }>
+  /** `verify.result`, one entry per check invocation. */
+  checks: Array<{ command: string; ok: boolean; ms: number }>
+  commits: number
+  asks: number
+}
+
+const EMPTY_BODY = (): RunBody => ({ tools: {}, checks: [], commits: 0, asks: 0 })
+
+/**
+ * Everything the dashboard needs from one run log's BODY, in one pass.
+ *
+ * One pass rather than one per figure, and that is the whole reason this is
+ * shaped as a bag of counters instead of four tidy functions. The head and tail
+ * of a log are cheap — `spend.ts` reads those — but the middle is where the
+ * transcripts and the pasted screenshots are, so a second traversal of 27MB to
+ * count commits after having just traversed it to count tools would double the
+ * only expensive thing this file does.
+ *
+ * Streamed line by line rather than read whole: the largest logs on this machine
+ * are megabytes, and `readFile` on all of them at once is the difference between
+ * a steady scan and a heap spike. A torn line is skipped, because the only line
+ * that can be torn is the one being written by a run in flight.
+ */
+async function bodyOfRun(path: string): Promise<RunBody> {
+  const out = EMPTY_BODY()
   // `tool.end` names no tool — only its id — so the outcome has to be joined
   // back to the call that opened it. One turn's ids, dropped with the run.
   const nameOf = new Map<string, string>()
@@ -107,8 +144,15 @@ async function toolsInRun(path: string): Promise<Record<string, { calls: number;
     for await (const line of rl) {
       // Cheap prefilter before JSON.parse. Most lines in a large log are
       // assistant text or a tool result, and parsing every one of them to
-      // discover that costs more than the substring test that skips it.
-      if (!line.includes('"tool.')) continue
+      // discover that costs more than the substring tests that skip them.
+      if (
+        !line.includes('"tool.') &&
+        !line.includes('"verify.result"') &&
+        !line.includes('"commit.landed"') &&
+        !line.includes('"permission.request"')
+      ) {
+        continue
+      }
       let event: RunEvent
       try {
         event = JSON.parse(line) as RunEvent
@@ -117,22 +161,27 @@ async function toolsInRun(path: string): Promise<Record<string, { calls: number;
       }
       if (event.type === "tool.start") {
         nameOf.set(event.toolUseId, event.name)
-        const before = out[event.name]
-        out[event.name] = { calls: (before?.calls ?? 0) + 1, failed: before?.failed ?? 0 }
+        const before = out.tools[event.name]
+        out.tools[event.name] = { calls: (before?.calls ?? 0) + 1, failed: before?.failed ?? 0 }
       } else if (event.type === "tool.end" && !event.ok) {
         const name = nameOf.get(event.toolUseId)
         // An end with no start is a log whose head was rotated or truncated.
         // Counting it under a placeholder would invent a tool; dropping it only
         // undercounts failures, which is the safer of the two.
         if (!name) continue
-        const before = out[name]
-        if (before) out[name] = { ...before, failed: before.failed + 1 }
+        const before = out.tools[name]
+        if (before) out.tools[name] = { ...before, failed: before.failed + 1 }
+      } else if (event.type === "verify.result") {
+        out.checks.push({ command: event.command, ok: event.ok, ms: event.durationMs })
+      } else if (event.type === "commit.landed") {
+        out.commits += 1
+      } else if (event.type === "permission.request") {
+        out.asks += 1
       }
     }
   } catch {
     // A log that cannot be read contributes nothing. It must not take the whole
-    // dashboard down: this is the one number on the page that is a nicety, and
-    // the totals above it come from a different pass entirely.
+    // dashboard down: the headline totals come from a different pass entirely.
   } finally {
     rl.close()
   }
@@ -140,18 +189,27 @@ async function toolsInRun(path: string): Promise<Record<string, { calls: number;
 }
 
 /**
- * Tool counts per run log, remembered the same way `spend.ts` remembers totals.
+ * What each run log's body held, remembered the way `spend.ts` remembers totals.
  *
  * Keyed by size and mtime rather than by name, so the one log that changes — the
  * turn in flight — is reread on the next ask and every finished one is read
  * exactly once for the life of the daemon. That is what makes a body scan
  * affordable at all: 27MB across 667 logs on this machine, read once, then free.
  */
-const toolCache = new Map<string, { key: string; tools: Record<string, { calls: number; failed: number }> }>()
+const bodyCache = new Map<string, { key: string; body: RunBody }>()
 
-/** Tool counts for the given runs, by name. */
-async function toolUse(runs: RunTotals[]): Promise<ToolUse[]> {
-  const totals: Record<string, { calls: number; failed: number }> = {}
+/** Everything the window's logs hold in their bodies, merged. */
+async function bodies(runs: RunTotals[]): Promise<{
+  tools: ToolUse[]
+  checks: CheckRun[]
+  commits: number
+  asks: number
+}> {
+  const tools: Record<string, { calls: number; failed: number }> = {}
+  const checks = new Map<string, { passed: number; failed: number; times: number[] }>()
+  let commits = 0
+  let asks = 0
+
   for (const run of runs) {
     const file = `${run.runId}.ndjson`
     const path = join(runsDir(), file)
@@ -162,20 +220,66 @@ async function toolUse(runs: RunTotals[]): Promise<ToolUse[]> {
     } catch {
       continue
     }
-    const hit = toolCache.get(file)
-    const tools = hit?.key === key ? hit.tools : await toolsInRun(path)
-    toolCache.set(file, { key, tools })
-    for (const [name, use] of Object.entries(tools)) {
-      const before = totals[name]
-      totals[name] = {
+    const hit = bodyCache.get(file)
+    const body = hit?.key === key ? hit.body : await bodyOfRun(path)
+    bodyCache.set(file, { key, body })
+
+    for (const [name, use] of Object.entries(body.tools)) {
+      const before = tools[name]
+      tools[name] = {
         calls: (before?.calls ?? 0) + use.calls,
         failed: (before?.failed ?? 0) + use.failed,
       }
     }
+    for (const check of body.checks) {
+      const before = checks.get(check.command) ?? { passed: 0, failed: 0, times: [] }
+      before[check.ok ? "passed" : "failed"] += 1
+      before.times.push(check.ms)
+      checks.set(check.command, before)
+    }
+    commits += body.commits
+    asks += body.asks
   }
-  return Object.entries(totals)
-    .map(([name, use]) => ({ name, ...use }))
-    .sort((a, b) => b.calls - a.calls)
+
+  return {
+    tools: Object.entries(tools)
+      .map(([name, use]) => ({ name, ...use }))
+      .sort((a, b) => b.calls - a.calls),
+    checks: [...checks.entries()]
+      .map(([command, c]) => ({
+        command,
+        passed: c.passed,
+        failed: c.failed,
+        medianMs: median(c.times),
+      }))
+      // Failing checks first: a gate that has started refusing commits is the
+      // thing you came to this section to find, and sorting by volume buries it
+      // under the four that pass every time.
+      .sort((a, b) => b.failed - a.failed || b.passed + b.failed - (a.passed + a.failed)),
+    commits,
+    asks,
+  }
+}
+
+/** Middle value, or 0 for nothing. Sorted copy — the caller's array is its own. */
+export function median(ns: number[]): number {
+  if (ns.length === 0) return 0
+  const sorted = [...ns].sort((a, b) => a - b)
+  return sorted[Math.floor(sorted.length / 2)] ?? 0
+}
+
+/**
+ * A percentile, by nearest rank.
+ *
+ * Nearest-rank rather than interpolated: these are wall-clock times of real
+ * turns, and answering "the 90th percentile turn took 506s" with a number no
+ * turn actually took is a worse answer for a page whose whole claim is that
+ * nothing on it is invented.
+ */
+export function percentile(sorted: number[], p: number): number {
+  if (sorted.length === 0) return 0
+  const rank = Math.ceil((p / 100) * sorted.length) - 1
+  return sorted[Math.min(sorted.length - 1, Math.max(0, rank))] ?? 0
 }
 
 /**
@@ -269,7 +373,7 @@ export function reduceActivity(
   projects: Project[],
   now: number,
   days: number,
-  tools: ToolUse[],
+  body: { tools: ToolUse[]; checks: CheckRun[]; commits: number; asks: number },
   unattributed: number,
 ): Activity {
   const from = windowStart(now, days)
@@ -283,8 +387,34 @@ export function reduceActivity(
   const byModel = new Map<string, ModelUse>()
   const sessions = new Set<string>()
 
+  // Every one of the 168 cells, including the empty ones — the grid is the
+  // shape, and a sparse map would leave the renderer inventing the gaps.
+  const hours = new Map<string, HourCell>()
+  for (let weekday = 0; weekday < 7; weekday += 1) {
+    for (let hour = 0; hour < 24; hour += 1) {
+      hours.set(`${weekday}:${hour}`, { weekday, hour, runs: 0 })
+    }
+  }
+  const outcomes: Outcomes = { success: 0, cancelled: 0, failed: 0 }
+  const finished: number[] = []
+
   for (const run of runs) {
     sessions.add(run.sessionId)
+
+    const when = new Date(run.openedAt)
+    // JS weekday is 0=Sunday; the grid is drawn Monday-first, so shift here —
+    // once, where the data is built — rather than in the renderer, where the
+    // off-by-one would mislabel every row and look like a data bug.
+    const cell = hours.get(`${(when.getDay() + 6) % 7}:${when.getHours()}`)
+    if (cell) cell.runs += 1
+
+    // A turn still in flight has no outcome yet and is counted in none of them.
+    if (run.status === "success") outcomes.success += 1
+    else if (run.status === "cancelled") outcomes.cancelled += 1
+    else if (run.status !== null) outcomes.failed += 1
+    // Zero-duration turns are the ones that never ran; including them would
+    // drag the median toward a number describing nothing that happened.
+    if (run.activeMs > 0) finished.push(run.activeMs)
 
     const day = byDay.get(localDay(run.openedAt))
     // A run outside the window cannot reach here, so a missing bucket would be
@@ -333,6 +463,8 @@ export function reduceActivity(
   }
 
   const tokens = runs.reduce((n, r) => n + r.tokens, 0)
+  // Sorted once and shared by all three percentile reads below.
+  const sortedFinished = [...finished].sort((a, b) => a - b)
   const projectRows = [...byProject.values()]
     .map(({ sessions: chats, ...row }) => ({
       ...row,
@@ -354,8 +486,19 @@ export function reduceActivity(
     tokens,
     daily: [...byDay.values()],
     projects: projectRows,
-    tools,
+    tools: body.tools,
     models: [...byModel.values()].sort((a, b) => b.costUsd - a.costUsd),
+    hours: [...hours.values()],
+    outcomes,
+    checks: body.checks,
+    durations: {
+      p50Ms: percentile(sortedFinished, 50),
+      p90Ms: percentile(sortedFinished, 90),
+      maxMs: sortedFinished[sortedFinished.length - 1] ?? 0,
+      counted: sortedFinished.length,
+    },
+    commits: body.commits,
+    asks: body.asks,
     unattributed,
     lifetime: {
       runs: all.length,
@@ -371,13 +514,13 @@ export function reduceActivity(
 export async function activity(projects: Project[], days: number): Promise<Activity> {
   const all = await runIndex()
   const from = windowStart(Date.now(), days)
-  // Tools are counted over the WINDOW's runs only, unlike the lifetime totals
+  // Bodies are read for the WINDOW's runs only, unlike the lifetime totals
   // above. Those come from an index that is already in memory; this one opens
   // files, and scanning every log aide has ever written to draw one bar chart
   // of the last week is the whole-history read this design exists to avoid.
-  const [tools, unattributed] = await Promise.all([
-    toolUse(all.filter((r) => r.openedAt >= from)),
+  const [body, unattributed] = await Promise.all([
+    bodies(all.filter((r) => r.openedAt >= from)),
     unattributedRuns(new Set(all.map((r) => r.runId))),
   ])
-  return reduceActivity(all, projects, Date.now(), days, tools, unattributed)
+  return reduceActivity(all, projects, Date.now(), days, body, unattributed)
 }

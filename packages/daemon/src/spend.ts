@@ -22,7 +22,7 @@ import { createReadStream } from "node:fs"
 import { open, readdir, stat } from "node:fs/promises"
 import { join } from "node:path"
 import { createInterface } from "node:readline"
-import type { ChatSpend, RunEvent } from "@aide/protocol"
+import type { ChatSpend, RunEvent, RunStatus } from "@aide/protocol"
 import { runsDir } from "@aide/protocol/node"
 
 /**
@@ -74,6 +74,16 @@ export interface RunTotals {
    * naming chats. Empty for a turn that never finished.
    */
   byModel: Record<string, { costUsd: number; tokens: number }>
+  /**
+   * How the turn ended, or null while it is still running.
+   *
+   * Off the same `run.finished` everything else here comes from, so it costs
+   * nothing to carry. Null is what an unfinished turn looks like and is not the
+   * same as a failure — the dashboard counts outcomes and a turn in flight has
+   * none yet, so folding null into `failed` would report every running turn as
+   * broken for as long as it ran.
+   */
+  status: RunStatus | null
 }
 
 /**
@@ -198,6 +208,7 @@ async function readRun(path: string, runId: string): Promise<RunTotals | null> {
     costUsd: 0,
     tokens: 0,
     byModel: {},
+    status: null,
   }
 
   const end = await terminalEvent(path)
@@ -207,6 +218,7 @@ async function readRun(path: string, runId: string): Promise<RunTotals | null> {
   if (end?.type === "run.finished") {
     totals.activeMs = end.durationMs
     totals.costUsd = end.totalCostUsd
+    totals.status = end.status
     for (const [model, use] of Object.entries(end.modelUsage)) {
       const tokens =
         use.inputTokens + use.outputTokens + use.cacheReadInputTokens + use.cacheCreationInputTokens
