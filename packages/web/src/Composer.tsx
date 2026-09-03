@@ -323,7 +323,23 @@ export function Composer({
    * one old Auto chat is not a decision to run everything on Auto.
    */
   const [inherited, setInherited] = useState<ChatMode | null>(null)
-  const mode = inherited ?? preferred
+  /**
+   * A mode the chat itself carries, which outranks both of the above.
+   *
+   * Only a chat aide composed has one — `survey` — and it is on the draft rather
+   * than in a prop because the draft is the thing that survives: the button
+   * creates the row, the app navigates to it, and this component may not mount
+   * until a render later. A prop would have to be threaded from `App` through
+   * the pane and would be gone on reload, which for a row you parked and came
+   * back to is exactly when the mode still has to be right.
+   *
+   * It loses to `inherited` nowhere and to `preferred` nowhere, but it does NOT
+   * survive you picking a mode by hand: `chooseMode` writes `preferred` and
+   * clears the draft's copy, because a picker that visibly says Auto while the
+   * turn goes out on Plan is worse than either mode.
+   */
+  const composed = draft?.mode ?? null
+  const mode = composed ?? inherited ?? preferred
 
   // Keyed on the session too: two conversations can carry the same mode, and
   // without the id the effect would not re-fire on the second one, leaving your
@@ -333,10 +349,13 @@ export function Composer({
   }, [sessionId, inheritedMode])
 
   // Choosing from the menu is a decision, so it both overrides the inherited
-  // value and becomes the new default.
+  // value and becomes the new default — and it drops the one a composed chat
+  // carried, or the picker would sit there reading Auto while the turn went out
+  // on Plan. Yours is the last word on a chat you have opened.
   const chooseMode = (m: ChatMode) => {
     setInherited(null)
     setPreferred(m)
+    if (draft?.mode) saveDraft(draftKey, { text, attachments, mode: undefined })
   }
   const [note, setNote] = useState<string | null>(null)
   const area = useRef<HTMLTextAreaElement>(null)

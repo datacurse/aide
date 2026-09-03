@@ -29,6 +29,7 @@ record. They are all rows in the same list, in that order of urgency.
 | The open conversation, and the turn streaming into it | `packages/web/src/panes/Conversation.tsx` |
 | Unstarted chats, drafts, pasted images (IndexedDB) | `packages/web/src/drafts.ts` |
 | What a parked chat is called before it has run | `packages/web/src/naming.ts` |
+| The one turn aide knows how to ask for — `survey` | `packages/web/src/survey.ts` |
 | An event log rendered as a conversation | `packages/web/src/panes/Transcript.tsx` |
 | What is left to commit, and the two readings under it | `packages/web/src/panes/Pending.tsx` |
 | The project's files, one directory at a time | `packages/web/src/panes/Files.tsx` |
@@ -56,6 +57,23 @@ record. They are all rows in the same list, in that order of urgency.
 
 Decisions already taken, which are not gaps to fill:
 
+- **`survey` is a canned prompt, not a second gate.** `commit` is a gate: a
+  precondition, a defined output, a refusal. This is a turn nobody typed — the
+  same category as the commit gate's one repair attempt — so the brief already
+  decides what it must be: Plan, which acts and asks once, rather than a mode
+  that stops mid-turn for a permission nobody is there to give. It therefore adds
+  no machinery: pressing it creates the same unstarted chat the ▶ sends, with
+  `SURVEY_PROMPT` in it, and everything after the press is an ordinary
+  conversation that holds the checkout, appears in the list and can be stopped.
+  It SENDS on the press rather than parking the words for you to confirm, because
+  a button you have already pressed asking you to press again is the "new" button
+  that ignored you. Two things are deliberate and would be missed: the draft
+  carries a `mode` because sending "don't write code yet" at a mode that acts is
+  an instruction and its own contradiction, and it carries its own `title`
+  because `naming.ts` would otherwise spend a model call asking what aide's own
+  paragraph is about. `mergedMode` lives in `protocol/chatlist.ts` rather than in
+  `drafts.ts` so `pnpm smoke:queue` can reach it — `drafts.ts` touches
+  `window.indexedDB` and cannot be imported from Node.
 - **`pnpm smoke` is three files, and it is not split further on purpose.** What
   came out is the group that needs no repository — the shell policy, the plan
   rules, the browser-safety check, the restart decision — into `smoke-policy.ts`,

@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react"
-import type { Attachment } from "@aide/protocol"
+import { mergedMode } from "@aide/protocol"
+import type { Attachment, ChatMode } from "@aide/protocol"
 
 /**
  * What is in the message box but has not been sent.
@@ -87,6 +88,20 @@ export interface Draft {
    * row falls back to the first line until the new name lands.
    */
   titledFrom?: string
+  /**
+   * The mode this chat must go out at, whatever the composer remembers.
+   *
+   * Absent for every chat you write yourself, which is the normal case: the
+   * composer's own preference wins, and a button that quietly changed your
+   * default for every other conversation would be the inheriting bug in
+   * `Composer` all over again.
+   *
+   * Set only by a chat aide composed the text for — `survey`, today. That turn
+   * asks for a plan and nothing else, so it has to be Plan even if you last ran
+   * something on Auto: sending "don't write code yet" at a mode that acts is
+   * sending an instruction and its own contradiction in one message.
+   */
+  mode?: ChatMode
   /** epoch ms */
   createdAt: number
   updatedAt: number
@@ -289,7 +304,21 @@ function commit(key: string, row: Draft | null) {
   publish()
 }
 
-export function saveDraft(key: string, content: { text: string; attachments: Attachment[] }): void {
+export function saveDraft(
+  key: string,
+  content: {
+    text: string
+    attachments: Attachment[]
+    /**
+     * Present only to CLEAR it, which the mode picker does. Absent means "leave
+     * whatever is there", because this function is called on every keystroke and
+     * a composed chat's mode has to survive being edited before it is sent —
+     * dropping it here would quietly send a survey on Auto the moment you fixed
+     * a typo in it.
+     */
+    mode?: ChatMode | undefined
+  },
+): void {
   const prev = cache.get(key)
   // Emptiness is exact rather than trimmed: with the composer reading straight
   // off this store, discarding on whitespace would make the space bar delete
@@ -299,12 +328,21 @@ export function saveDraft(key: string, content: { text: string; attachments: Att
     if (prev) commit(key, null)
     return
   }
-  if (prev && prev.text === content.text && prev.attachments === content.attachments) return
+  const mode = mergedMode(prev?.mode, content)
+  if (
+    prev &&
+    prev.text === content.text &&
+    prev.attachments === content.attachments &&
+    prev.mode === mode
+  ) {
+    return
+  }
   const now = Date.now()
   commit(key, {
     key,
     text: content.text,
     attachments: content.attachments,
+    mode,
     pinned: prev?.pinned ?? false,
     // Carried, not dropped. The composer empties the box on the very press that
     // sends the first turn, so this write lands immediately after the one that
@@ -404,7 +442,13 @@ export function discardDraft(key: string): void {
 
 function createUnstarted(
   projectId: string,
-  content: { text: string; attachments: Attachment[] },
+  content: {
+    text: string
+    attachments: Attachment[]
+    mode?: ChatMode
+    title?: string
+    titledFrom?: string
+  },
 ): string {
   const id = newDraftId()
   const key = draftKey(projectId, id)
@@ -426,6 +470,37 @@ function createUnstarted(
  */
 export function openNewChat(projectId: string): string {
   return createUnstarted(projectId, { text: "", attachments: [] })
+}
+
+/**
+ * A chat that already knows what it is going to ask.
+ *
+ * The same record `new` and the capture box make — so it is a row in the list,
+ * it can be discarded with the ✕, and the ▶ would send it — with the text
+ * already in it and a mode it must go out at. What makes it a survey is entirely
+ * the words; see `SURVEY_PROMPT`.
+ *
+ * It is created here rather than sent from here because the composer is the only
+ * thing that can send: it knows the effort, whether the model may think, and how
+ * to put the message back if the daemon refuses. The button navigates to this
+ * row and asks for it to be sent, which is the ▶ path exactly.
+ */
+export function openComposedChat(
+  projectId: string,
+  content: { text: string; mode: ChatMode; title: string },
+): string {
+  // Named here, without a model call. `naming.ts` exists because a parked row
+  // showing the first line of a paragraph is unreadable, and this text is a
+  // paragraph — but aide wrote it, so what it should be called is not something
+  // anybody has to be asked. `titledFrom` is the text itself, which is what
+  // makes the label survive until the words are edited and no longer.
+  return createUnstarted(projectId, {
+    text: content.text,
+    attachments: [],
+    mode: content.mode,
+    title: content.title,
+    titledFrom: content.text,
+  })
 }
 
 /**
@@ -461,6 +536,10 @@ export function carryDraft(from: string, to: string): void {
     // Nor the name, for the same reason twice over: the conversation has its own
     // now, from the SDK, and what is left here is an unsent SECOND message that
     // the old label does not describe.
+    //
+    // Nor the mode it was composed at. That belonged to the one turn aide wrote
+    // the words for; what is left here is a second message you typed yourself,
+    // and it goes out at your own preference like every other.
     commit(to, {
       ...row,
       key: to,
@@ -469,6 +548,7 @@ export function carryDraft(from: string, to: string): void {
       sentText: undefined,
       title: undefined,
       titledFrom: undefined,
+      mode: undefined,
     })
   }
 }

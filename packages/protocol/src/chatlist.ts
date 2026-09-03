@@ -15,6 +15,34 @@
  * What is left is the one bit aide records about a chat and the order the list
  * puts them in.
  */
+import type { ChatMode } from "./session.js"
+
+/**
+ * Which mode a draft keeps when its box is written to.
+ *
+ * A chat aide composed the words for carries the mode it must go out at —
+ * `survey` asks for a plan and says not to write code yet, so sending it at a
+ * mode that acts would be an instruction and its own contradiction in one
+ * message. The composer writes the draft on every keystroke, which is what makes
+ * this a rule rather than an assignment: the mode has to survive being edited,
+ * and it has to be droppable when you pick a mode by hand.
+ *
+ * So absence and presence-as-undefined mean different things. `{}` is "say
+ * nothing, keep what is there"; `{ mode: undefined }` is "clear it", which is
+ * what the picker sends. `content.mode ?? held` cannot express that — it reads
+ * the explicit clear as silence and puts the old value straight back, so a
+ * survey you had switched to Auto would go out on Plan anyway.
+ *
+ * Here rather than in `drafts.ts` because that file reaches for
+ * `window.indexedDB` and so cannot be imported by anything in Node — including
+ * `pnpm smoke`, which is the only thing that would ever catch this going wrong.
+ */
+export function mergedMode(
+  held: ChatMode | undefined,
+  content: { mode?: ChatMode | undefined },
+): ChatMode | undefined {
+  return "mode" in content ? content.mode : held
+}
 
 /** Running, finished, or neither. */
 export type ChatState = "working" | "closed"

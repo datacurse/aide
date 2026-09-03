@@ -558,6 +558,30 @@ console.log("\ndone, and undone")
 }
 
 // ---------------------------------------------------------------------------
+console.log("\na composed chat keeps the mode it was composed at")
+// The `survey` button writes the prompt AND the mode it has to go out at, and
+// the composer saves the draft on every keystroke — so the mode has to survive
+// being edited, and has to be droppable when a human picks one by hand. Absence
+// and presence-as-undefined therefore mean different things, which is the kind
+// of distinction that reads as a typo and gets "simplified" to `??`.
+{
+  const { mergedMode } = await import("@aide/protocol")
+
+  check(
+    "an ordinary keystroke keeps it",
+    mergedMode("plan", { text: "edited" } as { mode?: undefined }) === "plan",
+    "a survey you fixed a typo in must not silently go out on Auto",
+  )
+  check("and it stays absent on a chat that never had one", mergedMode(undefined, {}) === undefined)
+  check(
+    "picking a mode by hand clears it",
+    mergedMode("plan", { mode: undefined }) === undefined,
+    "the picker would otherwise read Auto while the turn went out on Plan",
+  )
+  check("and picking another sets it", mergedMode("plan", { mode: "auto" }) === "auto")
+}
+
+// ---------------------------------------------------------------------------
 console.log("\nchat list order")
 {
   const { sortChats } = await import("@aide/protocol")

@@ -3,7 +3,8 @@ import { api, type GitPending, type Health, type ProjectView } from "./api.js"
 import { CHIME_KEY } from "./chime.js"
 import { DaemonBar } from "./Daemon.js"
 import { Dashboard } from "./Dashboard.js"
-import { carryDraft, draftKey, openNewChat } from "./drafts.js"
+import { carryDraft, draftKey, openComposedChat, openNewChat } from "./drafts.js"
+import { SURVEY_PROMPT } from "./survey.js"
 import { useAppLocation } from "./useAppLocation.js"
 import { useKeyed } from "./useKeyed.js"
 import { useRemembered } from "./useRemembered.js"
@@ -559,6 +560,48 @@ export function App() {
             title="An empty chat, opened here. Discard one you did not want with the ✕ on its row."
           >
             new
+          </Button>
+          {/*
+            The one turn aide knows how to ask for.
+
+            Beside `new` rather than in the rail on the right, because that is
+            what it makes: a chat, in this list, which then behaves like every
+            other one. The rail is about the working tree, and a button there
+            would read as acting on your uncommitted changes — which this does
+            not touch.
+
+            It sends on the press. An earlier version put the prompt in the box
+            unsent so you could read it first, and that is the ▶'s own mistake
+            over again: if you pressed the button you already know what it asks,
+            and a second press to confirm is a button that ignores you. The words
+            are still editable — they are in the transcript and the next message
+            is yours — and `survey.ts` is where they are changed for good.
+
+            Same lock as `new`, from the same `projectHeld`: one agent has the
+            checkout, and a survey is an agent.
+          */}
+          <Button
+            disabled={!project}
+            locked={projectHeld}
+            onClick={() => {
+              if (!project) return
+              const id = openComposedChat(project.id, {
+                text: SURVEY_PROMPT,
+                // What the row is called, without a model call: aide wrote the
+                // words, so nothing has to be asked what they are about.
+                title: "Technical debt survey",
+                // Plan, and not the mode you last used. It asks for a ranked
+                // list and says not to write code yet; sending that at a mode
+                // that acts is sending an instruction and its contradiction in
+                // one message.
+                mode: "plan",
+              })
+              navigate({ draftId: id })
+              setAutoSend(id)
+            }}
+            title="Ask what this project's technical debt is, worst first — a plan, not a change. Runs as a chat you can steer."
+          >
+            survey
           </Button>
         </PaneHeader>
 
