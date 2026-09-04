@@ -657,6 +657,60 @@ Decisions already taken, which are not gaps to fill:
   disagreeing is the bug, so the first outcome wins in both. The general lesson
   is the dashboard's: run a new reducer over the real corpus before trusting it,
   because the interesting inputs are the ones nobody would think to write down.
+- **The card's fields are LABELLED, and that was the fix for "which line is
+  what".** The first version stacked headline, next, intent and risk as four bare
+  paragraphs at one indent, told apart only by colour — and a colour code only
+  works on a reader who already knows it, which the reader of a new view by
+  definition does not. It read as an undifferentiated wall. Now each names its
+  role in a fixed left column (`did` / `next` / `why` / `risk`) and the values
+  all start at the same x; colour is reinforcement rather than the carrier. The
+  column is a fixed width, not `auto`: `auto` is measured per grid, so a card
+  whose longest label is `next` would indent differently from one whose longest
+  is `risk` and the list would ripple as you scrolled. The card reads as three
+  bands with different provenance — the facts strip off exit codes and git, the
+  question behind a quote rule, then the model's labelled fields — and the state
+  glyph carries its WORD, because a bare icon asks the reader to know a legend
+  nobody gave them.
+- **A running card names its step, and clocks THAT step.** The card of a live
+  turn was a spinner and a total elapsed time, which answers "is it still going"
+  rather than the question actually being asked, which is "is it still going
+  SOMEWHERE" — a number that only counts up looks identical whether the agent is
+  working through files or wedged on a call that will never return. So
+  `TurnCard.activity` carries the current step's label and the stamp of the event
+  that OPENED it: a clock that keeps resetting is visible progress, one sitting
+  at 4m is worth interrupting. It reports the OLDEST open call rather than the
+  newest, because one message opens several at once and taking the newest resets
+  the clock on every batch, hiding the stall this exists to show. The derivation
+  is `currentActivity` in `protocol/card.ts` and the working bar shares it rather
+  than keeping its own copy — two implementations of "what is happening" drift,
+  and the drift shows up as the bar and the card above it disagreeing about one
+  live turn. A Bash label drops its leading `cd <root>;` and `VAR=value`
+  prefixes: nearly every command in this project's logs opens with 34 identical
+  characters, so the truncated line read the same for a typecheck, a build and a
+  smoke run — the one distinction it exists to draw.
+- **The card's fields are glyphs, and it took three passes to get there.** First
+  version: four bare paragraphs at one indent, told apart only by colour, which
+  only works on a reader who already knows the code. Second: each role named in a
+  word (`did` / `next` / `why` / `risk`), which fixed the ambiguity and spent
+  four repeated words per card on furniture. Now a Phosphor glyph opens each row
+  — `check-circle`, `arrow-right`, `lightbulb`, `warning-circle` — with the word
+  on the row's `title`, so the legend is a hover away rather than memorised. The
+  two that could be confused are deliberately different SILHOUETTES rather than
+  two circles, because at this size shape is read before colour. The card is a
+  real card: its own surface, a rounded border and a `max-w`, because lines that
+  run the full width of the pane are not scannable and the thing being built is a
+  scan.
+- **A harness line does not open a turn.** The CLI writes `[Image: original
+  2560x1259…]` as its own user message directly AFTER the question a screenshot
+  was pasted with, so treating every `user.message` as a boundary cut the
+  question away from its answer: one card holding a prompt with no reply, the
+  next holding a reply captioned with image dimensions — which reads as the model
+  having ignored you. `isHarnessPrompt` keeps those out of the split, and the
+  leftover rule drops a turn opened by nothing but bookkeeping that then produced
+  nothing either (a bare "Continue from where you left off."). Filtered on having
+  NOTHING TO SHOW rather than on the text, so the same nudge keeps its card when
+  the turn actually did work. On this conversation it took 11 cards to 7 and gave
+  three answers back to the questions they belonged to.
 - **Cost and turn count are not on the card.** They were on the first sketch and
   they are the two numbers nobody acts on mid-review — the brief already says a
   cost figure is an estimate never to be trusted. A card whose every field has to

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import type { RunEvent } from "@aide/protocol"
+import { currentActivity, type RunEvent } from "@aide/protocol"
 
 /**
  * What the turn is doing right now, in one line.
@@ -18,111 +18,48 @@ import type { RunEvent } from "@aide/protocol"
  * the component, and nothing outside this file needs it.
  */
 /**
- * A tool call as one short phrase: the tool, and what it is pointed at.
+ * The bar's line, from the same derivation the card uses.
  *
- * Only the fields that identify a target, and the file ones are reduced to a
- * BASENAME — the status line is one line in a pane a few hundred pixels wide, and
- * a full absolute path pushes the tool's own name off the front of it, which is
- * the half that says what is happening.
- *
- * A Bash command keeps its head rather than its tail, because a command says
- * what it is in its first two words and its arguments are usually longer than
- * the line. Anything with no recognisable target degrades to the bare tool name,
- * which is what this printed for everything until now.
+ * `currentActivity` lives in `protocol/card.ts` and is shared rather than
+ * written twice here: the card at the top of the conversation and this bar at
+ * the bottom describe the SAME live turn, and two implementations of "what is
+ * happening" drift into two different answers on one screen.
  */
-function describeTarget(name: string, input: unknown): string {
-  const args = (input ?? {}) as Record<string, unknown>
-  const str = (key: string) => (typeof args[key] === "string" ? (args[key] as string) : "")
-  const path = str("file_path") || str("path") || str("notebook_path")
-  if (path) return `${name} ${path.split(/[/\\]/).pop() ?? path}`
-  const command = str("command")
-  if (command) {
-    const head = command.replace(/\s+/g, " ").trim().slice(0, 40)
-    return `${name} ${head}${command.length > 40 ? "…" : ""}`
-  }
-  const pattern = str("pattern")
-  if (pattern) return `${name} ${pattern.slice(0, 30)}`
-  return name
-}
-
 function describeActivity(events: readonly RunEvent[], runId: string | null): string {
   if (!runId) return ""
   const mine = events.filter((e) => e.runId === runId)
   if (mine.length === 0) return "Sending"
+  return currentActivity(mine)?.label ?? "Working"
+}
 
-  // A tool call with no matching tool.end is the thing currently running, and a
-  // check with no matching result is the same idea for a commit.
-  const open = new Set<string>()
-  let lastToolName = ""
-  let openCheck = ""
-  for (const e of mine) {
-    if (e.type === "tool.start") {
-      open.add(e.toolUseId)
-      // The target as well as the tool, when the call names one. "Running Read"
-      // is the same line for every file in the repository, so a turn spending a
-      // minute reading looks stuck on one call; `Read activity.ts` moves.
-      //
-      // Only from the EVENT, never from the delta that draws the row. The delta
-      // fires on `content_block_start` and deliberately carries no input —
-      // arguments stream as `input_json_delta` fragments and half-parsed JSON is
-      // not a filename. So this line names the tool alone for the first moment
-      // of a call and fills in the target when the event lands, which is the
-      // same handover the transcript's rows already make.
-      lastToolName = describeTarget(e.name, e.input)
-    } else if (e.type === "tool.end") {
-      open.delete(e.toolUseId)
-    } else if (e.type === "verify.started") {
-      openCheck = e.command
-    } else if (e.type === "verify.result") {
-      openCheck = ""
-    }
+/**
+ * Every event type that contributes no narration of its own.
+ *
+ * Kept here, unused, purely for the compile error: `currentActivity` ends in a
+ * fallback, so a new event type added to `RunEventBody` would silently be
+ * narrated as "Thinking" forever. This list fails to compile until somebody has
+ * decided which bucket the new one belongs in, which is the only thing that
+ * keeps the vocabulary a statement rather than whatever was true when it was
+ * written. `permission.*`, `verify.started` and `tool.start` are in here despite
+ * being matched inside that function: it looks for an OPEN call across the whole
+ * run, so a resolved permission, a finished check, or a `tool.start` whose
+ * `tool.end` has already landed all fall through to its tail like anything else.
+ */
+function assertNarrationIsExhaustive(last: RunEvent): void {
+  if (
+    last.type === "commit.step" ||
+    last.type === "commit.drafting" ||
+    last.type === "verify.result" ||
+    last.type === "commit.drafted" ||
+    last.type === "user.message" ||
+    last.type === "assistant.thinking" ||
+    last.type === "assistant.text" ||
+    last.type === "tool.end" ||
+    last.type === "run.started" ||
+    last.type === "run.retry"
+  ) {
+    return
   }
-
-  // A pending permission outranks everything: nothing moves until it is answered.
-  const answered = new Set(
-    mine.filter((e) => e.type === "permission.resolved").map((e) => e.requestId),
-  )
-  const waiting = mine.find(
-    (e) => e.type === "permission.request" && !answered.has(e.requestId),
-  )
-  if (waiting && waiting.type === "permission.request") return `Waiting for you · ${waiting.name}`
-
-  if (open.size > 0) return `Running ${lastToolName}`
-  // Ahead of the tail below, which would otherwise still be reporting the step
-  // BEFORE the checks — a commit spends most of its wall clock in here, and for
-  // all of it the bar read "reading what is uncommitted".
-  if (openCheck) return `Running ${openCheck}`
-
-  const last = mine[mine.length - 1]
-  if (!last) return "Working"
-  // The commit narrates itself, and its own words are better than anything
-  // derivable from the shape of its log.
-  if (last.type === "commit.step") return last.label
-  if (last.type === "commit.drafting") return `Writing the message · ${last.model}`
-  // Between two checks, or just after the last one. Naming the check that just
-  // finished would read as one still running.
-  if (last.type === "verify.result") return "Checking"
-  if (last.type === "commit.drafted") return "Committing"
-  if (last.type === "user.message") return "Starting"
-  if (last.type === "assistant.thinking") return "Thinking"
-  if (last.type === "assistant.text") return "Writing"
-  if (last.type === "tool.end") return "Thinking"
-  if (last.type === "run.started") return "Thinking"
-  if (last.type === "run.retry") return "Retrying"
-
-  // "Working" is the right answer for everything left, and the annotation is
-  // what keeps that a decision. This bar names what a turn is doing RIGHT NOW,
-  // so most events are either terminal (the bar is gone by then), one-shot
-  // bookkeeping nobody narrates, or already covered by the open-tool and
-  // open-check passes above. A new event type will not compile here until it has
-  // been sorted into one of those, which is the only way this list stays a
-  // statement rather than whatever was true when it was written.
-  // `permission.*`, `verify.started` and `tool.start` are in here despite being
-  // matched above: that pass looks for an OPEN call across the whole run, so a
-  // resolved permission, a finished check, or a `tool.start` whose `tool.end`
-  // has already landed all fall through to this tail like anything else. The
-  // last of those is the one worth knowing about — the compiler found it, not a
-  // reading of the code.
   const noNarration:
     | "assistant.start"
     | "checkpoint.taken"
@@ -144,7 +81,6 @@ function describeActivity(events: readonly RunEvent[], runId: string | null): st
     | "verify.skipped"
     | "verify.started" = last.type
   void noNarration
-  return "Working"
 }
 
 /**

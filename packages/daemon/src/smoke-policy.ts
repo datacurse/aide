@@ -653,6 +653,126 @@ console.log("\na turn reduced to a card")
   )
   check("an empty conversation is no cards", cardsForConversation([]).length === 0)
 
+  // The CLI writes an image caption as its own user message directly AFTER the
+  // question a screenshot was pasted with. Treating that as a turn boundary cuts
+  // the question away from its answer: one card holding a prompt with no reply,
+  // the next holding a reply captioned with image dimensions — which reads as
+  // the model having ignored you.
+  const pasted = cardsForConversation([
+    { type: "user.message", text: "why is this broken?", runId: "s", seq: 1, ts: 0 },
+    {
+      type: "user.message",
+      text: "[Image: original 2560x1259, displayed at 2000x984. Multiply coordinates by 1.28]",
+      runId: "s",
+      seq: 2,
+      ts: 0,
+    },
+    { type: "assistant.text", text: "because of X", parentToolUseId: null, runId: "s", seq: 3, ts: 0 },
+    { type: "turn.summary", headline: "fixed X", runId: "s", seq: 4, ts: 0 },
+  ] as RunEvent[])
+  check(
+    "a pasted screenshot does not split the turn it belongs to",
+    pasted.length === 1,
+    `${pasted.length} cards — the caption is the harness talking, not a new question`,
+  )
+  check(
+    "so the question keeps the answer it was asked with",
+    pasted[0]?.prompt === "why is this broken?" && pasted[0]?.summary?.headline === "fixed X",
+    `${pasted[0]?.prompt} :: ${pasted[0]?.summary?.headline}`,
+  )
+
+  // A resume nudge that produced nothing is not a row. Dropped on having nothing
+  // to show rather than on its text, so the same nudge KEEPS its card when the
+  // turn it opened actually did work.
+  const resumed = cardsForConversation([
+    { type: "user.message", text: "Continue from where you left off.", runId: "s", seq: 1, ts: 0 },
+    { type: "assistant.text", text: "ok", parentToolUseId: null, runId: "s", seq: 2, ts: 0 },
+  ] as RunEvent[])
+  check(
+    "an empty resume nudge is not a card",
+    resumed.length === 0,
+    `${resumed.length} — a row that says only that the harness spoke`,
+  )
+  const resumedWorked = cardsForConversation([
+    { type: "user.message", text: "Continue from where you left off.", runId: "s", seq: 1, ts: 0 },
+    { type: "turn.summary", headline: "finished the migration", runId: "s", seq: 2, ts: 0 },
+  ] as RunEvent[])
+  check(
+    "but one that did work keeps its card",
+    resumedWorked.length === 1,
+    "filtering on the sentence rather than on the content would lose this",
+  )
+
+  // What a running turn says it is doing, and SINCE WHEN. The clock is the
+  // point: an elapsed time measured from the start of the turn counts up at the
+  // same rate whether the agent is making progress or wedged, so the card
+  // measures the current STEP instead and a step whose clock keeps resetting is
+  // visible progress.
+  const running = reduceCard("r10", [
+    ev({ type: "user.message", text: "go" }, 1000),
+    ev({ type: "tool.start", toolUseId: "t1", name: "Bash", input: { command: "pnpm smoke" }, parentToolUseId: null }, 2000),
+  ])
+  check("a running turn says what it is doing", running.activity?.label === "Running Bash pnpm smoke", running.activity?.label)
+  check(
+    "and the clock starts at that STEP, not at the turn",
+    running.activity?.since === 2000,
+    `${running.activity?.since} — 1000 would be the turn, which cannot distinguish progress from a stall`,
+  )
+
+  // The OLDEST open call, not the newest. One message opens several at once, and
+  // reporting the newest resets the clock every time a batch goes out — hiding
+  // exactly the stall this exists to show.
+  const batch = reduceCard("r11", [
+    ev({ type: "tool.start", toolUseId: "a", name: "Bash", input: { command: "pnpm build" }, parentToolUseId: null }, 1000),
+    ev({ type: "tool.start", toolUseId: "b", name: "Read", input: { file_path: "/x/y.ts" }, parentToolUseId: null }, 1100),
+  ])
+  check(
+    "a batch reports the call that has been open longest",
+    batch.activity?.since === 1000 && batch.activity?.label.includes("pnpm build"),
+    `${batch.activity?.label} @ ${batch.activity?.since}`,
+  )
+  // A closed call stops being the answer, or the line names something that has
+  // already returned.
+  const closed = reduceCard("r12", [
+    ev({ type: "tool.start", toolUseId: "a", name: "Bash", input: { command: "pnpm build" }, parentToolUseId: null }, 1000),
+    ev({ type: "tool.end", toolUseId: "a", ok: true, summary: "" }, 1500),
+  ])
+  check("a finished call is not still running", closed.activity?.label === "Thinking", closed.activity?.label)
+
+  // The boilerplate in front of a command comes off. Nearly every Bash call in
+  // this project's logs opens `cd C:/Users/loki/code/aide; CI=true pnpm …` — 34
+  // identical characters — so a truncated label read the same for a typecheck, a
+  // build and a smoke run, which is the one distinction the line is for.
+  const shell = reduceCard("r13b", [
+    ev(
+      {
+        type: "tool.start",
+        toolUseId: "a",
+        name: "Bash",
+        input: { command: "cd C:/Users/loki/code/aide; CI=true pnpm smoke" },
+        parentToolUseId: null,
+      },
+      1000,
+    ),
+  ])
+  check(
+    "a command loses its cd and env prefix",
+    shell.activity?.label === "Running Bash pnpm smoke",
+    shell.activity?.label,
+  )
+
+  // A path is reduced to its basename: the pane is a few hundred pixels wide and
+  // a full absolute path pushes the tool's own name off the front of the line.
+  const reading = reduceCard("r13", [
+    ev({ type: "tool.start", toolUseId: "a", name: "Read", input: { file_path: "C:/Users/loki/code/aide/packages/protocol/src/card.ts" }, parentToolUseId: null }, 1000),
+  ])
+  check("a file path is shown as its basename", reading.activity?.label === "Running Read card.ts", reading.activity?.label)
+
+  // A finished turn has no "now". Leaving it on would put a stale "Running pnpm
+  // smoke" under every completed card in the list.
+  check("a finished turn reports no activity", done.activity === null, "the question stops being asked once it is over")
+  check("but a blocked one still does", blocked.activity !== null, "a turn waiting on you is still live")
+
   // Needs-you, then working, then done — the list's grouping, as a sort.
   const order = sortCards([done, live, blocked]).map((c) => c.state)
   check("the list leads with what needs you", order[0] === "blocked", order.join(","))

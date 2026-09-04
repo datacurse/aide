@@ -863,7 +863,7 @@ export function ConversationPane({
                   would mean two places for a live turn to arrive and one of them
                   being wrong. */}
               {cardView ? (
-                <div className="-mx-3 -my-2 border-t border-line">
+                <div className="pt-1">
                   {cards.map((card) => (
                     <TurnCardRow
                       key={card.runId}

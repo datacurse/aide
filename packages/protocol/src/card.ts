@@ -90,6 +90,21 @@ export interface TurnCard {
   turns: number
   wallMs: number
   startedAt: number
+  /**
+   * What the turn is doing RIGHT NOW, and since when. Null once it is over.
+   *
+   * The card of a running turn was a spinner and a total elapsed time, which
+   * answers "is it still going" and not the question actually being asked, which
+   * is "is it still going SOMEWHERE". A number that only counts up looks
+   * identical whether the agent is working through a file or wedged on a call
+   * that will never return.
+   *
+   * So the label names the current step and `since` is when THAT step began, not
+   * when the turn did. A step whose clock resets every few seconds is visible
+   * progress; one sitting at 4m is the thing worth interrupting, and the two are
+   * now different pictures rather than the same one.
+   */
+  activity: { label: string; since: number } | null
 }
 
 /**
@@ -132,6 +147,7 @@ export function reduceCard(
     turns: 0,
     wallMs: 0,
     startedAt: events[0]?.ts ?? 0,
+    activity: null,
   }
 
   const asked = new Set<string>()
@@ -244,7 +260,132 @@ export function reduceCard(
     card.wallMs = Math.max(0, (events.at(-1)?.ts ?? card.startedAt) - card.startedAt)
   }
 
+  // Only while it is running. A finished turn has an outcome, a summary and a
+  // diffstat to show; "what it is doing now" is the answer to a question nobody
+  // is asking about it any more, and leaving it on would put a stale "Running
+  // pnpm smoke" under every completed card in the list.
+  if (card.state === "working" || card.state === "blocked") {
+    card.activity = currentActivity(events)
+  }
+
   return card
+}
+
+/**
+ * A tool call as one short phrase: the tool, and what it is pointed at.
+ *
+ * The file fields are reduced to a BASENAME — this renders on one line in a
+ * pane a few hundred pixels wide, and a full absolute path pushes the tool's own
+ * name off the front, which is the half that says what is happening. A Bash
+ * command keeps its HEAD rather than its tail, because a command says what it is
+ * in its first two words and its arguments are usually longer than the line.
+ *
+ * Anything with no recognisable target degrades to the bare tool name, which is
+ * what every line said before this existed.
+ */
+function describeTarget(name: string, input: unknown): string {
+  const args = (input ?? {}) as Record<string, unknown>
+  const str = (key: string) => (typeof args[key] === "string" ? (args[key] as string) : "")
+  const path = str("file_path") || str("path") || str("notebook_path")
+  if (path) return `${name} ${path.split(/[/\\]/).pop() ?? path}`
+  const command = str("command")
+  if (command) {
+    // The leading `cd <root>;` and any `VAR=value` prefixes come off first.
+    // Nearly every command in this project's logs starts `cd C:/Users/loki/code/
+    // aide; CI=true pnpm …`, which is 34 characters of boilerplate identical on
+    // every line — so the truncated label read the same for a typecheck, a build
+    // and a smoke run, which is precisely the distinction the line exists to
+    // draw. What is left is the verb.
+    const meat = command
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/^cd\s+\S+\s*(?:&&|;)\s*/, "")
+      .replace(/^(?:\w+=\S*\s+)+/, "")
+    const head = meat.slice(0, 40)
+    return `${name} ${head}${meat.length > 40 ? "…" : ""}`
+  }
+  const pattern = str("pattern")
+  if (pattern) return `${name} ${pattern.slice(0, 30)}`
+  return name
+}
+
+/**
+ * What a turn is doing right now, and when that step started.
+ *
+ * Shared by the card and the working bar rather than written twice, because two
+ * implementations of "what is happening" drift and the drift shows up as the bar
+ * and the card above it disagreeing about the same live turn.
+ *
+ * `since` is the stamp of the event that OPENED the current step, which is the
+ * whole point: an elapsed time measured from the start of the turn cannot tell
+ * steady progress from a wedge, because both count up at the same rate.
+ *
+ * Returns null for a run with no events yet — the caller decides what an
+ * unstarted turn says, and "Sending" is a different statement from "Working".
+ */
+export function currentActivity(
+  events: readonly RunEvent[],
+): { label: string; since: number } | null {
+  if (events.length === 0) return null
+
+  // A tool call with no matching tool.end is the thing currently running, and a
+  // check with no matching result is the same idea for a commit.
+  const open = new Map<string, { label: string; at: number }>()
+  let openCheck: { label: string; at: number } | null = null
+  for (const e of events) {
+    if (e.type === "tool.start") {
+      open.set(e.toolUseId, { label: describeTarget(e.name, e.input), at: e.ts })
+    } else if (e.type === "tool.end") {
+      open.delete(e.toolUseId)
+    } else if (e.type === "verify.started") {
+      openCheck = { label: `Running ${e.command}`, at: e.ts }
+    } else if (e.type === "verify.result") {
+      openCheck = null
+    }
+  }
+
+  // A pending permission outranks everything: nothing moves until it is answered.
+  const answered = new Set(
+    events.flatMap((e) => (e.type === "permission.resolved" ? [e.requestId] : [])),
+  )
+  const waiting = events.find(
+    (e) => e.type === "permission.request" && !answered.has(e.requestId),
+  )
+  if (waiting?.type === "permission.request") {
+    return { label: `Waiting for you · ${waiting.name}`, since: waiting.ts }
+  }
+
+  // The OLDEST open call, not the newest. One message can open several at once,
+  // and the one that has been running longest is the one the turn is waiting on
+  // — reporting the newest resets the clock every time a batch goes out and
+  // hides exactly the stall this is for.
+  const oldest = [...open.values()].sort((a, b) => a.at - b.at)[0]
+  if (oldest) return { label: `Running ${oldest.label}`, since: oldest.at }
+  if (openCheck) return { label: openCheck.label, since: openCheck.at }
+
+  const last = events[events.length - 1]
+  if (!last) return null
+  // The commit narrates itself, and its own words beat anything derivable from
+  // the shape of its log.
+  const label =
+    last.type === "commit.step"
+      ? last.label
+      : last.type === "commit.drafting"
+        ? `Writing the message · ${last.model}`
+        : last.type === "verify.result"
+          ? "Checking"
+          : last.type === "commit.drafted"
+            ? "Committing"
+            : last.type === "user.message"
+              ? "Starting"
+              : last.type === "assistant.thinking"
+                ? "Thinking"
+                : last.type === "assistant.text"
+                  ? "Writing"
+                  : last.type === "run.retry"
+                    ? "Retrying"
+                    : "Thinking"
+  return { label, since: last.ts }
 }
 
 /**
@@ -291,7 +432,15 @@ export function checkVerdict(
 export function cardsForConversation(events: readonly RunEvent[]): TurnCard[] {
   const turns: RunEvent[][] = []
   for (const e of events) {
-    if (e.type === "user.message" || turns.length === 0) turns.push([])
+    // A harness line does NOT open a turn, and that is not cosmetic. The CLI
+    // writes `[Image: original 2560x1259…]` as its own user message directly
+    // AFTER the question a screenshot was pasted with — so treating it as a
+    // boundary cuts your prompt away from the reply that answers it, leaving one
+    // card holding a question with no answer and the next holding an answer
+    // captioned with image dimensions. Both are wrong, and the second is the one
+    // that looks like the model ignored you.
+    const opens = e.type === "user.message" && !isHarnessPrompt(e.text)
+    if (opens || turns.length === 0) turns.push([])
     turns[turns.length - 1]?.push(e)
   }
   return turns
@@ -300,6 +449,37 @@ export function cardsForConversation(events: readonly RunEvent[]): TurnCard[] {
       const fromLog = list.find((e) => e.runId && e.ts > 0)
       return reduceCard(fromLog?.runId ?? `turn-${i}`, list, { settled: !fromLog })
     })
+    // What is left of the rule above: a turn opened by nothing but harness
+    // bookkeeping, that then produced nothing either. A conversation resumed
+    // with "Continue from where you left off." and no work done is one of these
+    // — a row saying only that the harness spoke.
+    //
+    // Filtered on having NOTHING TO SHOW rather than on the text, so a resumed
+    // turn that really did work keeps its card: it still has its checks, its
+    // diffstat and its summary, and only the genuinely empty ones fall out.
+    .filter(
+      (card) =>
+        card.summary !== null ||
+        card.checks.length > 0 ||
+        card.sha !== null ||
+        card.state !== "done" ||
+        !isHarnessPrompt(card.prompt),
+    )
+}
+
+/**
+ * A line the harness wrote, not the human.
+ *
+ * Deliberately a short, exact list. Anything looser risks swallowing a real
+ * question, which is the one thing this view must never do — a missing card is
+ * indistinguishable from a turn that never happened.
+ */
+function isHarnessPrompt(prompt: string): boolean {
+  const text = prompt.trim()
+  if (!text) return true
+  // The caption written beside a pasted screenshot.
+  if (/^\[Image: original \d+x\d+/.test(text)) return true
+  return text === "Continue from where you left off."
 }
 
 /** Cards for a list, most urgent first, then newest. See `CARD_STATE_ORDER`. */
