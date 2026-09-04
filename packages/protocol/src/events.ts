@@ -327,6 +327,55 @@ export type RunEventBody =
    * afterwards the answer is always zero.
    */
   | { type: "push.landed"; branch: string; pushed: number }
+  /**
+   * What the turn says it did, in fields rather than in prose.
+   *
+   * The card at the top of a conversation is built from three layers, and this is
+   * the middle one. The OUTER layers are already here and are not model-written:
+   * `verify.result` carries each check's command and exit code, `commit.landed`
+   * carries the sha and the paths, `run.finished` carries the outcome and the
+   * spend. Those are ground truth and nothing here may contradict them — this
+   * event carries only what the model alone knows, which is what it was trying to
+   * do and what it thinks should happen next.
+   *
+   * So there is deliberately no `ok`, no `passed`, no `filesChanged`. A summary
+   * that could assert pass/fail would be a second, softer answer to a question
+   * the exit codes have already answered hard, and the two would eventually
+   * disagree — on the field a human reads fastest.
+   *
+   * Parsed out of a fenced block at the end of the reply rather than taken from a
+   * tool call, and that is not a stylistic choice. `canUseTool` is awaited BEFORE
+   * the SDK runs a tool, so a mandatory closing tool call parks the turn holding
+   * the project's lock at the exact moment it is finishing — the same wedge
+   * `AskUserQuestion` is refused for, reintroduced at the end of every turn. A
+   * block in the text has no permission surface, and a turn that forgets to write
+   * one degrades to what happens today instead of hanging.
+   *
+   * Every field but the headline is optional, because the model will sometimes
+   * not comply and a reader that assumes otherwise breaks on the turn where it
+   * matters. `parseTurnSummary` is where the shape is enforced.
+   */
+  | {
+      type: "turn.summary"
+      /** One line, what happened. Written for someone who has not read the turn. */
+      headline: string
+      /**
+       * What the human should do next, or what is in the way.
+       *
+       * The most useful field and the one worth protecting from drift: it is the
+       * difference between a card that describes and a card that hands over.
+       * Absent means the model had nothing to hand over, which is a real answer
+       * and is drawn differently from a field it forgot to write.
+       */
+      next?: string
+      /** Why it did what it did, when the diff does not make that obvious. */
+      intent?: string
+      /**
+       * Something the diff does not show: a decision that could have gone the
+       * other way, a claim left unverified, a thing tried and backed out.
+       */
+      risk?: string
+    }
   | {
       type: "run.retry"
       attempt: number

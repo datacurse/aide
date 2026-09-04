@@ -88,6 +88,59 @@ const HUMAN_ONLY_REASON =
   "stop, rather than looking for one. (`git push` is allowed: it only ever moves commits " +
   "a human already approved.)"
 
+/**
+ * Reading a file, or searching for one, through a shell.
+ *
+ * Advice against this has been in the system prompt for some time, with a
+ * measurement in it, and the runs did it anyway: across the eight most recently
+ * archived conversations, 592 Bash calls ran `grep`/`awk`/`find` and 190 ran
+ * `cat`/`sed -n`/`head`/`tail` over source files — 69 minutes of wall clock for
+ * work `Grep` and `Read` do in about a millisecond. `Grep` was called 31 times
+ * in the same eight. A sentence the model is free to skip is not a rule, so this
+ * is the rule.
+ *
+ * Refused rather than rewritten. The obvious alternative — quietly turn the
+ * command into the tool call it should have been — has to guess at flags,
+ * globs, `-n` ranges and quoting, and a guess that is subtly wrong returns the
+ * WRONG FILE CONTENTS to an agent that has no way to know. A refusal that names
+ * the tool costs one round trip and cannot lie.
+ *
+ * Anchored at the start of the command, and only at the start. `git log | head`
+ * is a shell pipeline that `SHELL_METACHARACTERS` already refuses on the path
+ * with an allowlist; on the null-allowlist path a pipe is permitted and the
+ * `head` there is paging a git call, not reading a file, so matching anywhere in
+ * the string would refuse the very thing it is fine to do.
+ *
+ * `ls` is deliberately absent. Listing a directory is what `ls` is for, `Glob`
+ * answers a different question (paths matching a pattern, recursively), and
+ * refusing `ls` would send the agent to `Glob("*")` — a worse answer to a
+ * question it asked correctly.
+ */
+export const FILE_TOOL_COMMANDS: ReadonlyArray<{ prefix: string; use: string }> = [
+  { prefix: "cat", use: "Read" },
+  { prefix: "head", use: "Read" },
+  { prefix: "tail", use: "Read" },
+  { prefix: "sed", use: "Read (with offset/limit) or Edit" },
+  { prefix: "awk", use: "Grep" },
+  { prefix: "grep", use: "Grep" },
+  { prefix: "rg", use: "Grep" },
+  { prefix: "find", use: "Glob" },
+]
+
+/**
+ * Why one of those is refused, naming the tool that does the same job.
+ *
+ * Every refusal in this file names the way forward, for the reason
+ * `HUMAN_ONLY_REASON` records: an agent that is told only "no" goes looking for
+ * a spelling that gets through. Here the way forward is genuinely better than
+ * what was asked for, so the sentence leads with it and gives the measurement,
+ * which is the part that makes it read as a cost rather than a preference.
+ */
+const fileToolReason = (prefix: string, use: string) =>
+  `use ${use} instead of \`${prefix}\`: a Bash call costs several seconds on this machine ` +
+  "where the file tools return in about a millisecond, and this run is measured. " +
+  "Keep Bash for what needs a shell — git, the package manager, running something."
+
 export interface BashVerdict {
   allow: boolean
   /** Shown to the agent on denial, so make it actionable. */
@@ -139,6 +192,16 @@ export function checkBashCommand(
         : `\`${hit}\` is not permitted in this run: it either never exits, or spends money, ` +
           "or runs code this allowlist cannot see",
     }
+  }
+
+  // After the deny list, before the allowlist. A command that is denied outright
+  // must keep saying so — `grep` reaching this on a run that also denied it would
+  // otherwise be told to use a tool while the real answer is no — and a run whose
+  // allowlist does not mention `cat` at all should hear the useful sentence
+  // rather than the generic one, because the useful sentence is also true.
+  const shellRead = FILE_TOOL_COMMANDS.find((f) => hasPrefix(command, f.prefix))
+  if (shellRead) {
+    return { allow: false, reason: fileToolReason(shellRead.prefix, shellRead.use) }
   }
 
   if (allowed && !allowed.some((a) => hasPrefix(command, a))) {

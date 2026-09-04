@@ -21,7 +21,22 @@ import { existsSync } from "node:fs"
 import { readFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import { chatModeFromSdk, planChecks, restartDecision, type Health } from "@aide/protocol"
+import {
+  SUMMARY_FENCE,
+  cardsForConversation,
+  chatModeFromSdk,
+  checkVerdict,
+  parseTurnSummary,
+  planChecks,
+  reduceCard,
+  restartDecision,
+  sortCards,
+  stripPartialTurnSummary,
+  stripTurnSummary,
+  type Health,
+  type RunEvent,
+  type RunEventBody,
+} from "@aide/protocol"
 import { parseProjectDoc } from "@aide/protocol/node"
 import { HUMAN_ONLY_COMMANDS, checkBashCommand } from "./policy.js"
 import { staleVerdict } from "./source.js"
@@ -56,6 +71,111 @@ console.log("\nbash policy")
   check("denial says what to do instead", verdict("cd x && pnpm t").reason.includes("--filter"))
 }
 
+console.log("\nreading files through a shell")
+{
+  // Advice against this sat in the system prompt, with a measurement attached,
+  // and the runs did it anyway: 592 Bash calls running grep/awk/find and 190
+  // running cat/sed/head/tail across the eight most recently archived
+  // conversations — 69 minutes for work the file tools do in a millisecond,
+  // against 31 total calls to Grep in the same eight. That is the evidence that
+  // a sentence the model may skip is not a rule.
+  const allow = ["pnpm", "git status", "cat", "grep"]
+  const deny = ["pnpm dev"]
+  const verdict = (cmd: unknown) => checkBashCommand(cmd, allow, deny)
+
+  check("denies cat", !verdict("cat package.json").allow)
+  check("denies head", !verdict("head -20 src/index.ts").allow)
+  check("denies tail", !verdict("tail -n 5 log.txt").allow)
+  check("denies sed", !verdict("sed -n '1,40p' src/app.ts").allow)
+  check("denies grep", !verdict("grep -rn TODO src").allow)
+  check("denies rg", !verdict("rg --files").allow)
+  check("denies awk", !verdict("awk 'NR>10' file.ts").allow)
+  check("denies find", !verdict("find . -name '*.ts'").allow)
+
+  // Refused even when the run's own allowlist names them. The allowlist says
+  // which commands this run may reach for; this rule says the shell is the wrong
+  // way to reach for these at all, and an allowlist written before the rule
+  // existed must not quietly opt out of it.
+  check(
+    "an allowlist naming cat does not re-permit it",
+    !verdict("cat x.ts").allow,
+    "the allowlist picks commands; this rule is about the tool, not the command",
+  )
+
+  // Each refusal names the tool that does the job, because a refusal an agent
+  // cannot act on becomes a retry loop — the lesson `HUMAN_ONLY_REASON` records.
+  check("cat is told to use Read", verdict("cat x.ts").reason.includes("Read"))
+  check("grep is told to use Grep", verdict("grep x src").reason.includes("Grep"))
+  check("find is told to use Glob", verdict("find . -name x").reason.includes("Glob"))
+  check(
+    "and says why, so it reads as a cost rather than a preference",
+    verdict("cat x.ts").reason.includes("millisecond"),
+    verdict("cat x.ts").reason.slice(0, 60),
+  )
+
+  // Prefix matching still ends at a word, or `catalog`, `finder` and `header`
+  // become unrunnable for spelling reasons.
+  check("catalog is not cat", verdict("pnpm catalog").allow, "prefix must end at a word")
+  check("a path containing grep is not grep", verdict("pnpm run grepper").allow)
+
+  // Only at the START. `git log | head` is paging a git call rather than reading
+  // a file, and a rule matching anywhere in the string would refuse it for the
+  // word `head`. That command is refused here anyway — a pipe is a shell
+  // metacharacter and loses to the blunter rule above it — so what is checkable
+  // is the reason: it must be the pipe that stops it, not the pager, or the
+  // refusal sends the agent to Read for a command that has no file in it.
+  const paged = checkBashCommand("git log --oneline | head -20", null, [])
+  check(
+    "a pager after a real command is refused for its pipe, not for being a read",
+    !paged.allow && paged.reason.includes("shell operators") && !paged.reason.includes("Read"),
+    paged.reason.slice(0, 60),
+  )
+
+  // `ls` stays runnable. Glob answers a different question — paths matching a
+  // pattern, recursively — so refusing `ls` would push the agent to `Glob("*")`,
+  // a worse answer to a question it asked correctly.
+  check("ls is still allowed", checkBashCommand("ls -la", null, []).allow, "Glob is not ls")
+
+  // A denied command keeps its own reason. `grep` on a run that also denies it
+  // outright must hear "no", not "use Grep instead" — the deny list is checked
+  // first for exactly this.
+  const bothListed = checkBashCommand("pnpm dev", ["pnpm"], ["pnpm dev", "grep"])
+  check(
+    "an outright denial still wins over the tool hint",
+    !bothListed.allow && bothListed.reason.includes("never exits"),
+    bothListed.reason.slice(0, 50),
+  )
+}
+
+console.log("\nthe gate and its widening name the same commands")
+{
+  // The rule above is enforced in `checkBashCommand`, which on Auto is NEVER
+  // REACHED for these: `fastBashSettings` puts `Bash(*)` in the SDK's settings
+  // layer, and that layer resolves before `canUseTool`. So the file-tool prefixes
+  // have to appear in that layer's deny list as well, or the rule is enforced on
+  // Plan and decorative on the mode most turns actually run in.
+  //
+  // This is the assertion that catches the two lists drifting apart, which is
+  // the only way this can fail — and it would fail silently, looking exactly
+  // like a rule that works.
+  const { FILE_TOOL_COMMANDS } = await import("./policy.js")
+  const { fastBashSettings } = await import("./agent.js")
+  const denied = fastBashSettings(["pnpm dev"]).permissions?.deny ?? []
+
+  for (const { prefix } of FILE_TOOL_COMMANDS) {
+    check(
+      `the Auto layer denies ${prefix} too`,
+      denied.includes(`Bash(${prefix})`) && denied.includes(`Bash(${prefix} *)`),
+      "otherwise Bash(*) resolves it before the policy is consulted",
+    )
+  }
+  check(
+    "and still denies what it always did",
+    denied.includes("Bash(pnpm dev)") && denied.includes("Bash(git commit)"),
+    "the file-tool prefixes are an addition, not a replacement",
+  )
+}
+
 console.log("\ncarrying out an approved plan")
 {
   // A null allowlist is the shape a chat gets once the human has approved a
@@ -65,8 +185,17 @@ console.log("\ncarrying out an approved plan")
   const deny = [...["pnpm dev", "pnpm probe", "npx"], ...HUMAN_ONLY_COMMANDS]
   const verdict = (cmd: unknown) => checkBashCommand(cmd, null, deny)
 
-  check("runs a command no allowlist mentions", verdict("rg --files").allow, "this is the point")
+  // `rg --files` used to be this case and no longer can be: searching through a
+  // shell is refused everywhere now, allowlist or not. Swapped rather than
+  // dropped — what this asserts is that a null allowlist stops gating on the
+  // LIST, which is still true and still the point.
+  check("runs a command no allowlist mentions", verdict("docker ps").allow, "this is the point")
   check("runs node", verdict("node scripts/one-off.mjs").allow)
+  check(
+    "but the file tools are not a list it can opt out of",
+    !verdict("rg --files").allow,
+    "an approved plan is exactly where nobody is watching the seconds go",
+  )
   check("still denies pnpm dev", !verdict("pnpm dev").allow, "it never exits")
   check("still denies npx", !verdict("npx cowsay").allow)
   check("denies git commit", !verdict("git commit -m x").allow, "the human commits, not the run")
@@ -120,6 +249,414 @@ console.log("\ncarrying out an approved plan")
     verdict("pnpm dev").reason !== commitReason,
     "sharing one message is exactly how the wrong reason reached the agent",
   )
+}
+
+console.log("\nthe agent is told what the gate will run")
+{
+  // Two thirds of all shell time across the eight most recently archived
+  // conversations — 334 runs, 101.6 minutes — went on re-running the very checks
+  // the commit gate runs afterwards. The cause is that a run cannot see the
+  // gate, so it re-proves the whole tree after every edit. Naming the commands
+  // in the system prompt is the fix, and these pin the two ways it breaks
+  // silently.
+  const { promptFingerprint } = await import("./chat.js")
+  const doc = parseProjectDoc("---\nverify:\n  - pnpm typecheck\n  - pnpm smoke\n---\nthe brief")
+
+  // A warm session's system prompt is fixed for the life of its query, so the
+  // reuse test has to cover EVERY part of that prompt which came off disk. It
+  // covered the prose only; the commands are in the prompt now too, and the
+  // commit's one repair attempt is explicitly allowed to rewrite them — which
+  // would leave a warm session naming checks that no longer exist.
+  const rewritten = parseProjectDoc("---\nverify:\n  - pnpm typecheck\n---\nthe brief")
+  check(
+    "changing a check changes the fingerprint",
+    promptFingerprint(doc) !== promptFingerprint(rewritten),
+    "otherwise a rewritten gate keeps a warm session on the old prompt",
+  )
+  check(
+    "changing the prose still changes it",
+    promptFingerprint(doc) !== promptFingerprint(parseProjectDoc("---\nverify:\n  - pnpm typecheck\n  - pnpm smoke\n---\nother")),
+    "the body half is what this test was originally for",
+  )
+  check(
+    "and an identical doc is identical",
+    promptFingerprint(doc) ===
+      promptFingerprint(parseProjectDoc("---\nverify:\n  - pnpm typecheck\n  - pnpm smoke\n---\nthe brief")),
+    "a fingerprint that never matches makes every message pay a cold start",
+  )
+  // The separator has to be something no command can contain, or two projects
+  // whose fields differ can fingerprint the same. `parseVerify` trims commands
+  // and refuses an empty one, so a newline cannot appear inside one.
+  check(
+    "a command cannot forge a field boundary",
+    promptFingerprint({ body: "a", retired: [], verify: [{ command: "b", unless: [] }] }) !==
+      promptFingerprint({ body: "a\n b", retired: [], verify: [] }),
+    "colliding fingerprints reuse a session built from a different prompt",
+  )
+}
+
+console.log("\nthe closing block a turn writes about itself")
+{
+  const fence = (body: string) => "```" + SUMMARY_FENCE + "\n" + body + "\n```"
+
+  const full = parseTurnSummary(
+    "Did the thing.\n\n" +
+      fence("headline: fixed the poll guard\nnext: read the diff\nrisk: untested on remote"),
+  )
+  check("the headline is read", full?.headline === "fixed the poll guard", full?.headline)
+  check("and the handover", full?.next === "read the diff")
+  check("and the risk", full?.risk === "untested on remote")
+
+  // The headline is what makes it a summary. A block with only a `next:` is a
+  // fragment, and a card drawn from it has an empty first line — which reads as
+  // aide having lost the text rather than as the model not having written any.
+  check("a block with no headline is not a summary", parseTurnSummary(fence("next: x")) === null)
+  check("a reply with no block at all is not one either", parseTurnSummary("just prose") === null)
+  check("nor is an ordinary code block", parseTurnSummary("```\nheadline: no\n```") === null)
+
+  // The LAST block, not the first. A turn answering "what did you say last
+  // time" quotes an older summary, and taking the first would report that one
+  // as this turn's.
+  const quoted = parseTurnSummary(fence("headline: the old one") + "\n\n" + fence("headline: the new one"))
+  check("the last block wins", quoted?.headline === "the new one", quoted?.headline)
+
+  // A field that wraps keeps its second line. The model writes prose here, and
+  // prose wraps — dropping the continuation silently truncates mid-sentence.
+  const wrapped = parseTurnSummary(fence("headline: a long one\n  that wrapped\nnext: go"))
+  check("a wrapped field keeps its tail", wrapped?.headline === "a long one that wrapped", wrapped?.headline)
+  check("and the field after it still parses", wrapped?.next === "go")
+
+  // Absent and empty are different: one is a turn with nothing to hand over,
+  // the other is a turn that did not answer, and they are drawn differently.
+  const bare = parseTurnSummary(fence("headline: done\nnext:"))
+  check("an empty field is absent, not blank", bare?.next === undefined, String(bare?.next))
+
+  // Never throws. This runs while normalizing a message, so a malformed block
+  // has to mean "no summary" rather than take the turn's events down with it.
+  let threw = false
+  try {
+    parseTurnSummary("```" + SUMMARY_FENCE + "\nheadline: unterminated")
+  } catch {
+    threw = true
+  }
+  check("an unterminated block does not throw", !threw, "it runs mid-normalize")
+
+  // The block is machinery and must not be read as prose. Stripped at RENDER
+  // time only — the log keeps the reply exactly as the model wrote it.
+  const reply = "Here is what I did.\n\n" + fence("headline: x")
+  check("the block is taken out of the prose", !stripTurnSummary(reply).includes("headline:"))
+  check("and the prose survives", stripTurnSummary(reply) === "Here is what I did.")
+
+  // Mid-stream the closing fence has not arrived, so the ordinary strip matches
+  // nothing and the reader watches the block's own field names type themselves
+  // out — the raw machinery the card exists to replace.
+  const typing = "Here is what I did.\n\n```" + SUMMARY_FENCE + "\nheadline: half w"
+  check(
+    "a half-written block is hidden too",
+    stripPartialTurnSummary(typing) === "Here is what I did.",
+    JSON.stringify(stripPartialTurnSummary(typing)),
+  )
+  check(
+    "and a reply with no block is untouched by it",
+    stripPartialTurnSummary("plain words") === "plain words",
+  )
+
+  // A global regex keeps `lastIndex` between calls, so a shared one silently
+  // skips the first block of every other call. Two calls, same input.
+  check(
+    "parsing twice gives the same answer",
+    parseTurnSummary(reply)?.headline === parseTurnSummary(reply)?.headline,
+    "a module-level global regex would fail this on the second call",
+  )
+}
+
+console.log("\na turn reduced to a card")
+{
+  // The card's contract: everything but the summary comes off exit codes and
+  // git, so nothing a model writes can contradict a check, a sha or an outcome.
+  let seq = 0
+  const ev = (body: RunEventBody, ts = 1000 + seq * 10): RunEvent =>
+    ({ ...body, runId: "r1", seq: (seq += 1), ts }) as RunEvent
+
+  const done = reduceCard("r1", [
+    ev({ type: "user.message", text: "fix the poll" }),
+    ev({ type: "turn.summary", headline: "fixed it", next: "read the diff" }),
+    ev({ type: "verify.result", command: "pnpm typecheck", ok: true, exitCode: 0, durationMs: 5, output: "" }),
+    ev({ type: "verify.skipped", command: "pnpm build", reason: "web only" }),
+    ev({ type: "commit.landed", sha: "abc1234", paths: ["a.ts", "b.ts"] }),
+    ev({
+      type: "run.finished",
+      subtype: "success",
+      status: "success",
+      totalCostUsd: 1.5,
+      modelUsage: {},
+      numTurns: 4,
+      durationMs: 90,
+      permissionDenials: [],
+    }),
+  ])
+  check("a finished turn is done", done.state === "done", done.state)
+  check("the summary is carried", done.summary?.headline === "fixed it")
+  check("the checks are counted from events", done.checks.length === 2)
+  check("and the skipped one is IN the list", done.checks.some((c) => c.skipped), "a gate that quietly shrinks looks like one that broke")
+  check("the diffstat is the commit's paths", done.changed === 2)
+  check("and the sha came with it", done.sha === "abc1234")
+
+  const verdict = checkVerdict(done.checks)
+  check("the badge is green when nothing failed", verdict?.ok === true)
+  check("it counts what RAN, not what was listed", verdict?.ran === 1, String(verdict?.ran))
+  check("and says how many were skipped", verdict?.skipped === 1)
+  check("a turn that ran no checks gets no badge", checkVerdict([]) === null, "an empty badge on every row spends the best pixel saying nothing")
+
+  // A failed check must reach the badge even on a turn the SDK called a success:
+  // the commit gate refuses, the turn ends fine, and the card has to say so.
+  const broken = reduceCard("r2", [
+    ev({ type: "verify.result", command: "pnpm smoke", ok: false, exitCode: 1, durationMs: 5, output: "boom" }),
+    ev({
+      type: "run.finished",
+      subtype: "success",
+      status: "success",
+      totalCostUsd: 0,
+      modelUsage: {},
+      numTurns: 1,
+      durationMs: 5,
+      permissionDenials: [],
+    }),
+  ])
+  check("a failed check shows red", checkVerdict(broken.checks)?.ok === false)
+  check(
+    "even though the turn itself succeeded",
+    broken.state === "done",
+    "the check badge and the run outcome are different facts",
+  )
+
+  // Blocked means still waiting, and the AND with "not finished" is the whole
+  // rule. A LIVE run with an open question is the one thing on the list a person
+  // can act on.
+  const blocked = reduceCard("r3", [
+    ev({ type: "permission.request", requestId: "q1", name: "Bash", input: {} }),
+  ])
+  check("a live run with an open question needs you", blocked.state === "blocked", blocked.state)
+
+  // ...and a DEAD one does not, which is the correction real logs forced. Two
+  // runs on this machine died holding a question — killed by a daemon restart —
+  // and the first version put both at the top of the worklist as "needs you",
+  // 44 hours old. Nobody can answer a request whose run is gone: the `resolve`
+  // it would call is in a process that no longer exists. A needs-you row no
+  // action can clear teaches you to ignore the column.
+  const abandoned = reduceCard("r3b", [
+    ev({ type: "permission.request", requestId: "q1", name: "Bash", input: {} }),
+    ev({ type: "run.error", message: "worker exited" }),
+  ])
+  check(
+    "a dead run holding a question is failed, not needs-you",
+    abandoned.state === "failed",
+    `${abandoned.state} — a row nobody can clear is worse than no row`,
+  )
+  const answered = reduceCard("r4", [
+    ev({ type: "permission.request", requestId: "q1", name: "Bash", input: {} }),
+    ev({ type: "permission.resolved", requestId: "q1", allowed: true, reason: "" }),
+    ev({
+      type: "run.finished",
+      subtype: "success",
+      status: "success",
+      totalCostUsd: 0,
+      modelUsage: {},
+      numTurns: 1,
+      durationMs: 5,
+      permissionDenials: [],
+    }),
+  ])
+  check("an answered one is not", answered.state === "done", answered.state)
+
+  // A turn in flight is `working`, not `failed`. Asking for a card mid-turn is
+  // the normal case for the live view, and drawing a red X on the turn that is
+  // currently going fine is the same mistake the profile documents.
+  const live = reduceCard("r5", [ev({ type: "user.message", text: "go" })])
+  check("an unfinished turn is working", live.state === "working", live.state)
+  check("a cancelled one is not done", reduceCard("r6", [
+    ev({
+      type: "run.finished",
+      subtype: "interrupted",
+      status: "cancelled",
+      totalCostUsd: 0,
+      modelUsage: {},
+      numTurns: 1,
+      durationMs: 5,
+      permissionDenials: [],
+    }),
+  ]).state === "failed", "a stopped turn must not wear a green tick")
+
+  // The model gets no say in pass/fail. This is the assertion that catches the
+  // layers collapsing: a summary claiming success over a failed check must not
+  // change one field of what the card reports.
+  const lying = reduceCard("r7", [
+    ev({ type: "turn.summary", headline: "all green, everything passed" }),
+    ev({ type: "verify.result", command: "pnpm smoke", ok: false, exitCode: 1, durationMs: 5, output: "" }),
+    ev({
+      type: "run.finished",
+      subtype: "success",
+      status: "failed",
+      totalCostUsd: 0,
+      modelUsage: {},
+      numTurns: 1,
+      durationMs: 5,
+      permissionDenials: [],
+    }),
+  ])
+  check(
+    "a summary cannot talk a failed check green",
+    checkVerdict(lying.checks)?.ok === false && lying.state === "failed",
+    "the whole point of the three layers",
+  )
+
+  // A log with TWO terminal events, which is not hypothetical: three runs on
+  // this machine carry a `success` followed by a `cancelled`, from `#retire`
+  // writing over an outcome the turn had already reported before `EventLog`
+  // sealed logs. The first one is what the run actually said, and the transcript
+  // already drops the redundant second — a card reading the other end would
+  // disagree with the transcript beside it about a run both draw from one file.
+  const doubled = reduceCard("r8", [
+    ev({
+      type: "run.finished",
+      subtype: "success",
+      status: "success",
+      totalCostUsd: 2,
+      modelUsage: {},
+      numTurns: 3,
+      durationMs: 5,
+      permissionDenials: [],
+    }),
+    ev({
+      type: "run.finished",
+      subtype: "interrupted",
+      status: "cancelled",
+      totalCostUsd: 0,
+      modelUsage: {},
+      numTurns: 0,
+      durationMs: 0,
+      permissionDenials: [],
+    }),
+  ])
+  check(
+    "the first outcome wins, not the last",
+    doubled.state === "done",
+    `${doubled.state} — old logs carry a second terminal event that overwrote the real one`,
+  )
+  check("and its spend is not overwritten by the stray", doubled.costUsd === 2, String(doubled.costUsd))
+  check(
+    "a stray run.error after an outcome is ignored too",
+    reduceCard("r9", [
+      ev({
+        type: "run.finished",
+        subtype: "success",
+        status: "success",
+        totalCostUsd: 0,
+        modelUsage: {},
+        numTurns: 1,
+        durationMs: 5,
+        permissionDenials: [],
+      }),
+      ev({ type: "run.error", message: "transport died" }),
+    ]).state === "done",
+    "the transcript drops this one; the card has to agree",
+  )
+
+  // A turn read back from the SDK's session store, which is MOST of what the
+  // card view draws and is the case the first version got wrong end to end.
+  //
+  // `sessions.ts` stamps every replayed event with `runId: sessionId` and
+  // `ts: 0`, because the SDK envelope carries neither. Two consequences, both
+  // seen on screen before they were understood: grouping cards by run id drew
+  // ONE card for a 587-message conversation, and a card that trusts its events
+  // for an outcome reports every past turn as still working — a chat of thirty
+  // spinning rows, in which the one row that IS running cannot be found.
+  //
+  // `settled` is what the caller passes when it knows the source records no
+  // outcomes. Asserted here because the alternative — inferring it from a
+  // missing `run.finished` — silently turns the live turn into a finished one.
+  const replayed = reduceCard(
+    "session-id",
+    [
+      { type: "user.message", text: "what changed?", runId: "session-id", seq: 1, ts: 0 },
+      { type: "assistant.text", text: "this and that", parentToolUseId: null, runId: "session-id", seq: 2, ts: 0 },
+    ] as RunEvent[],
+    { settled: true },
+  )
+  check(
+    "a replayed turn is done, not forever working",
+    replayed.state === "done",
+    `${replayed.state} — the session store records no outcome, so the events cannot say`,
+  )
+  check("and it keeps the prompt, which is what the row is found by", replayed.prompt === "what changed?")
+  check(
+    "an unstamped turn reports no duration",
+    replayed.wallMs === 0,
+    "ts: 0 minus ts: 0 is not a measurement",
+  )
+  check(
+    "and without `settled` the same events are still working",
+    reduceCard("x", [{ type: "user.message", text: "hi", runId: "x", seq: 1, ts: 0 }] as RunEvent[]).state ===
+      "working",
+    "the live turn must not be swept up by the same rule",
+  )
+
+  // The split, over a conversation shaped exactly like the one the pane builds:
+  // replayed history (one shared runId, ts 0) followed by the live turn from a
+  // run log. This is the bug that reached the screen — grouping by run id drew
+  // ONE card for 587 messages, because every replayed event carries the session
+  // id as its run id.
+  const mixed = cardsForConversation([
+    { type: "user.message", text: "first question", runId: "sess", seq: 1, ts: 0 },
+    { type: "assistant.text", text: "first answer", parentToolUseId: null, runId: "sess", seq: 2, ts: 0 },
+    { type: "user.message", text: "second question", runId: "sess", seq: 3, ts: 0 },
+    { type: "assistant.text", text: "second answer", parentToolUseId: null, runId: "sess", seq: 4, ts: 0 },
+    { type: "user.message", text: "the live one", runId: "run-9", seq: 1, ts: 5000 },
+    { type: "assistant.text", text: "working on it", parentToolUseId: null, runId: "run-9", seq: 2, ts: 5100 },
+  ] as RunEvent[])
+  check(
+    "a conversation splits into one card per turn",
+    mixed.length === 3,
+    `${mixed.length} cards — grouping by runId gives 2, and by session id gives 1`,
+  )
+  check("each card keeps its own question", mixed[1]?.prompt === "second question", mixed[1]?.prompt)
+  check(
+    "the replayed turns read as finished",
+    mixed[0]?.state === "done" && mixed[1]?.state === "done",
+    `${mixed[0]?.state},${mixed[1]?.state} — a chat of spinning rows hides the one that is running`,
+  )
+  check(
+    "and the live one is still working",
+    mixed[2]?.state === "working",
+    `${mixed[2]?.state} — this is the row the view exists to show`,
+  )
+  check(
+    "the live card keeps its real run id",
+    mixed[2]?.runId === "run-9",
+    "the key has to be stable, and the replayed rows have no distinct id to offer",
+  )
+  check(
+    "and the replayed cards get distinct keys anyway",
+    mixed[0]?.runId !== mixed[1]?.runId,
+    "reusing the session id for every row is duplicate React keys across the list",
+  )
+  // Events before the first human message open a turn rather than vanishing: a
+  // `run.started` can beat its own prompt into the log.
+  const headless = cardsForConversation([
+    { type: "run.started", projectId: "p", model: "m", cwd: "/", sessionId: "s", runId: "r", seq: 1, ts: 10 },
+    { type: "user.message", text: "hello", runId: "r", seq: 2, ts: 20 },
+  ] as RunEvent[])
+  check(
+    "an event before the first prompt is not dropped",
+    headless.length === 2,
+    `${headless.length} — a card missing its opening row reads as lost history`,
+  )
+  check("an empty conversation is no cards", cardsForConversation([]).length === 0)
+
+  // Needs-you, then working, then done — the list's grouping, as a sort.
+  const order = sortCards([done, live, blocked]).map((c) => c.state)
+  check("the list leads with what needs you", order[0] === "blocked", order.join(","))
+  check("and buries what is finished", order.at(-1) === "done", order.join(","))
 }
 
 console.log("\nnothing may stop for a human mid-turn")

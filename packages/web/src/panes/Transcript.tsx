@@ -1,5 +1,11 @@
 import { useEffect, useMemo, useState, type ReactNode, type RefObject } from "react"
-import type { MessageImage, RunEvent, RunStatus } from "@aide/protocol"
+import {
+  stripPartialTurnSummary,
+  stripTurnSummary,
+  type MessageImage,
+  type RunEvent,
+  type RunStatus,
+} from "@aide/protocol"
 import {
   ArrowClockwise,
   ArrowUp,
@@ -316,7 +322,11 @@ function toLines(events: RunEvent[], live?: LiveText | null): Line[] {
         lines.push({
           kind: "text",
           key: blockKey(e.runId, "text"),
-          text: e.text,
+          // Stripped HERE and not before the log, so `~/.aide/runs` keeps the
+          // reply exactly as the model wrote it. The card draws these fields
+          // above the conversation; leaving them in would print them twice, the
+          // second time as pseudo-YAML under the prose.
+          text: stripTurnSummary(e.text),
           nested: !!e.parentToolUseId,
         })
         break
@@ -538,7 +548,12 @@ function toLines(events: RunEvent[], live?: LiveText | null): Line[] {
         // and `run.started` carries the session id for the resume handle — the
         // reader learns nothing from a row saying a run it is already reading
         // has begun.
-        const drawnByNothing: "assistant.start" | "run.started" = e.type
+        // `turn.summary` is the third: it is the CARD's layer, drawn above the
+        // conversation, and its text is already in the reply this transcript
+        // renders — `stripTurnSummary` takes the fenced block out of that reply
+        // so the same four fields do not appear twice on one screen, once as a
+        // card and once as pseudo-YAML at the end of a message.
+        const drawnByNothing: "assistant.start" | "run.started" | "turn.summary" = e.type
         void drawnByNothing
         break
       }
@@ -573,7 +588,10 @@ function toLines(events: RunEvent[], live?: LiveText | null): Line[] {
     settled.push({
       kind: "text",
       key: blockKey(live.runId, "text"),
-      text: live.text,
+      // The partial form: mid-stream the closing fence has not arrived, so the
+      // ordinary strip matches nothing and the reader watches the block's own
+      // field names type themselves out.
+      text: stripPartialTurnSummary(live.text),
       nested: false,
     })
   }

@@ -6,6 +6,7 @@ import type {
   EffortLevel,
   ModelSpend,
   Project,
+  ProjectDoc,
   RunDelta,
   RunEventBody,
   RunStatus,
@@ -41,6 +42,29 @@ const WORKER =
  * and is "not found" over ssh while working when typed by hand.
  */
 const REMOTE_AGENT = process.env["AIDE_REMOTE_AGENT"] ?? "$HOME/.aide/agent/aide-agent"
+
+/**
+ * Everything from `project.md` that reaches the system prompt, as one string.
+ *
+ * A warm session's prompt is fixed for the life of its query, so the test for
+ * reuse has to cover every part of that prompt which came off disk — and it
+ * covered only the prose. The `verify:` commands are now in the prompt too, out
+ * of the same file, so a run that rewrites the gate (which the commit's one
+ * repair attempt is explicitly allowed to do) would leave a warm session naming
+ * checks that no longer exist, with nothing on screen to say so. Same failure
+ * the body comparison already existed to prevent, one field later.
+ *
+ * A joined string rather than a hash: it is compared, never stored or shown. The
+ * COUNT goes first, and that is not decoration. Joining fields with any
+ * separator lets a field containing that separator forge a boundary — with the
+ * body first, a brief ending "…\n pnpm smoke" fingerprints identically to the
+ * same brief with `pnpm smoke` declared as a check, so the session is reused
+ * against a system prompt that says something different. A length cannot be
+ * spelled from inside a field. `pnpm smoke` pins the collision, which is how it
+ * was found.
+ */
+export const promptFingerprint = (doc: ProjectDoc): string =>
+  [doc.verify.length, ...doc.verify.map((v) => v.command), doc.body].join("\n ")
 
 /**
  * Chat turns, and the lock that keeps them to one at a time.
@@ -235,6 +259,11 @@ interface SessionWorker {
    * has since been edited forces a cold start, because the system prompt is
    * fixed for the life of a query — reusing the session would quietly run under
    * the old rules with nothing on screen to say so.
+   *
+   * The `verify:` commands are folded in, because they reach the same system
+   * prompt and are read from the same file. A run that rewrites the gate — which
+   * the commit's one repair attempt is explicitly allowed to do — would otherwise
+   * keep a warm session telling the agent about checks that no longer exist.
    */
   projectDoc: string
   /** The turn in flight. Null means the session is warm and idle. */
@@ -352,6 +381,7 @@ export class ChatLane implements LiveChats {
    * longer matches `project.md`.
    */
   #reusable(opts: SendOptions, projectDoc: string): SessionWorker | null {
+    // `projectDoc` here is `promptFingerprint(doc)`, not `doc.body` — see there.
     if (!opts.sessionId) return null
     for (const worker of this.#workers) {
       if (worker.sessionId !== opts.sessionId) continue
@@ -441,13 +471,13 @@ export class ChatLane implements LiveChats {
       // the human's own checkout survivable.
       await this.#checkpoint(project, opts.sessionId, runId)
 
-      const warm = this.#reusable(opts, doc.body)
+      const warm = this.#reusable(opts, promptFingerprint(doc))
       if (warm) {
         this.#followUp(warm, record, opts)
         return runId
       }
 
-      void this.#coldStart(record, opts, doc.body).catch((err) => {
+      void this.#coldStart(record, opts, doc).catch((err) => {
         this.log.append(runId, {
           type: "run.error",
           message: err instanceof Error ? err.message : String(err),
@@ -695,11 +725,11 @@ export class ChatLane implements LiveChats {
     // each command is classified by the CLI at seconds apiece instead of being
     // allowed outright. Slower, never blocked, and only for the fix that follows
     // a Plan session.
-    const warm = this.#reusable(send, doc.body)
+    const warm = this.#reusable(send, promptFingerprint(doc))
     if (warm) {
       this.#followUp(warm, record, send)
     } else {
-      void this.#coldStart(record, send, doc.body).catch((err) => {
+      void this.#coldStart(record, send, doc).catch((err) => {
         // The record belongs to the commit, so a worker that never started must
         // settle this promise rather than leave the commit awaiting a turn that
         // will never report.
@@ -822,7 +852,7 @@ export class ChatLane implements LiveChats {
   async #coldStart(
     record: TurnRecord,
     opts: SendOptions,
-    projectDoc: string,
+    doc: ProjectDoc,
   ): Promise<void> {
     const { project } = opts
     const { runId } = record
@@ -861,7 +891,10 @@ export class ChatLane implements LiveChats {
       // A chat turn is the message, with no title composed in front of it.
       title: opts.text,
       prompt: "",
-      projectDoc,
+      projectDoc: doc.body,
+      // What the commit gate will run, so the turn stops re-proving the tree
+      // after every edit. See `verifyCommands` in agent.ts for the measurement.
+      verifyCommands: doc.verify.map((v) => v.command),
       // Always the project root. There is no other place a run can happen.
       cwd,
       model: CONFIG.taskModel,
@@ -903,7 +936,9 @@ export class ChatLane implements LiveChats {
       effort: opts.effort,
       thinking: opts.thinking,
       model: CONFIG.taskModel,
-      projectDoc,
+      // The fingerprint, not the body — it is only ever compared, and it has to
+      // cover every part of the system prompt that came out of `project.md`.
+      projectDoc: promptFingerprint(doc),
       turn: null,
       closing: false,
       idle: null,

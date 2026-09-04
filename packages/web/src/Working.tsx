@@ -17,6 +17,34 @@ import type { RunEvent } from "@aide/protocol"
  * to a component makes Fast Refresh reload the whole page instead of swapping
  * the component, and nothing outside this file needs it.
  */
+/**
+ * A tool call as one short phrase: the tool, and what it is pointed at.
+ *
+ * Only the fields that identify a target, and the file ones are reduced to a
+ * BASENAME — the status line is one line in a pane a few hundred pixels wide, and
+ * a full absolute path pushes the tool's own name off the front of it, which is
+ * the half that says what is happening.
+ *
+ * A Bash command keeps its head rather than its tail, because a command says
+ * what it is in its first two words and its arguments are usually longer than
+ * the line. Anything with no recognisable target degrades to the bare tool name,
+ * which is what this printed for everything until now.
+ */
+function describeTarget(name: string, input: unknown): string {
+  const args = (input ?? {}) as Record<string, unknown>
+  const str = (key: string) => (typeof args[key] === "string" ? (args[key] as string) : "")
+  const path = str("file_path") || str("path") || str("notebook_path")
+  if (path) return `${name} ${path.split(/[/\\]/).pop() ?? path}`
+  const command = str("command")
+  if (command) {
+    const head = command.replace(/\s+/g, " ").trim().slice(0, 40)
+    return `${name} ${head}${command.length > 40 ? "…" : ""}`
+  }
+  const pattern = str("pattern")
+  if (pattern) return `${name} ${pattern.slice(0, 30)}`
+  return name
+}
+
 function describeActivity(events: readonly RunEvent[], runId: string | null): string {
   if (!runId) return ""
   const mine = events.filter((e) => e.runId === runId)
@@ -30,7 +58,17 @@ function describeActivity(events: readonly RunEvent[], runId: string | null): st
   for (const e of mine) {
     if (e.type === "tool.start") {
       open.add(e.toolUseId)
-      lastToolName = e.name
+      // The target as well as the tool, when the call names one. "Running Read"
+      // is the same line for every file in the repository, so a turn spending a
+      // minute reading looks stuck on one call; `Read activity.ts` moves.
+      //
+      // Only from the EVENT, never from the delta that draws the row. The delta
+      // fires on `content_block_start` and deliberately carries no input —
+      // arguments stream as `input_json_delta` fragments and half-parsed JSON is
+      // not a filename. So this line names the tool alone for the first moment
+      // of a call and fills in the target when the event lands, which is the
+      // same handover the transcript's rows already make.
+      lastToolName = describeTarget(e.name, e.input)
     } else if (e.type === "tool.end") {
       open.delete(e.toolUseId)
     } else if (e.type === "verify.started") {
@@ -99,6 +137,10 @@ function describeActivity(events: readonly RunEvent[], runId: string | null): st
     | "tool.start"
     | "turn.checkpoint"
     | "turn.stale"
+    // The closing block, which by construction is the last thing in the reply —
+    // so a turn that has emitted one is a turn about to end, and narrating it
+    // would put a status on the bar for the moment before it disappears.
+    | "turn.summary"
     | "verify.skipped"
     | "verify.started" = last.type
   void noNarration

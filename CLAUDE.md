@@ -31,6 +31,9 @@ record. They are all rows in the same list, in that order of urgency.
 | What a parked chat is called before it has run | `packages/web/src/naming.ts` |
 | The one turn aide knows how to ask for — `survey` | `packages/web/src/survey.ts` |
 | An event log rendered as a conversation | `packages/web/src/panes/Transcript.tsx` |
+| The block a turn writes about itself, and how it is read | `packages/protocol/src/summary.ts` |
+| A turn reduced to the facts you decide on | `packages/protocol/src/card.ts` |
+| That reduction drawn as one row | `packages/web/src/TurnCard.tsx` |
 | What is left to commit, and the two readings under it | `packages/web/src/panes/Pending.tsx` |
 | The project's files, one directory at a time | `packages/web/src/panes/Files.tsx` |
 | What kind of file a name is, and its colour | `packages/web/src/filetypes.ts` |
@@ -577,6 +580,129 @@ Decisions already taken, which are not gaps to fill:
   `pagehide` transaction is not guaranteed to commit. Looking at the code you
   loaded with until the turn is over is the price, and it is the cheap half of
   the trade.
+- **A conversation has two readings, and the card is three layers.** `cards` and
+  the transcript, toggled from the conversation's header. The card is one row per
+  turn — state, checks, diffstat, headline, next, age — and what makes it worth
+  trusting is where each field comes from. The DETERMINISTIC layer is most of it
+  and is computed by `reduceCard` off events that came from exit codes and git:
+  `verify.result` for the checks, `commit.landed` for the sha and the paths,
+  `run.finished` for the outcome, `permission.request` for whether it is blocked
+  on you. The MODEL layer is `turn.summary` and is deliberately four fields —
+  headline, next, intent, risk — which are the things only the turn knows. The
+  RAW layer is the transcript, which this replaces on screen and not on disk.
+  The rule that keeps them from collapsing is that nothing model-written may
+  assert pass/fail: a `status: ok` field would be a second, softer answer to a
+  question the exit codes have already answered hard, and the two would disagree
+  eventually, on the line a human reads first. `pnpm smoke` pins exactly that — a
+  summary claiming "all green, everything passed" over a failed check must not
+  move one field of what the card reports.
+- **That block is text, not a tool call, and the reason is the lock.** The
+  obvious design is a `submit_summary` tool the model must call last, which gets
+  a validated object for free. `canUseTool` is awaited BEFORE the SDK runs a
+  tool, so a mandatory closing call parks the run — holding the project's
+  checkout — at the exact moment the turn is finishing. That is the wedge
+  `AskUserQuestion` is refused for and the one `ExitPlanMode` escapes only by
+  being approved without asking; adding a second such tool to the end of every
+  turn means that allowlist may never be got wrong again. A fenced
+  ` ```aide-summary ` block has no permission surface, and it fails better: a
+  turn that forgets one degrades to what happened before it existed rather than
+  hanging. `parseTurnSummary` reads the LAST block, because a turn answering
+  "what did you say last time" quotes an older one. The block is stripped at
+  RENDER time only — `~/.aide/runs` keeps the reply exactly as the model wrote
+  it, since that is the tier-3 record — and there are two strippers, because
+  mid-stream the closing fence has not arrived and the ordinary one matches
+  nothing, leaving the reader watching the block's own field names type
+  themselves out.
+- **A missing summary is drawn as missing.** A turn that writes no block gets a
+  visible gap rather than a fallback to the first line of its reply. Falling back
+  is friendlier and hides the parse rate, and this exists to change behaviour —
+  so for the first stretch the ugly version is the useful one, because it says
+  how often the model complies, which is the number that decides whether the
+  layer is worth keeping. For the same reason the event is logged from day one
+  whether or not every field is drawn: in a few weeks the question "which of
+  these four did I ever actually read" is answerable from the logs, and cutting
+  the rest is then a measurement rather than a matter of taste. The precedent is
+  the dashboard — its first version was correct, every figure a sum, and nearly
+  useless, and the fix was reading the log bodies.
+- **A card is one TURN, split on `user.message` — never grouped by `runId`.**
+  The obvious grouping is by run id and it draws ONE card for a whole
+  conversation, which is what reached the screen: only the live turn comes from
+  a run log, and `sessions.ts` stamps every event it replays out of the SDK's
+  session store with `runId: sessionId` and `ts: 0`, so hundreds of replayed
+  messages share a single id. A 587-message chat rendered as a single row. Two
+  more consequences of that same seam, both of which had to be fixed before the
+  view was usable: a replayed turn has no `run.finished` — that event is aide's
+  own — so a reduction trusting its events reports every past turn as still
+  working, a chat of thirty spinning rows in which the one that IS running
+  cannot be found; and `ts: 0` subtracted from now prints an age of 20700d.
+  Hence `reduceCard`'s `settled`, passed by the caller rather than inferred from
+  a missing outcome, because "no outcome" genuinely means two different things
+  and only the caller knows which source it read. `cardsForConversation` lives
+  in `protocol` rather than in the component so `pnpm smoke` can assert the
+  split; a React component cannot be. The lesson is the one below, again: this
+  typechecked, built, and was wrong in the only way that mattered.
+- **`blocked` means still waiting, not "ended with a question open".** Both
+  corrections to `reduceCard` came from running it over the 742 real logs on this
+  machine rather than from reading it, and neither was visible in a hand-built
+  test. (1) The first version let an unanswered `permission.request` outrank
+  everything, which put two runs at the top of the worklist as "needs you" with
+  wall times of 44 HOURS — both killed by a daemon restart with a question still
+  open. Nobody can answer a request whose run is gone: the `resolve` it would
+  call is in a process that no longer exists, so it is a needs-you row no action
+  can clear, which teaches you to ignore the column. A dead run holding a
+  question is `failed`. (2) The card took the LAST terminal event; three logs
+  carry a `success` followed by a `cancelled` from before `EventLog` sealed them,
+  and reported as failures — while the transcript beside them, which already
+  drops the redundant second, said they succeeded. Two views of one file
+  disagreeing is the bug, so the first outcome wins in both. The general lesson
+  is the dashboard's: run a new reducer over the real corpus before trusting it,
+  because the interesting inputs are the ones nobody would think to write down.
+- **Cost and turn count are not on the card.** They were on the first sketch and
+  they are the two numbers nobody acts on mid-review — the brief already says a
+  cost figure is an estimate never to be trusted. A card whose every field has to
+  change a decision has no room for one that cannot; both are in the profile, one
+  press away, which is where they were being read anyway.
+- **A shell that reads a file is refused, and the refusal names the tool.** The
+  system prompt had asked for Read/Grep/Glob over `cat`/`sed`/`grep` for a long
+  time, with the measurement in it, and eight archived conversations then spent
+  782 Bash calls and 69 minutes doing it anyway — against 31 calls to `Grep` in
+  the same eight. That is the evidence for the general rule: a sentence the model
+  may skip is not a rule, and the fix is `checkBashCommand`, which already
+  refuses commands and already names a way forward. Refused rather than silently
+  rewritten into the tool call it should have been — rewriting has to guess at
+  flags, globs, `-n` ranges and quoting, and a guess that is subtly wrong hands
+  back the WRONG FILE CONTENTS to an agent with no way to know. A refusal costs
+  one round trip and cannot lie. The half that is easy to get wrong is
+  `fastBashSettings`: Auto's `Bash(*)` lives in the SDK's settings layer, which
+  resolves BEFORE `canUseTool`, so the same prefixes have to be denied in both
+  places or the rule is enforced on Plan and decorative on the mode most turns
+  run in. `pnpm smoke` asserts the two lists name the same commands.
+- **The agent is told what the commit gate will run.** Two thirds of all shell
+  time in those eight conversations — 334 runs, 101.6 minutes — went on
+  re-running the very checks the commit runs afterwards, one at a time, after
+  every edit. The cause is not that checking is wrong; it is that a run cannot
+  SEE the gate, so it re-proves the whole tree continuously because it has no way
+  to know what will be re-proved for it. So `verifyCommands` rides on
+  `RunAgentOptions` and the system prompt names them, says the gate re-reads the
+  tree after the turn ends, and asks for parallel calls in one message when
+  several are wanted. Because those commands now reach the system prompt, they
+  join the warm-session fingerprint: `promptFingerprint` covers the body AND the
+  checks, or a run that rewrites the gate — which the commit's one repair attempt
+  is explicitly allowed to do — keeps a warm session naming checks that no longer
+  exist. The count goes first in that fingerprint and that is load-bearing: with
+  the body first, a brief ending "…\n pnpm smoke" fingerprints identically to the
+  same brief with `pnpm smoke` declared as a check. `pnpm smoke` pins the
+  collision, which is how it was found.
+- **The closing report is a few sentences, not a document.** Those eight
+  conversations produced 599,737 characters of assistant text — roughly 150,000
+  words — most of it a 2,000–3,000 character markdown summary at the end of every
+  turn, restating work the human is about to read as a diff. The prompt asks for
+  what the diff does NOT show: a decision that could have gone the other way,
+  something tried and backed out, a claim left unverified, anything undone.
+  Framed that way rather than as a length limit, because a limit becomes a target
+  and because the real point is ownership — aide already shows the diff, the
+  checkpoint and the transcript, so the words are worth spending only on what
+  none of those carry.
 
 ## Commands
 
@@ -613,10 +739,30 @@ irrelevant. So a web-only commit runs `typecheck` and `build` and says on the
 transcript why it skipped the other two. Skipped checks are shown, not omitted —
 a gate that quietly shrinks is indistinguishable from one that broke.
 
+Do not re-run a check after every edit to see where you are. The commit gate
+runs these itself, over the working tree, *after* your turn ends, and hands you
+any failure to fix once — so a check you ran three edits ago proves nothing
+about what you are handing over. Run them when a coherent piece of work is
+finished. This is the most expensive habit in this project's own run logs: across
+the eight most recently archived conversations the checks were **334 separate
+runs and 101.6 minutes — 67% of all the time those runs spent in a shell**, and
+81–89% of it on four of the eight. 161 of 243 check waves were a single check on
+its own, which is the guidance above being ignored; batching every wave as it
+stood would have recovered 26 minutes.
+
 One command per Bash *call* — no pipes into another command, no `&&`, no `$( )`.
 That is not one call per message: independent calls belong in the same message.
 Use `pnpm --filter @aide/daemon <script>` rather than
 `cd packages/daemon && pnpm <script>`.
+
+`cat`, `head`, `tail`, `sed`, `grep`, `awk`, `rg` and `find` are **refused** in a
+shell here — use Read, Grep and Glob. This was advice in the system prompt, with
+the measurement attached, for a long time before it was a rule, and the runs did
+it anyway: the same eight conversations spent 592 Bash calls on `grep`/`awk`/
+`find` and 190 on `cat`/`sed`/`head`/`tail`, 69 minutes for work the file tools
+do in about a millisecond, against 31 total calls to `Grep`. A sentence the model
+may skip is not a rule. `ls` is deliberately still allowed: `Glob` answers a
+different question, and refusing `ls` would push you to `Glob("*")`.
 
 ## Conventions
 

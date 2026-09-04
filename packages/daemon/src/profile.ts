@@ -323,6 +323,7 @@ export function summarizeRun(runId: string, events: RunEvent[]): RunSummary {
           | "run.started"
           | "turn.checkpoint"
           | "turn.stale"
+          | "turn.summary"
           | "verify.result"
           | "verify.skipped"
           | "verify.started" = e.type

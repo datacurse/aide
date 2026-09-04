@@ -11,17 +11,19 @@
  * single control request, so neither ever sees a message union to normalize.
  */
 import { query, type SDKUserMessage, type Settings } from "@anthropic-ai/claude-agent-sdk"
-import type {
-  Attachment,
-  ChatMode,
-  EffortLevel,
-  MessageImage,
-  ModelSpend,
-  RunDelta,
-  RunEventBody,
-  RunStatus,
+import {
+  SUMMARY_FENCE,
+  parseTurnSummary,
+  type Attachment,
+  type ChatMode,
+  type EffortLevel,
+  type MessageImage,
+  type ModelSpend,
+  type RunDelta,
+  type RunEventBody,
+  type RunStatus,
 } from "@aide/protocol"
-import { HUMAN_ONLY_COMMANDS, checkBashCommand } from "./policy.js"
+import { FILE_TOOL_COMMANDS, HUMAN_ONLY_COMMANDS, checkBashCommand } from "./policy.js"
 
 export interface RunAgentOptions {
   runId: string
@@ -36,6 +38,20 @@ export interface RunAgentOptions {
    * what is being asked this time.
    */
   projectDoc: string
+  /**
+   * The commands the commit gate will run, from the same `verify:` block.
+   *
+   * Told to the agent so it stops re-running them speculatively. Across the
+   * eight most recently archived conversations the checks were 334 separate
+   * runs and 101.6 minutes — 67% of ALL time those runs spent in a shell, and
+   * 81-89% of it on four of the eight. The cause is not that checking is wrong;
+   * it is that a run which cannot see the gate re-proves the whole tree after
+   * every edit, because it has no way to know what will be re-proved for it.
+   *
+   * Empty for a project that declares none, which reads as "there is no gate" —
+   * the honest thing to say, and different from saying nothing at all.
+   */
+  verifyCommands: string[]
   /** Absolute path the agent runs in — always the project root. */
   cwd: string
   model: string
@@ -275,17 +291,24 @@ export const PLAN_REFUSAL = [
  * boundary is the one the brief describes: your own machine, behind loopback,
  * one agent at a time, over a checkpoint taken before the turn began.
  */
-function fastBashSettings(deniedBash: readonly string[]): Settings {
+export function fastBashSettings(deniedBash: readonly string[]): Settings {
   // Two shapes per prefix. The rule validator in that same binary accepts both
   // `Bash(pnpm dev *)` and `Bash(pnpm dev:*)` and labels the second "(legacy)",
   // and the matcher strips either two-character suffix and prefix-matches what
   // is left — so they are one rule wearing two spellings, and the bare form is
   // the exact match. Emitting both costs nothing and survives whichever spelling
   // a later release retires.
-  const deny = [...deniedBash, ...HUMAN_ONLY_COMMANDS].flatMap((prefix) => [
-    `Bash(${prefix})`,
-    `Bash(${prefix} *)`,
-  ])
+  // The file-tool prefixes ride in this list too, and leaving them out is the
+  // mistake that makes the rule look enforced while doing nothing. `Bash(*)` is
+  // resolved in this layer, BEFORE `canUseTool` — so on Auto, which is the mode
+  // most turns run in, a `grep` refused by `checkBashCommand` never reaches it.
+  // The gate and its widening have to name the same commands or the gate is
+  // decoration. `pnpm smoke` pins that they do.
+  const deny = [
+    ...deniedBash,
+    ...HUMAN_ONLY_COMMANDS,
+    ...FILE_TOOL_COMMANDS.map((f) => f.prefix),
+  ].flatMap((prefix) => [`Bash(${prefix})`, `Bash(${prefix} *)`])
   return { permissions: { allow: ["Bash(*)"], deny } }
 }
 
@@ -531,6 +554,19 @@ export function normalizeSdkMessage(
       if (block["type"] === "text") {
         const text = String(block["text"] ?? "")
         if (text.trim()) out.push({ type: "assistant.text", text, parentToolUseId: parent })
+        // The closing block, if the turn wrote one. Emitted ALONGSIDE the text
+        // rather than instead of it: the raw reply is the tier-3 record and goes
+        // to disk exactly as the model wrote it, and the renderer is what hides
+        // the block — see `stripTurnSummary`. Editing it on the way to the log
+        // would leave `~/.aide/runs` disagreeing with what was actually said.
+        //
+        // Only for the main loop. A subagent writing one of these is describing
+        // its own errand, and drawing that on the turn's card would report a
+        // fragment of the work as the whole of it.
+        if (parent === null) {
+          const summary = parseTurnSummary(text)
+          if (summary) out.push({ type: "turn.summary", ...summary })
+        }
       } else if (block["type"] === "thinking") {
         const text = String(block["thinking"] ?? "")
         if (text.trim()) out.push({ type: "assistant.thinking", text, parentToolUseId: parent })
@@ -932,9 +968,85 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
             "shell: git, the package manager, running something. A Bash call costs several",
             "seconds on this machine where the file tools return in about a millisecond,",
             "so reaching for cat or sed in their place is time spent waiting and nothing",
-            "else. When several calls do not depend on each other, make them in one",
-            "message instead of one per turn.",
+            "else. cat, head, tail, sed, grep, awk, rg and find are REFUSED in a shell",
+            "here for that reason — the refusal names the tool to use instead. When",
+            "several calls do not depend on each other, make them in one message instead",
+            "of one per turn.",
           ].join(" "),
+          // The gate is invisible from inside a run, and what a run cannot see it
+          // re-proves. See `verifyCommands` for the measurement: two thirds of all
+          // shell time across eight conversations went on re-running checks that
+          // the commit was going to run anyway, one at a time, after every edit.
+          //
+          // Naming them is most of the fix, because the expensive habit comes from
+          // not knowing. The rest is saying who runs them last: the gate re-reads
+          // the working tree after the turn ends, so a check the agent ran three
+          // edits ago proves nothing about what it is about to hand over, and a
+          // check it never ran is not a gap — it is the gate's job.
+          opts.verifyCommands.length
+            ? [
+                "",
+                `Before a commit, aide runs this project's own checks itself: ${opts.verifyCommands.join(", ")}.`,
+                "It runs them over the working tree AFTER your turn ends, and hands you any",
+                "failure to fix once. So do not re-run them after every edit to see where you",
+                "are — that is the single most expensive habit measured in this project's run",
+                "logs. Run them when you have finished a coherent piece of work and want to",
+                "know it is sound, and when you do run several, send them as parallel calls in",
+                "ONE message rather than one per message: they are independent, and serially",
+                "they cost the sum of their runtimes instead of the longest.",
+              ].join(" ")
+            : "",
+          // The closing report, which grew into a small essay per turn.
+          //
+          // Measured across the eight most recently archived conversations:
+          // 599,737 characters of assistant text, roughly 150,000 words, most of
+          // it in a 2,000-3,000 character markdown summary at the end of every
+          // turn — headers, tables, bolded findings, restating work the reader is
+          // about to see as a diff.
+          //
+          // Framed as "the diff is the record" rather than as a length limit,
+          // because a limit gets treated as a target and because the actual point
+          // is about ownership: aide already shows the human the diff, the
+          // checkpoint and the transcript. What only the agent can add is what is
+          // NOT visible in those — a decision that went the other way, a finding
+          // withdrawn after measuring, something left undone. Those are worth
+          // words; a table of files touched is not.
+          [
+            "End your turn with a short summary — a few sentences. The human reads your",
+            "work as a diff against a checkpoint, so listing the files you touched or",
+            "restating what the code now does duplicates what they are already looking at.",
+            "Spend the words on what the diff does NOT show: a decision that could have",
+            "gone the other way and why it went this way, something you tried and backed",
+            "out, a claim you could not verify, anything left undone. If there is none of",
+            "that, say you are done in one line and stop.",
+          ].join(" "),
+          // The card's own layer. aide renders the checks, the diffstat and the
+          // outcome itself, off exit codes and git — so this block must not
+          // restate them, and is asked for exactly the four things only the turn
+          // knows. Saying "aide already knows" out loud is what stops `headline`
+          // becoming "3 files changed, all checks pass", which is both true and
+          // the one thing the card does not need a model for.
+          //
+          // Last line of the reply, because `parseTurnSummary` reads the LAST
+          // block — a turn that quotes an earlier summary while answering "what
+          // did you say last time" must not have that quote read as this turn's.
+          [
+            "",
+            `Then close the reply with a \`\`\`${SUMMARY_FENCE} block, as the very last thing you write:`,
+            "",
+            "```" + SUMMARY_FENCE,
+            "headline: one line, what happened, for someone who has not read the turn",
+            "next: what the human should do now, or what is blocking you — omit if nothing",
+            "intent: why you did it this way, if the diff does not make that obvious",
+            "risk: what the diff does not show — a call that could have gone the other way,",
+            "  something unverified, something backed out",
+            "```",
+            "",
+            "One line per field; omit any that would be empty rather than writing 'none'.",
+            "Do NOT put the checks, the file count or the cost in it — aide reads those",
+            "from exit codes and git and draws them itself, and a second version written",
+            "from memory is the one that will be wrong.",
+          ].join("\n"),
           // The project brief goes in the SYSTEM prompt so it reads as a standing
           // constraint rather than as part of this request, and so it survives
           // compaction on a long run. Framed with its provenance, because an
