@@ -181,20 +181,40 @@ export function Wall({
         // `blocked` on the card — and the dashboard is where "where did the time
         // go across everything" is asked. Being findable beats being sorted.
         <div className="flex min-h-0 flex-1 overflow-x-auto">
-          {shown.map((p) => (
-            <WallColumn
-              key={p.id}
-              project={p}
-              now={now}
-              onOpen={onOpen}
-              onHide={() => hidden.hide(p.id)}
-              // Dropped here rather than waited for on the next beat. The poll
-              // would notice within 1.5s, and for that beat the column is still
-              // on screen and still typeable — a send in it lands on a project
-              // the daemon has already forgotten.
-              onRemoved={() => setProjects((all) => all.filter((x) => x.id !== p.id))}
-            />
-          ))}
+          {/* Centred when the columns do not fill the window, left-aligned the
+              moment they overflow it. Two projects at 24rem on a wide screen
+              otherwise sit in the left third with the rest of the page empty,
+              which reads as a layout that failed rather than one that fits.
+
+              `mx-auto` on an inner row, NOT `justify-center` on the scroller.
+              They look equivalent and are not: a centred flex container with
+              overflow puts half the excess in front of the first column as
+              NEGATIVE scroll space, which no browser will scroll to — so the
+              leftmost project becomes unreachable at exactly the width where
+              scrolling starts to matter. `auto` margins resolve to zero once
+              the content is larger than the box, so this form is centring below
+              the fold and a plain left-aligned row above it. */}
+          {/* `h-full` and not just a stretched flex item: the column inside is
+              `h-full`, which resolves against THIS box, and a wrapper sized by
+              its content would leave every column measuring itself against a
+              height it just supplied — the panes collapse to their content and
+              the composer stops sitting at the bottom. */}
+          <div className="mx-auto flex h-full min-h-0">
+            {shown.map((p) => (
+              <WallColumn
+                key={p.id}
+                project={p}
+                now={now}
+                onOpen={onOpen}
+                onHide={() => hidden.hide(p.id)}
+                // Dropped here rather than waited for on the next beat. The poll
+                // would notice within 1.5s, and for that beat the column is still
+                // on screen and still typeable — a send in it lands on a project
+                // the daemon has already forgotten.
+                onRemoved={() => setProjects((all) => all.filter((x) => x.id !== p.id))}
+              />
+            ))}
+          </div>
         </div>
       )}
     </main>
