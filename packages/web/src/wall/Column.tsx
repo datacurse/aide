@@ -11,9 +11,12 @@ import {
 import { api, type ConversationRow, type ConversationView, type GitPending, type ProjectView } from "../api.js"
 import { Composer } from "../Composer.js"
 import {
+  carryDraft,
   discardDraft,
   draftKey,
   draftSubject,
+  forgetDraftRun,
+  idFromKey,
   markDraftSent,
   openNewChat,
   useUnstartedChats,
@@ -61,6 +64,23 @@ import { useRunStream } from "../useRunStream.js"
 
 /** The app's own beat. A column only pays it while it is on screen. */
 const POLL_MS = 1500
+
+/**
+ * How often a sent-but-unnamed chat asks what it became.
+ *
+ * The pane's own interval, deliberately the same number: both are waiting on the
+ * same two-second window between a turn starting and the SDK naming its session,
+ * and two different rates would be two different answers to how long a row may
+ * sit reading `not sent` after you pressed send.
+ *
+ * NOT gated on `onScreen` like the polls above are. A column that was scrolled
+ * away from is exactly the one whose handoff got stranded — gating this would
+ * switch off the repair in the only case it exists for. It is bounded by having
+ * something to repair rather than by visibility: the effect does not run at all
+ * unless a draft in this project is mid-handoff, which is a second or two per
+ * chat you send.
+ */
+const HANDOFF_MS = 1500
 
 /**
  * How long a `forget` stays armed before it gives up.
@@ -140,6 +160,24 @@ export function WallColumn({
 
   const unstarted = useUnstartedChats(project.id)
   const [open, setOpen] = useOpenChat(project.id)
+
+  /**
+   * This draft has become a real conversation.
+   *
+   * The unstarted record IS the chat, so it must not linger in the picker beside
+   * the conversation it turned into — `carryDraft` moves anything still unsent in
+   * its box across and drops the record. The column follows only when the chat
+   * that started is the one it is pointing at, for the same reason the pane does:
+   * healing a row further down the picker must not move what you are reading.
+   */
+  const adopt = useCallback(
+    (fromDraftId: string | null, sessionId: string) => {
+      if (fromDraftId) carryDraft(draftKey(project.id, fromDraftId), draftKey(project.id, sessionId))
+      setOpen({ sessionId, draftId: null })
+      setSeq((n) => n + 1)
+    },
+    [project.id, setOpen],
+  )
 
   const holder = project.holder
   const uncommitted = pending?.files.length ?? 0
@@ -261,11 +299,73 @@ export function WallColumn({
     // anything and the cards would vanish when it finished.
     for (const e of live) {
       if (e.type === "run.started" && e.sessionId && !open.sessionId) {
-        setOpen({ sessionId: e.sessionId, draftId: null })
-        setSeq((n) => n + 1)
+        adopt(open.draftId, e.sessionId)
       }
     }
-  }, [live, open.sessionId, setOpen])
+  }, [live, open.sessionId, open.draftId, adopt])
+
+  /**
+   * Chats whose first turn went out from this column and have no session id yet.
+   *
+   * The wall needs this MORE than the pane does, and shipped without it. A session
+   * id is announced exactly once, on the live stream, a second or two into a new
+   * chat's first turn — and a column only subscribes to that stream while it is on
+   * screen. The wall is a horizontally scrolled page of columns, so scrolling away
+   * from one you just sent from, or closing the tab, means the name arrives to
+   * nobody: the record stays in the picker reading `not sent` beside the
+   * conversation it became, and the box is empty because sending moved the words
+   * to `sentText`. That reads as a message you lost, and the words were sitting in
+   * IndexedDB the whole time with nothing on the page willing to show them.
+   *
+   * So the column asks the daemon, which wrote the name down.
+   */
+  const waiting = useMemo(() => unstarted.filter((d) => d.startedRunId), [unstarted])
+  /** Runs already answered for, so two overlapping ticks hand off once. */
+  const handedOff = useRef(new Set<string>())
+
+  useEffect(() => {
+    if (waiting.length === 0) return
+    let cancelled = false
+    const ask = () => {
+      for (const draft of waiting) {
+        const runId = draft.startedRunId
+        if (!runId || handedOff.current.has(runId)) continue
+        void api
+          .runSession(runId)
+          .then(({ sessionId, ended }) => {
+            if (cancelled || handedOff.current.has(runId)) return
+            if (sessionId) {
+              handedOff.current.add(runId)
+              const draftId = idFromKey(draft.key)
+              // Only follow the chat this column is actually showing. Adopting a
+              // row the reader is not looking at would move the column for a
+              // reason nothing on screen explains — the objection the holder dot
+              // answers by marking rather than switching.
+              if (open.draftId === draftId) adopt(draftId, sessionId)
+              else carryDraft(draft.key, draftKey(project.id, sessionId))
+              setSeq((n) => n + 1)
+            } else if (ended) {
+              // The turn is over and never got a session, so there is no
+              // conversation for this row to become and no name left to wait for.
+              // It goes back to being an ordinary parked chat, with its words
+              // returned to the box by `forgetDraftRun`.
+              handedOff.current.add(runId)
+              forgetDraftRun(draft.key)
+            }
+          })
+          .catch(() => {
+            // The daemon is down, or newer than this page. The row is unchanged
+            // and the next tick asks again.
+          })
+      }
+    }
+    ask()
+    const timer = setInterval(ask, HANDOFF_MS)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [waiting, open.draftId, adopt, project.id])
 
   const turnEvents = useMemo(() => {
     const merged = new Map(sent)
@@ -296,9 +396,27 @@ export function WallColumn({
    */
   const cards = useMemo(() => {
     const history = view?.events ?? []
-    const seen = new Set(history.map((e) => `${e.runId}:${e.seq}`))
-    const extra = turnEvents.filter((e) => !seen.has(`${e.runId}:${e.seq}`))
-    return cardsForConversation([...history, ...extra])
+    // Trimmed at the opening user message, NOT deduped on `runId:seq`. The two
+    // sources do not share run ids: `sessions.ts` stamps everything it replays
+    // out of the session store with `runId: sessionId`, while the live stream
+    // carries the actual run's id — so the same turn appears under two different
+    // ids, every key misses, and the turn is appended a second time. That draws
+    // one card per turn TWICE, which is what a remote chat looked like the
+    // moment its transcript had caught up: the same prompt, once from disk and
+    // once from the stream, the second copy the only one with an age.
+    //
+    // Matched on the text rather than assuming the last user message is the live
+    // turn's: if the session file has not caught up there is no overlap to trim,
+    // and cutting anyway would swallow the previous reply. The same rule
+    // `Conversation.tsx` follows, for the same reason.
+    const opening = turnEvents.find((e) => e.type === "user.message")
+    if (opening?.type === "user.message") {
+      const at = history.findLastIndex(
+        (e) => e.type === "user.message" && e.text === opening.text,
+      )
+      if (at !== -1) return cardsForConversation([...history.slice(0, at), ...turnEvents])
+    }
+    return cardsForConversation([...history, ...turnEvents])
   }, [view, turnEvents])
 
   /**
@@ -413,6 +531,16 @@ export function WallColumn({
   const rows = useMemo(() => pickerRows(chats, unstarted), [chats, unstarted])
   const openTitle = titleOf(rows, open) ?? (open.draftId ? "New chat" : "no chat")
 
+  /**
+   * What this column's draft has already sent, if the reply has not arrived.
+   *
+   * `sentText` only, never the box: what is still in `text` is drawn by the
+   * composer, and showing it up here as well would be the same words twice with
+   * one copy editable and one not.
+   */
+  const openDraft = unstarted.find((d) => open.draftId && d.key === draftKey(project.id, open.draftId))
+  const pendingSubject = openDraft?.sentText?.trim() ?? ""
+
   return (
     <section
       ref={box}
@@ -511,11 +639,37 @@ export function WallColumn({
           unrelated halves. */}
       <div ref={body} className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
         {cards.length === 0 ? (
-          <p className="px-2 py-6 text-center font-sans text-[11px] leading-relaxed text-fg-dim">
-            {open.sessionId || open.draftId
-              ? "Nothing yet. Say something below."
-              : "No chat open. Pick one above, or press new."}
-          </p>
+          /*
+           * An empty chat is not always an empty box, and conflating the two is
+           * how a message goes missing. A draft that has been sent has had its
+           * words moved out of `text` into `sentText` by the press itself, so
+           * every surface reading `text` — this pane and the composer both —
+           * showed nothing at all for a chat whose first turn was in flight or
+           * whose handoff had stranded. The words were in IndexedDB the entire
+           * time with nothing on the page willing to draw them, which is
+           * indistinguishable from having lost them.
+           *
+           * So what was said is shown here whenever the record still holds it,
+           * whether or not a turn is still running. The handoff above is what
+           * normally retires this within a second or two; this is what makes the
+           * seconds before that, and the case where it never lands, honest.
+           */
+          pendingSubject ? (
+            <div className="px-2 py-4">
+              <p className="mb-1.5 font-sans text-[10px] text-fg-dim">
+                {busy ? "Sent, waiting for a reply…" : "Sent. No reply recorded yet."}
+              </p>
+              <p className="rounded border border-line bg-chrome px-2.5 py-2 font-sans text-[12px] leading-relaxed whitespace-pre-wrap text-fg-muted">
+                {pendingSubject}
+              </p>
+            </div>
+          ) : (
+            <p className="px-2 py-6 text-center font-sans text-[11px] leading-relaxed text-fg-dim">
+              {open.sessionId || open.draftId
+                ? "Nothing yet. Say something below."
+                : "No chat open. Pick one above, or press new."}
+            </p>
+          )
         ) : full ? (
           // The panes' own transcript, not a narrower copy — same argument as the
           // card below. It is `tail`ed harder here than in the pane: a column is
@@ -655,7 +809,7 @@ type PickerRow =
   // know: `draftKey(project.id, row.id)` is the same string right up until
   // something changes how a key is spelled, and then it is a discard that
   // silently removes nothing.
-  | { kind: "draft"; id: string; key: string; title: string }
+  | { kind: "draft"; id: string; key: string; title: string; starting: boolean }
 
 /**
  * Everything in this project you could point the column at, most recent first.
@@ -674,6 +828,9 @@ function pickerRows(chats: ConversationRow[] | null, drafts: readonly Draft[]): 
     // is in the box, and the first line otherwise. `draftSubject` rather than the
     // box itself, so the press that sends does not blank the row it came from.
     title: draftName(d) ?? draftSubject(d).trim().split("\n", 1)[0] ?? "New chat",
+    // Sent, and a second or two from becoming a conversation. The row must not
+    // say `not sent` about a turn that has plainly gone out — see the label.
+    starting: d.startedRunId !== undefined,
   }))
   // `sortChats` rather than a second ordering — newest first, which is the one
   // the list already uses and the one the row dates would confirm.
@@ -779,8 +936,17 @@ function ChatPicker({
             >
               {row.title}
             </span>
+            {/* `starting`, not a flat `not sent`. A chat whose first turn is in
+                flight has obviously been sent, and labelling it unsent is the
+                lie that made a stranded handoff read as a lost message: the row
+                said `not sent` about a turn that had already run and cost money,
+                so there was nothing on screen suggesting the words still
+                existed. It says so until the handoff lands and this row becomes
+                the conversation. */}
             {row.kind === "draft" && (
-              <span className="shrink-0 font-sans text-[10px] text-fg-dim">not sent</span>
+              <span className="shrink-0 font-sans text-[10px] text-fg-dim">
+                {row.starting ? "starting…" : "not sent"}
+              </span>
             )}
             {row.kind === "chat" && row.done && <Check className="size-3 shrink-0 text-ok" />}
           </button>
