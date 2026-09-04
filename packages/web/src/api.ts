@@ -167,6 +167,16 @@ export const api = {
   browseForFolder: () => call<FolderPick>("/api/projects/browse", { method: "POST" }),
   addProject: (path: string) =>
     call<Project>("/api/projects", { method: "POST", body: JSON.stringify({ path }) }),
+  /**
+   * Forget a project: the registry entry, and nothing else.
+   *
+   * The repository, its `.aide/` and every conversation in it stay exactly where
+   * they are — this is aide forgetting a path, not a delete. Refused by the
+   * daemon while a run holds the checkout, because dropping the entry under a
+   * live turn orphans it rather than stopping it.
+   */
+  removeProject: (projectId: string) =>
+    call<void>(`/api/projects/${projectId}`, { method: "DELETE" }),
 
   /** The machines in `~/.aide/ssh_config`, and where that file is. */
   sshHosts: () => call<{ hosts: SshHost[]; configPath: string }>("/api/ssh/hosts"),

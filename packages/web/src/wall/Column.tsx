@@ -18,7 +18,7 @@ import {
   useUnstartedChats,
   type Draft,
 } from "../drafts.js"
-import { CaretRight, Check, GitCommit, Lock } from "../icons.js"
+import { CaretRight, Check, GitCommit, Lock, X } from "../icons.js"
 import { draftName } from "../naming.js"
 import { TurnCardRow } from "../TurnCard.js"
 import { Button, heldBy, LOCKED } from "../ui.js"
@@ -60,10 +60,20 @@ import { useRunStream } from "../useRunStream.js"
 /** The app's own beat. A column only pays it while it is on screen. */
 const POLL_MS = 1500
 
+/**
+ * How long a `forget` stays armed before it gives up.
+ *
+ * Long enough to read the project's name on the button and mean it; short enough
+ * that an armed red control is never still sitting there when you come back to
+ * the page having thought about something else.
+ */
+const CONFIRM_MS = 4000
+
 export function WallColumn({
   project,
   now,
   onOpen,
+  onRemoved,
 }: {
   project: ProjectView
   /**
@@ -75,6 +85,8 @@ export function WallColumn({
   now: number
   /** Leave the wall for the four panes, on this project and this chat. */
   onOpen: (loc: Partial<AppLocation>) => void
+  /** This project was forgotten, so the wall should stop drawing it. */
+  onRemoved: () => void
 }) {
   const box = useRef<HTMLElement>(null)
   /**
@@ -309,6 +321,23 @@ export function WallColumn({
     }
   }
 
+  /**
+   * Forget this project — the registry entry, and nothing on disk.
+   *
+   * The wall is told rather than left to notice on the next poll: a column that
+   * lingered for a beat after its own removal is one you can still type into,
+   * and the send would land on a project the daemon no longer knows.
+   */
+  const forget = async () => {
+    setError(null)
+    try {
+      await api.removeProject(project.id)
+      onRemoved()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
   const rows = useMemo(() => pickerRows(chats, unstarted), [chats, unstarted])
   const openTitle = titleOf(rows, open) ?? (open.draftId ? "New chat" : "no chat")
 
@@ -342,6 +371,13 @@ export function WallColumn({
             {holder.title}
           </span>
         )}
+        {/* Forget this project. Two presses, and the second one says what it
+            does rather than asking a question — see `RemoveProject`. */}
+        <RemoveProject
+          name={project.name}
+          blocked={holder ? heldBy(holder.title) : null}
+          onRemove={forget}
+        />
       </header>
 
       {/* Which chat this column is about. A dropdown rather than a list, because
@@ -693,5 +729,87 @@ function CommitFoot({
         {busy ? "committing…" : "commit"}
       </button>
     </div>
+  )
+}
+
+/**
+ * Forget a project, in two presses.
+ *
+ * ## Why it is a confirm and not a dialog
+ *
+ * This is the only control in aide that takes something away, and the thing it
+ * takes is cheap to restore — `add` and the same path — so a modal asking you to
+ * type the project's name would be charging dialog prices for a mistake that
+ * costs one folder-picker. Two presses is the proportionate amount of friction:
+ * enough that a stray click on a 12px glyph cannot do it, not so much that
+ * removing three stale projects is a chore.
+ *
+ * The second press SAYS WHAT IT DOES rather than asking whether you are sure.
+ * "forget aide?" is a question whose only answer is the button you already
+ * pressed; "forget" beside a project's name is the act, named. It also arms only
+ * this column — the state is local — so two columns cannot be armed at once and
+ * the confirmation cannot be spent on the wrong one.
+ *
+ * It disarms on a timer as well as on the second press. An armed red button left
+ * on screen while you scrolled away is a trap for the next click that lands
+ * anywhere near it, and there is no cancel button because clicking elsewhere,
+ * or waiting, is the cancel.
+ *
+ * ## What it does not do
+ *
+ * It says `forget`, never `delete`, because the repository, its `.aide/` and
+ * every conversation in it stay exactly where they are — the daemon drops one
+ * line from `registry.json`. Calling it delete would be a promise aide does not
+ * keep in either direction: nothing is destroyed, and somebody reading `delete`
+ * would reasonably not press it when they meant to tidy the list.
+ */
+function RemoveProject({
+  name,
+  blocked,
+  onRemove,
+}: {
+  name: string
+  /** Why this cannot be forgotten right now — a run has the checkout. */
+  blocked: string | null
+  onRemove: () => void
+}) {
+  const [armed, setArmed] = useState(false)
+
+  useEffect(() => {
+    if (!armed) return
+    const timer = setTimeout(() => setArmed(false), CONFIRM_MS)
+    return () => clearTimeout(timer)
+  }, [armed])
+
+  if (blocked) {
+    return (
+      <span className={`inline-flex shrink-0 items-center rounded-sm p-1 ${LOCKED}`} title={blocked}>
+        <Lock className="size-3" />
+      </span>
+    )
+  }
+
+  if (armed) {
+    return (
+      <button
+        type="button"
+        onClick={onRemove}
+        title={`Drop ${name} from aide's list. The repository and its files are untouched.`}
+        className="shrink-0 rounded-sm bg-diff-del-fg/85 px-1.5 py-0.5 font-sans text-[10px] text-white hover:bg-diff-del-fg"
+      >
+        forget {name}
+      </button>
+    )
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => setArmed(true)}
+      title="Remove this project from aide. Nothing on disk is deleted."
+      className="shrink-0 rounded-sm p-1 text-fg-dim hover:bg-hover hover:text-err"
+    >
+      <X className="size-3" />
+    </button>
   )
 }

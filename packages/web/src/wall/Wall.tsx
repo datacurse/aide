@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useState } from "react"
 import { api, type ProjectView } from "../api.js"
 import { Button, Empty } from "../ui.js"
 import { usePoll } from "../usePoll.js"
@@ -83,27 +83,6 @@ export function Wall({
     return () => clearInterval(timer)
   }, [])
 
-  /**
-   * Column order: what needs you, then what is running, then what is waiting to
-   * be committed, then the quiet ones.
-   *
-   * DERIVED rather than hand-arranged, for the reason the chat list gives for
-   * dropping its own status rank: an order you maintain is one more thing to
-   * maintain. This one is different from that list in the way that matters — you
-   * do not type into the wall's ordering, you scan it, so putting the urgent
-   * thing first costs nothing and saves the scan.
-   *
-   * The rank is coarse ON PURPOSE. Uncommitted files are deliberately NOT in it:
-   * they are polled per column and only by the columns that are visible, so a
-   * rank reading them would reorder the page as you scrolled — the columns you
-   * had just looked at would sort themselves out from under you.
-   */
-  const ordered = useMemo(
-    () =>
-      [...projects].sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name)),
-    [projects],
-  )
-
   return (
     <main className="flex h-full flex-col bg-editor font-mono text-fg antialiased">
       <header className="flex h-9 shrink-0 items-center gap-3 border-b border-line bg-chrome px-3">
@@ -121,31 +100,46 @@ export function Wall({
         </div>
       </header>
 
-      {ordered.length === 0 ? (
+      {projects.length === 0 ? (
         <Empty>No projects yet. Add a git repository from the panes.</Empty>
       ) : (
         // Horizontal scroll is not only the layout — it is what bounds the
         // request rate, because a column only polls while it is on screen. See
         // `useOnScreen`.
+        //
+        // REGISTRY ORDER, which is the order projects were added and the order
+        // the projects rail already draws. Not sorted here, and that is the
+        // point: a column has to stay where you left it.
+        //
+        // The first version ranked by the lock — needs-you, then running, then
+        // quiet — which is a fine ordering for a list you read once and a bad one
+        // for a page you navigate by position. It reorders on the 1.5s poll, so
+        // columns swap places with nobody touching anything, purely because a
+        // turn somewhere finished. You learn the layout, reach for the third
+        // column, and send a turn to whichever project has since moved into it.
+        // A page you steer from cannot rearrange itself under the pointer, and
+        // "the urgent one is leftmost" is not worth that.
+        //
+        // What is lost is real and is answered elsewhere: a project that needs
+        // you is no longer first. Its column still says so — the holder dot,
+        // `blocked` on the card — and the dashboard is where "where did the time
+        // go across everything" is asked. Being findable beats being sorted.
         <div className="flex min-h-0 flex-1 overflow-x-auto">
-          {ordered.map((p) => (
-            <WallColumn key={p.id} project={p} now={now} onOpen={onOpen} />
+          {projects.map((p) => (
+            <WallColumn
+              key={p.id}
+              project={p}
+              now={now}
+              onOpen={onOpen}
+              // Dropped here rather than waited for on the next beat. The poll
+              // would notice within 1.5s, and for that beat the column is still
+              // on screen and still typeable — a send in it lands on a project
+              // the daemon has already forgotten.
+              onRemoved={() => setProjects((all) => all.filter((x) => x.id !== p.id))}
+            />
           ))}
         </div>
       )}
     </main>
   )
-}
-
-/**
- * How urgent a column is, lowest first.
- *
- * Read off the lock alone, which is the only fact the wall has about every
- * project without asking each one — `blocked` is a run stopped ON you, a holder
- * is a run in flight, and neither costs a request of its own.
- */
-function rank(p: ProjectView): number {
-  if (p.holder?.blocked) return 0
-  if (p.holder) return 1
-  return 2
 }

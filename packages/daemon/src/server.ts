@@ -424,8 +424,25 @@ app.post("/api/ssh/projects", async (req, reply) => {
   }
 })
 
+/**
+ * Forget a project. The registry entry only — see `removeProject`.
+ *
+ * Refused while a run holds the checkout, on the same terms as a push and for a
+ * sharper reason: the lane belongs to the daemon, not to the registry, so
+ * dropping the entry under a live turn does not stop it. It orphans it. The run
+ * keeps writing to a checkout that nothing on screen can name any more, and the
+ * only thing that could have interrupted it — the project's own column — is the
+ * thing that just went away. Adding it back would not reattach the UI to it
+ * either, since the chat list is read per project and the run is mid-turn.
+ */
 app.delete("/api/projects/:id", async (req, reply) => {
   const { id } = req.params as { id: string }
+  const holder = chat.holderFor(id)
+  if (holder) {
+    return reply.code(409).send({
+      message: `"${firstLine(holder.text)}" is working in this checkout — stop it before removing the project`,
+    })
+  }
   await removeProject(id)
   return reply.code(204).send()
 })

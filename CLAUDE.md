@@ -346,9 +346,42 @@ Decisions already taken, which are not gaps to fill:
   screen's worth so a column is usually already answered when it arrives, and the
   hook starts TRUE because an observer reports after paint — starting false costs
   every column a visible blank on arrival to save a request it would have made
-  anyway. The column ORDER is deliberately read off the lock alone (needs-you,
-  running, quiet) and NOT off uncommitted counts: those are polled per visible
-  column, so ranking on them would reorder the page as you scrolled it.
+  anyway.
+- **Columns are in REGISTRY ORDER and never sort themselves.** The same order the
+  projects rail draws, which is the order they were added, so there is one layout
+  to learn rather than two. The first version ranked by the lock — needs-you,
+  then running, then quiet — on the reasoning that a derived order is one nobody
+  has to maintain. That defended the wrong property. The wall is navigated by
+  POSITION: you learn that a project is the third column and reach for it. A rank
+  reading the lock changes on the 1.5s poll, so columns swap places with nobody
+  touching anything, purely because a turn somewhere else finished — and the
+  failure mode is not a confusing page, it is a turn sent to the wrong project,
+  which is the one mistake this page makes easy and expensive. Uncommitted counts
+  are doubly disqualified: they are polled per VISIBLE column, so ranking on them
+  would reorder the page as you scrolled it. What is lost is that the urgent
+  project is no longer leftmost, and that is answered without moving anything —
+  the column carries the holder dot and the card says `needs you`, and the
+  dashboard is where the across-everything question belongs. A page you steer
+  from cannot rearrange itself under the pointer.
+- **A column can FORGET its project, and the word is the design.** The ✕ on a
+  column header drops the registry entry and nothing else — the repository, its
+  `.aide/` and every conversation stay exactly where they are, which is what
+  `removeProject` has always done and what the UI had no way to reach. It says
+  `forget`, never `delete`, because `delete` is a promise aide does not keep in
+  either direction: nothing is destroyed, and somebody reading it would
+  reasonably not press it when they only meant to tidy the list. Two presses,
+  with the second one NAMING the project rather than asking "are you sure" — a
+  question whose only answer is the button you already pressed. The arming is
+  local to the column and expires, so two cannot be armed at once and one left
+  armed cannot catch a later click. The daemon refuses it while a run holds the
+  checkout, which is the same guard `push` has and a sharper reason: the lane
+  belongs to the daemon, not the registry, so dropping the entry under a live
+  turn does not stop that turn, it ORPHANS it — the run keeps writing to a
+  checkout nothing on screen can name, and the column that could have
+  interrupted it is the thing that just went away. The wall drops the column on
+  the answer rather than waiting for the next poll, because for that beat it is
+  still on screen and still typeable, and a send in it lands on a project the
+  daemon has already forgotten.
 - **The four gates are one function, and lifting them was the prerequisite.**
   `projectGates` in protocol answers why a project cannot take a chat, a commit, a
   push or a send. Those lived inline in `App.tsx`, computed for the one open
