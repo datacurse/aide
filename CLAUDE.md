@@ -294,6 +294,24 @@ Decisions already taken, which are not gaps to fill:
   of labour: the wall steers, the panes read. A column deliberately has no file
   tree, no history and no graph — those answer "where am I", which is a question
   you ask inside one project.
+- **A column FLIPS between cards and the transcript, and the flip is per column.**
+  `full` on the chat row, and `read the turn` on a card presses the same thing.
+  It used to navigate to the panes, which answered "was that card detailed
+  enough" by spending the entire page on one turn and putting you somewhere you
+  then had to find your way back from — a question that small should not cost the
+  view. Both readings now live in the column, and flipping back is one press.
+  Per COLUMN rather than per page, so reading one project in full leaves the
+  other four scanning; not remembered and not in the URL, because a preference
+  here means opening the wall tomorrow to five transcripts, which is exactly the
+  view cards exist to replace. It draws the panes' own `Transcript` rather than a
+  narrow copy — same argument as `TurnCardRow` — but `tail`ed to 60 lines against
+  the pane's 250, because a column is a fifth of the width and the flip is about
+  the turn you were just looking at. Reading further back is still the panes, and
+  the project name in the header still goes there; what changed is that it is no
+  longer the only way to see one turn's detail. The live reply is handed in as
+  `LiveText` so a turn arriving lands in the same element it will finish in, and
+  it is RAW here — the typewriter is a reading preference the panes carry, and a
+  column is a glance.
 - **The picker writes the store the PANES read, and that is the point of it.**
   `rememberProjectChat` and `readOpenChat` are the same per-project memory
   `useAppLocation` already kept for the four panes, so picking a chat on the wall
