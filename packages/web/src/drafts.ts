@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react"
-import { mergedMode } from "@aide/protocol"
+import { mergedMode, PerProjectMemo } from "@aide/protocol"
 import type { Attachment, ChatMode } from "@aide/protocol"
 
 /**
@@ -563,7 +563,13 @@ export function carryDraft(from: string, to: string): void {
  * identity.
  */
 export function useDraft(key: string | null): Draft | null {
-  return useSyncExternalStore(subscribe, () => (key === null ? null : (cache.get(key) ?? null)))
+  return useSyncExternalStore(
+    subscribe,
+    () => (key === null ? null : (cache.get(key) ?? null)),
+    // See `useUnstartedChats`: nothing here server-renders, but without a server
+    // snapshot these components cannot be driven from Node at all.
+    () => null,
+  )
 }
 
 function unstartedFor(projectId: string): Draft[] {
@@ -576,22 +582,28 @@ function unstartedFor(projectId: string): Draft[] {
 /**
  * Every chat in this project that has not started, oldest first.
  *
- * Memoized against the cache map itself, which is replaced rather than mutated
- * on every write: without this the array is a new identity on each read and
- * useSyncExternalStore treats an unchanged backlog as a change on every
- * keystroke anywhere in the app, which is an infinite render loop rather than
- * merely slow.
+ * Memoized per project against the cache map, which is replaced rather than
+ * mutated on every write. Without the memo the array is a new identity on each
+ * read and `useSyncExternalStore` treats an unchanged backlog as a change, which
+ * is an infinite render loop rather than merely slow — and this held ONE slot
+ * until the wall put two projects on screen at once and they began evicting each
+ * other. `PerProjectMemo` is where that is explained and asserted.
  */
-let listCache: { source: typeof cache; projectId: string; rows: Draft[] } | null = null
+const listCache = new PerProjectMemo<Draft>()
 
-export function useUnstartedChats(projectId: string | null): Draft[] {
-  return useSyncExternalStore(subscribe, () => {
-    if (!projectId) return NO_DRAFTS
-    if (listCache?.source === cache && listCache.projectId === projectId) return listCache.rows
-    const rows = unstartedFor(projectId)
-    listCache = { source: cache, projectId, rows }
-    return rows
-  })
+// `readonly`, because the array handed back is the MEMOIZED one: a caller that
+// sorted it in place would be rewriting what every other reader sees, and the
+// identity would not change to tell anyone.
+export function useUnstartedChats(projectId: string | null): readonly Draft[] {
+  return useSyncExternalStore(
+    subscribe,
+    () => listCache.read(cache, projectId, unstartedFor) ?? NO_DRAFTS,
+    // A server snapshot, so this hook is renderable outside a browser. Nothing in
+    // aide server-renders; it is here because without it the component cannot be
+    // driven from Node at all, which is what made this bug reachable only by
+    // opening the page and watching it go grey.
+    () => NO_DRAFTS,
+  )
 }
 
 /** One array for every empty backlog, so the identity is stable across reads. */

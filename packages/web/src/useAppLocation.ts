@@ -1,7 +1,16 @@
 import { useCallback, useEffect, useState } from "react"
+import { EMPTY_LOCATION as EMPTY, formatLocation, parseLocation, type AppLocation } from "@aide/protocol"
+
+// Re-exported so the components that draw a location import it from the hook
+// they already use, rather than from two places to do one thing.
+export { formatLocation, parseLocation, type AppLocation }
 
 /**
  * Where you are, in the URL.
+ *
+ * The parsing and the formatting are in `protocol/location.ts` — they are pure,
+ * and this file is not, so leaving them here put the one part of routing that
+ * can be silently wrong out of `pnpm smoke`'s reach. See that file.
  *
  * Held in `location.hash` rather than in component state, because component
  * state does not survive a reload and this is the state you least want to
@@ -61,7 +70,16 @@ function readOpenChats(): Record<string, string> {
   }
 }
 
-/** Where a project was left, or nothing open if it has not been visited. */
+/**
+ * Where a project was left, or nothing open if it has not been visited.
+ *
+ * Exported as `readOpenChat` because the wall's columns read it too: a column
+ * shows the chat its project was last left on, which makes the wall and the four
+ * panes share ONE memory of what a project is currently about. A second store
+ * would let the two views disagree about that, and a column's picker would then
+ * point at a different conversation from the one clicking through to the panes
+ * opens.
+ */
 function rememberedChat(projectId: string | null): OpenChat {
   if (!projectId) return NO_CHAT
   const saved = readOpenChats()[projectId]
@@ -74,106 +92,77 @@ function rememberedChat(projectId: string | null): OpenChat {
   return { sessionId: loc.sessionId, draftId: loc.draftId }
 }
 
-function rememberChat(loc: AppLocation): void {
-  if (!loc.projectId) return
+/**
+ * Watchers of the per-project chat memory.
+ *
+ * The four panes never needed this: they write the store as a side effect of
+ * navigating, and navigating already re-renders everything. The wall writes it
+ * WITHOUT navigating — picking a chat in one column changes that column and
+ * nothing else — so something has to say the store moved, or the picker would
+ * choose a chat and the column would go on drawing the old one until an
+ * unrelated render happened to come along.
+ */
+const chatWatchers = new Set<() => void>()
+
+export function watchOpenChats(notify: () => void): () => void {
+  chatWatchers.add(notify)
+  return () => {
+    chatWatchers.delete(notify)
+  }
+}
+
+/** Which chat a project is currently about. See `rememberedChat`. */
+export const readOpenChat = (projectId: string): OpenChat => rememberedChat(projectId)
+
+function writeOpenChat(projectId: string, href: string): void {
   try {
     const all = readOpenChats()
-    // Stored WITHOUT the dashboard prefix. This records which chat a project was
-    // left on, and the dashboard is not a chat — saving it here would mean
-    // arriving at a project from anywhere reopened the dashboard over it.
-    all[loc.projectId] = formatLocation({ ...loc, activity: false })
+    if (all[projectId] === href) return
+    all[projectId] = href
     window.localStorage.setItem(REMEMBERED_CHATS, JSON.stringify(all))
   } catch {
     /* the selection still holds for this page */
   }
+  for (const notify of chatWatchers) notify()
 }
 
-export interface AppLocation {
-  /**
-   * The dashboard is open, over everything else.
-   *
-   * A field beside the project rather than a project id of its own, because it
-   * is not a place in the four panes — it is the whole window, and closing it
-   * has to put you back exactly where you were. Keeping the project and chat
-   * alongside is what makes that free: `close` clears this one flag and the
-   * panes behind it were never navigated away from.
-   *
-   * In the URL like everything else, so a reload lands back on it and Back
-   * steps out of it rather than out of the app.
-   */
-  activity: boolean
-  projectId: string | null
-  /** A conversation the daemon knows about. Null when an unstarted one is open. */
-  sessionId: string | null
-  /**
-   * A chat that has not been sent yet, by its local draft id.
-   *
-   * Never set at the same time as `sessionId` — they are the two halves of "which
-   * chat is open", split because only one of them means anything to the daemon.
-   * It survives a reload for the same reason the session id does: an idea you
-   * typed and did not send is exactly the thing you would hate to have to find
-   * again.
-   */
-  draftId: string | null
-}
-
-const EMPTY: AppLocation = {
-  activity: false,
-  projectId: null,
-  sessionId: null,
-  draftId: null,
-}
-
-export function parseLocation(hash: string): AppLocation {
-  // "#/p/<projectId>", "#/p/<projectId>/<sessionId>" or "#/p/<projectId>/new/<draftId>",
-  // optionally under a leading "#/activity/…" when the dashboard is open over it.
-  let parts = hash.replace(/^#\/?/, "").split("/").filter(Boolean)
-
-  // The dashboard is a PREFIX rather than a location of its own, so the project
-  // and chat underneath it survive in the URL — which is what lets closing it
-  // put you back where you were, including after a reload.
-  const activity = parts[0] === "activity"
-  if (activity) parts = parts.slice(1)
-
-  if (parts[0] !== "p" || !parts[1]) return { ...EMPTY, activity }
-  const projectId = parts[1]
-  const at = (rest: Omit<AppLocation, "activity" | "projectId">) => ({
-    activity,
+/**
+ * Which chat a project is currently about, set from somewhere that is not a
+ * navigation — which today means a wall column's picker.
+ *
+ * The same store the panes write, deliberately: pick a chat on the wall, click
+ * into the panes, and you are in it. See `rememberedChat`.
+ */
+export function rememberProjectChat(projectId: string, chat: OpenChat): void {
+  writeOpenChat(
     projectId,
-    ...rest,
-  })
-
-  if (parts[2] === "new") return at({ sessionId: null, draftId: parts[3] ?? null })
-  // Saved locations from when this app had panes: "#/p/<id>/chats/<sessionId>"
-  // and "#/p/<id>/board". Both land on the project with nothing open rather than
-  // on a 404, because the mirror in localStorage outlives the layout.
-  if (parts[2] === "chats") return at({ sessionId: parts[3] ?? null, draftId: null })
-  if (parts[2] === "board") return at({ sessionId: null, draftId: null })
-  return at({ sessionId: parts[2] ?? null, draftId: null })
+    formatLocation({ ...EMPTY, projectId, sessionId: chat.sessionId, draftId: chat.draftId }),
+  )
 }
 
-export function formatLocation(loc: AppLocation): string {
-  const prefix = loc.activity ? "#/activity" : "#"
-  if (!loc.projectId) return `${prefix}/`
-  if (loc.draftId) return `${prefix}/p/${loc.projectId}/new/${loc.draftId}`
-  if (loc.sessionId) return `${prefix}/p/${loc.projectId}/${loc.sessionId}`
-  return `${prefix}/p/${loc.projectId}`
+function rememberChat(loc: AppLocation): void {
+  if (!loc.projectId) return
+  // Stored WITHOUT either whole-window prefix. This records which chat a project
+  // was left on, and neither the dashboard nor the wall is a chat — saving one
+  // here would mean arriving at a project from anywhere reopened that page over
+  // it.
+  writeOpenChat(loc.projectId, formatLocation({ ...loc, activity: false, wall: false }))
 }
 
 export function useAppLocation(): [AppLocation, (patch: Partial<AppLocation>) => void] {
   const [loc, setLoc] = useState<AppLocation>(() => {
     const fromHash = parseLocation(window.location.hash)
-    // `activity` as well as a project: a bare "#/activity" is a complete
-    // location — the dashboard is about every project, so it needs none — and
-    // testing only for a project id would drop it and restore the mirror
-    // instead, which is the one case a shared link to this page consists of.
-    if (fromHash.projectId || fromHash.activity) return fromHash
+    // Either page as well as a project: a bare "#/activity" or "#/wall" is a
+    // complete location — both are about every project, so neither needs one —
+    // and testing only for a project id would drop it and restore the mirror
+    // instead, which is the one case a shared link to these pages consists of.
+    if (fromHash.projectId || fromHash.activity || fromHash.wall) return fromHash
     try {
       const saved = window.localStorage.getItem(REMEMBERED)
       // The mirror is for landing back where you were working, which is a
-      // project. A fresh tab should not open onto the dashboard because that is
-      // where the last one happened to be left.
-      if (saved) return { ...parseLocation(saved), activity: false }
+      // project. A fresh tab should not open onto the dashboard or the wall
+      // because that is where the last one happened to be left.
+      if (saved) return { ...parseLocation(saved), activity: false, wall: false }
     } catch {
       // Private mode, or storage disabled. Not knowing where you were is a
       // smaller problem than failing to start.

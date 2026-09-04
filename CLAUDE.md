@@ -25,6 +25,9 @@ record. They are all rows in the same list, in that order of urgency.
 | What | Where |
 | --- | --- |
 | The four panes and the polling loop | `packages/web/src/App.tsx` |
+| Every project at once, one chat each | `packages/web/src/wall/Wall.tsx`, `wall/Column.tsx` |
+| Why a project cannot take a chat, a commit or a push | `packages/protocol/src/gates.ts` |
+| Where you are, as a URL | `packages/protocol/src/location.ts` |
 | The chat list, the capture box, the done tick | `packages/web/src/panes/Conversations.tsx` |
 | The open conversation, and the turn streaming into it | `packages/web/src/panes/Conversation.tsx` |
 | Unstarted chats, drafts, pasted images (IndexedDB) | `packages/web/src/drafts.ts` |
@@ -261,6 +264,113 @@ Decisions already taken, which are not gaps to fill:
   Weekday is shifted to Monday-first in `reduceActivity` rather than in the
   renderer, because an off-by-one there mislabels every row and reads as a data
   bug.
+- **The wall is a page that ACTS, which is what separates it from the dashboard.**
+  `#/wall`, reached from `wall` on the projects header, one column per project
+  showing that project's current chat. It takes the whole window on exactly the
+  dashboard's terms — a prefix in the URL so the project and chat underneath
+  survive, replacing the panes rather than covering them so nothing behind it
+  polls — but the dashboard COUNTS and opens nothing, and this one is the only
+  surface in aide where a turn is sent to a project without first selecting it.
+  That is the whole reason it exists: every project has its own lock, so several
+  can run at once, and what stops that happening is purely navigational — starting
+  work in one project means leaving the turn you were watching in another. It is
+  aimed at the `dead` half of `WorkSplit`, which is the number the dashboard says
+  is worth recovering, so whether it worked is a question the dashboard can
+  already answer. Two things were deliberately refused. There is no **commit
+  all**: reviewing four diffs is four acts, and one press taking them is the
+  brief's two-gates-into-one-button, which removes the review rather than
+  simplifying it. And there is no **broadcast box** — one prompt sent to five
+  projects is five turns written with one project in mind, and reviewing what
+  comes back costs more than the typing saved. One send per chat, one commit per
+  column.
+- **A column draws CARDS, and that is what makes the width work.** At 24rem a
+  transcript is unreadable — markdown, tool rows and code fences reflowing into a
+  gutter — and `reduceCard` already produces exactly the fixed, scannable set of
+  facts that fits. `TurnCardRow` is reused rather than narrowed into a copy,
+  because a second card drifts from `reduceCard`'s contract and the drift shows
+  up as the wall and the conversation disagreeing about one turn; it has a
+  `max-w` rather than a width, so it shrinks on its own. Reading a turn in full
+  means clicking through to the panes, which is the escape hatch and the division
+  of labour: the wall steers, the panes read. A column deliberately has no file
+  tree, no history and no graph — those answer "where am I", which is a question
+  you ask inside one project.
+- **The picker writes the store the PANES read, and that is the point of it.**
+  `rememberProjectChat` and `readOpenChat` are the same per-project memory
+  `useAppLocation` already kept for the four panes, so picking a chat on the wall
+  and clicking into the panes lands you in it. A store of the wall's own would let
+  the two views disagree about what a project is currently about — the
+  two-readings-of-one-thing failure this file records more than once. It needed
+  one thing the panes never did: a subscription. They write that store as a side
+  effect of NAVIGATING, and navigating re-renders everything; the wall writes it
+  without navigating, so `watchOpenChats` is what stops a column drawing the chat
+  it no longer points at. The chat holding the checkout is MARKED in the picker
+  rather than switched to, because a column that re-targeted itself mid-read
+  would move for a reason nothing on screen explains. Two identity traps live on
+  this path and both are render loops rather than slow renders — the page paints
+  correctly and goes grey half a second later, once the first poll has landed and
+  the columns have mounted. `readOpenChat` parses the store on every call and so
+  hands back an equal-but-distinct object each read, which `sameChat` compares by
+  VALUE and the render-phase reset keys on as an id STRING. And
+  `useUnstartedChats` held ONE memo slot — see `PerProjectMemo`, which is the one
+  that actually greyed the page.
+- **A memo keyed for ONE project is a render loop the moment there are two.**
+  `useUnstartedChats` derives an array, and `useSyncExternalStore` compares
+  snapshots by IDENTITY, so it has to be memoized or every read reports a change.
+  It was — against a single slot, `{ source, projectId, rows }` — and that was
+  correct for exactly as long as one project was on screen, which the four panes
+  guarantee. The wall draws a column per project, React calls each column's
+  snapshot in turn, and with one slot they EVICT each other: A's read replaces
+  B's entry, B's replaces A's, every read misses, every read returns a fresh
+  array. That is an infinite render, not a slow one — the page paints once and
+  goes grey when React gives up, about half a second in, which reads as the wall
+  failing to open rather than as a cache bug three files away. `PerProjectMemo`
+  in protocol is the fix and holds the explanation; `pnpm smoke` drives it with
+  two projects interleaved, which is the case that broke and the case a single
+  slot passes. Three things about this are worth carrying: the failure is
+  invisible to `tsc` and to `pnpm build` (returning a fresh array is perfectly
+  well typed), it was unreachable from Node because `drafts.ts` touches
+  `window.indexedDB` at module load, and the comment above the old slot already
+  warned that a new identity per read is "an infinite render loop rather than
+  merely slow" — it just assumed one project. A guard that names its own failure
+  mode can still be scoped to an assumption that later stops holding.
+- **Only a visible column polls, and that is a budget rather than a nicety.** The
+  four panes poll one project because one is open; a wall column polls its own, so
+  the rate becomes a function of how many projects you happen to have added — a
+  number nobody chose. `useOnScreen` makes it a function of window width instead,
+  which is bounded and visible, so horizontal scroll is the mechanism and not just
+  the layout. It matters most for a remote project, where a `gitPending` is an ssh
+  connection and the ceiling is a refusal rather than a slowdown: sshd stops
+  accepting past `MaxStartups`, and when that happens the failure does not land on
+  the wall, it lands on whatever commit needed a connection at the same moment.
+  `usePoll` guards the same budget from the other direction. The `rootMargin` is a
+  screen's worth so a column is usually already answered when it arrives, and the
+  hook starts TRUE because an observer reports after paint — starting false costs
+  every column a visible blank on arrival to save a request it would have made
+  anyway. The column ORDER is deliberately read off the lock alone (needs-you,
+  running, quiet) and NOT off uncommitted counts: those are polled per visible
+  column, so ranking on them would reorder the page as you scrolled it.
+- **The four gates are one function, and lifting them was the prerequisite.**
+  `projectGates` in protocol answers why a project cannot take a chat, a commit, a
+  push or a send. Those lived inline in `App.tsx`, computed for the one open
+  project, which was fine while there was one; the wall needs them per project,
+  and recomputing them in the column would put two implementations of "is this
+  project blocked" in the codebase. That is the shape behind both wedges in the
+  brief — a block reading one object while the button that releases it reads
+  another — so it is one pure function both views call, asserted by `pnpm smoke`,
+  which a React component cannot be. Three details are the ones that break
+  silently: the holder is named BEFORE the uncommitted count, because "commit that
+  work" cannot be followed while a run holds the repo and the commit button is
+  locked by that same holder; the commit's own run is exempt from its own button
+  or it locks itself the instant it is pressed; and the composer compares the
+  holder by RUN ID, not by session, because a commit attributed to a conversation
+  is not that conversation's turn. `parseLocation` and `formatLocation` moved to
+  protocol for the same reason — they are pure but lived in a file that touches
+  `window`, which put the one part of routing that fails silently out of smoke's
+  reach. A broken round trip is not an error anywhere; it is a reload landing
+  somewhere you did not ask for, which reads as the app forgetting what you had
+  open. It is asserted as a FIXED POINT rather than as byte-equality with the
+  input, because a page with no project formats as `#/wall/` and comparing against
+  the input would be testing the spelling instead of the inverse.
 - **The rail's lower half has two readings, and you pick one.** `history` and
   `files`, tabbed, sharing the space rather than stacking — they answer the same
   kind of question, orientation, and a rail split three ways gives each too few

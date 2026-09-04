@@ -26,8 +26,12 @@ import {
   cardsForConversation,
   chatModeFromSdk,
   checkVerdict,
+  formatLocation,
+  parseLocation,
   parseTurnSummary,
+  PerProjectMemo,
   planChecks,
+  projectGates,
   reduceCard,
   restartDecision,
   sortCards,
@@ -367,6 +371,199 @@ console.log("\nthe closing block a turn writes about itself")
     "parsing twice gives the same answer",
     parseTurnSummary(reply)?.headline === parseTurnSummary(reply)?.headline,
     "a module-level global regex would fail this on the second call",
+  )
+}
+
+console.log("\na snapshot that is stable across projects")
+{
+  // `useSyncExternalStore` compares by IDENTITY, so a snapshot that derives a
+  // fresh array on every read re-renders forever. The version this replaces held
+  // ONE memo slot and was correct while one project was on screen; the wall draws
+  // a column per project, and interleaved reads made them evict each other, so
+  // every read missed and the page went grey about half a second after it
+  // painted. Nothing about that is visible to `tsc` or to the build.
+  const memo = new PerProjectMemo<string>()
+  const source = { store: 1 }
+  let computed = 0
+  const rows = (id: string) => {
+    computed += 1
+    return [`${id}-a`, `${id}-b`]
+  }
+
+  const first = memo.read(source, "p1", rows)
+  check("a first read computes", first?.length === 2 && computed === 1)
+  check("and reading it again is the same array", memo.read(source, "p1", rows) === first)
+
+  // The case that broke: two projects read in turn, every render.
+  const other = memo.read(source, "p2", rows)
+  check("a second project gets its own", other !== first && other?.length === 2)
+  check(
+    "and the first is NOT evicted by it",
+    memo.read(source, "p1", rows) === first,
+    "one slot for two projects is the render loop that greyed the wall",
+  )
+  check("nor the second by going back", memo.read(source, "p2", rows) === other)
+  check("so interleaving computes nothing new", computed === 2, String(computed))
+
+  // Three passes of two columns, which is what a wall actually does.
+  const before = computed
+  for (let pass = 0; pass < 3; pass++) {
+    check(`p1 is stable on pass ${pass}`, memo.read(source, "p1", rows) === first)
+    check(`p2 is stable on pass ${pass}`, memo.read(source, "p2", rows) === other)
+  }
+  check("and none of that recomputed", computed === before)
+
+  // A write replaces the store wholesale, which invalidates every project at
+  // once — no caller has to know which project was touched.
+  const after = memo.read({ store: 2 }, "p1", rows)
+  check("a new store recomputes", after !== first && computed === before + 1)
+
+  check("no project is not an empty list", memo.read(source, null, rows) === null)
+}
+
+console.log("\nwhere you are, as a URL")
+{
+  // `parseLocation` and `formatLocation` are inverses, and a broken round trip
+  // is not an error anywhere — it is a reload landing somewhere you did not ask
+  // for, which reads as the app forgetting what you had open rather than as a
+  // parser bug. That is why these live in protocol rather than beside the hook.
+  //
+  // Asserted as STABILITY rather than as byte-equality with the input: a page
+  // with no project formats as `#/wall/`, so a bare `#/wall` is a different
+  // spelling of the same place and comparing against the input would be testing
+  // the spelling rather than the inverse. What has to hold is that formatting
+  // again changes nothing — that is what makes the effect in `useAppLocation`
+  // settle instead of rewriting the URL on every render.
+  const trip = (hash: string) => formatLocation(parseLocation(hash))
+  for (const hash of [
+    "#/",
+    "#/p/abc",
+    "#/p/abc/session-1",
+    "#/p/abc/new/new-xyz",
+    "#/activity",
+    "#/activity/p/abc/session-1",
+    "#/wall",
+    "#/wall/p/abc/session-1",
+    "#/wall/p/abc/new/new-xyz",
+  ]) {
+    check(`${hash} round trips to a fixed point`, trip(trip(hash)) === trip(hash), trip(hash))
+  }
+  // And the ones that carry a project are byte-identical, which is the case a
+  // shared link actually consists of.
+  for (const hash of [
+    "#/p/abc",
+    "#/p/abc/session-1",
+    "#/p/abc/new/new-xyz",
+    "#/activity/p/abc/session-1",
+    "#/wall/p/abc/session-1",
+  ]) {
+    check(`${hash} survives verbatim`, trip(hash) === hash, trip(hash))
+  }
+
+  // The whole-window pages are PREFIXES, so what is underneath survives — which
+  // is what lets closing either one put you back exactly where you were.
+  const under = parseLocation("#/wall/p/abc/session-1")
+  check("the wall keeps the project underneath it", under.projectId === "abc")
+  check("and the chat", under.sessionId === "session-1")
+  check("and says it is open", under.wall && !under.activity)
+
+  // Two whole-window pages cannot both be open. A hand-written URL naming both
+  // has to resolve to one of them rather than to some third state.
+  const both = parseLocation("#/activity/wall/p/abc")
+  check(
+    "a URL naming both pages opens exactly one",
+    both.activity !== both.wall,
+    JSON.stringify({ activity: both.activity, wall: both.wall }),
+  )
+
+  // A bare page is a complete location: both are about every project, so neither
+  // needs one. Testing only for a project id would drop it.
+  check("a bare wall URL is a location", parseLocation("#/wall").wall === true)
+  check("with no project", parseLocation("#/wall").projectId === null)
+
+  // Layouts this app has already outgrown. The mirror in localStorage outlives
+  // them, so they land on the project rather than on nothing.
+  check("an old chats URL still finds its project", parseLocation("#/p/abc/chats/s1").projectId === "abc")
+  check("and its chat", parseLocation("#/p/abc/chats/s1").sessionId === "s1")
+  check("a retired board URL opens the project", parseLocation("#/p/abc/board").projectId === "abc")
+  check("with nothing open", parseLocation("#/p/abc/board").sessionId === null)
+
+  check("nonsense is not a project", parseLocation("#/nonsense").projectId === null)
+}
+
+console.log("\nwhat a project's gates refuse")
+{
+  // These four answers used to be computed inline in `App.tsx` for the one open
+  // project. The wall draws a column per project and needs them for every one,
+  // and a second implementation of "is this project blocked" is the shape that
+  // produced the wedge in the brief — a block reading one object while the button
+  // that releases it reads another. Asserted here because a component cannot be.
+  const held = (title: string) => `"${title}" has it`
+  const holder = { runId: "run-1", title: "a chat" }
+
+  const free = projectGates({ holder: null, uncommitted: 0, held })
+  check("a free, clean project refuses nothing", !free.start && !free.commit && !free.send)
+
+  const dirty = projectGates({ holder: null, uncommitted: 3, held })
+  check("uncommitted work stops a new chat", dirty.start?.includes("3 uncommitted files") === true, String(dirty.start))
+  check(
+    "but never the commit that would clear it",
+    dirty.commit === null,
+    "a commit button locked by the dirt it exists to remove is a gate with no release",
+  )
+
+  // The ORDER, which is the rule most easily lost: a held checkout is nearly
+  // always dirty too, and "commit that work" cannot be followed while a run has
+  // the repo, because the commit button is locked by the same holder.
+  const both = projectGates({ holder, uncommitted: 3, held })
+  check(
+    "a holder is named before the dirt it is also causing",
+    both.start === held("a chat"),
+    "naming the files first sends you to a button this same holder has locked",
+  )
+
+  // The commit's own run must not lock its own button. `committing` is derived
+  // from the lock the daemon publishes, so without this exemption the button
+  // reads as blocked by itself from the moment it is pressed.
+  const mine = projectGates({ holder, uncommitted: 3, commitRunId: "run-1", held })
+  check("the commit I started does not block my commit button", mine.commit === null)
+  check("nor my push", mine.push === null)
+  check(
+    "but it still blocks a NEW chat",
+    mine.start === held("a chat"),
+    "the daemon refuses a fresh turn under any holder, ours included",
+  )
+
+  // The composer's half. The turn on screen is the one you can interrupt; a run
+  // anywhere else is the one you must wait for, and they are told apart by run
+  // id rather than by session — a commit attributed to this conversation is not
+  // this conversation's turn.
+  const watching = projectGates({ holder, uncommitted: 0, openRunId: "run-1", held })
+  check("the turn I am watching does not lock its own box", watching.send === null)
+  const elsewhere = projectGates({ holder, uncommitted: 0, openRunId: "run-9", held })
+  check("a run somewhere else does", elsewhere.send === held("a chat"))
+
+  // The tree stops only a chat that has NOT started, because the way out of it is
+  // to finish the chat that made it — and a chat whose own turn is in flight is
+  // exempt separately, since for its first seconds it has no session id while its
+  // own edits are already piling up.
+  check(
+    "uncommitted work does not stop a chat that has run",
+    projectGates({ holder: null, uncommitted: 3, started: true, held }).send === null,
+  )
+  check(
+    "nor one whose own turn is in flight",
+    projectGates({ holder: null, uncommitted: 3, busy: true, held }).send === null,
+    "a new chat has no session id for its first few seconds",
+  )
+  check(
+    "but it does stop an unstarted, idle one",
+    projectGates({ holder: null, uncommitted: 3, held }).send !== null,
+  )
+
+  check(
+    "one file is not pluralised",
+    projectGates({ holder: null, uncommitted: 1, held }).start?.includes("1 uncommitted file —") === true,
   )
 }
 

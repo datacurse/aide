@@ -36,6 +36,16 @@ export function usePoll(
   fn: () => void | Promise<void>,
   intervalMs: number,
   deps: readonly unknown[] = [],
+  /**
+   * Whether to beat at all. False stops the timer AND skips the leading call.
+   *
+   * A parameter rather than the caller wrapping the hook in a condition, because
+   * hooks cannot be called conditionally — and the alternative, an early return
+   * inside `fn`, still pays for a timer and a wakeup per beat per caller. The
+   * wall has one of these per project and turns off the ones scrolled off screen;
+   * see `useOnScreen` for why that is a budget rather than a nicety.
+   */
+  enabled = true,
 ): void {
   const latest = useRef(fn)
   latest.current = fn
@@ -43,6 +53,7 @@ export function usePoll(
   const inFlight = useRef(false)
 
   useEffect(() => {
+    if (!enabled) return
     let live = true
     const beat = async () => {
       if (inFlight.current) return
@@ -64,5 +75,5 @@ export function usePoll(
       clearInterval(timer)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [intervalMs, ...deps])
+  }, [intervalMs, enabled, ...deps])
 }

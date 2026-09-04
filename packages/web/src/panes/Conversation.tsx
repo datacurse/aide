@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   cardsForConversation,
+  projectGates,
   type Attachment,
   type ChatMode,
   type ContextUsage,
@@ -334,24 +335,6 @@ export function ConversationPane({
     [turnEvents, runId],
   )
   const busy = runId !== null && !finished
-
-  /**
-   * Something OTHER than the run this pane is watching has the checkout.
-   *
-   * By run id, and deliberately not by session as well. A commit is attributed
-   * to a conversation without being that conversation's turn, so "the holder's
-   * session is the open one" is true of a commit you walked away from and came
-   * back to — and that box has to stay shut, because the daemon refuses a send
-   * under any holder. The run id is the only thing that means what is wanted
-   * here: the turn on this screen, which is the one you can interrupt rather
-   * than the one you must wait for.
-   *
-   * The cost is a padlock for the length of one fetch when you open a chat whose
-   * turn is already running — until the transcript comes back with its
-   * `activeRunId` and the box becomes the interrupt. It is not a lie while it is
-   * up: nothing could be sent in that moment either.
-   */
-  const heldElsewhere = holder && holder.runId !== runId ? holder : null
 
   // The point of the whole conversation pane is that you leave it running and
   // come back. Something has to say when to come back.
@@ -957,25 +940,20 @@ export function ConversationPane({
           // hand every unstarted chat the same box.
           draftKey={draftKey(projectId, sessionId ?? draftId ?? "")}
           inheritedMode={summary?.lastMode ?? null}
-          // Two blocks, and they are held back from different chats.
-          //
-          // A run somewhere else stops EVERY box, this one included: the daemon
-          // takes one turn per project and refuses the rest, so a follow-up to a
-          // chat you are reading is refused just as flatly as a new one. That is
-          // the half that cannot wait for files to appear — the run is writing
-          // them right now — and it is why the padlock is on the lock rather
-          // than on what the lock has produced so far.
-          //
-          // Uncommitted work stops only a chat that has NOT started, because the
-          // way out of it is to finish the chat that caused it. Its own turn in
-          // flight is exempt too: for its first few seconds it has no session id
-          // yet, while its own edits pile up in the tree.
+          // Two blocks, held back from different chats, and both are stated in
+          // `projectGates` rather than here — the wall's columns each carry a box
+          // of their own and must refuse on the same terms this one does. See
+          // that file for why the holder is compared by RUN ID and why a started
+          // or busy chat is exempt from the tree.
           blocked={
-            heldElsewhere
-              ? heldBy(heldElsewhere.title)
-              : sessionId || busy || uncommitted === 0
-                ? null
-                : `${uncommitted} uncommitted file${uncommitted === 1 ? "" : "s"} in this project. Press commit in the rail on the right — it takes all of them, whether or not a chat made them.`
+            projectGates({
+              holder,
+              uncommitted,
+              openRunId: runId,
+              started: sessionId !== null,
+              busy,
+              held: heldBy,
+            }).send
           }
           autoSend={autoSend}
           onAutoSent={onAutoSent}

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
+import { projectGates } from "@aide/protocol"
 import { api, type GitPending, type Health, type ProjectView } from "./api.js"
 import { CHIME_KEY } from "./chime.js"
 import { usePoll } from "./usePoll.js"
@@ -13,6 +14,7 @@ import { ConversationPane } from "./panes/Conversation.js"
 import { ConversationList } from "./panes/Conversations.js"
 import { PendingRail } from "./panes/Pending.js"
 import { RemotePicker } from "./RemotePicker.js"
+import { Wall } from "./wall/Wall.js"
 import { Button, Empty, heldBy, PaneHeader, SELECTED } from "./ui.js"
 
 /** While anything is in flight the lists need to move on their own. */
@@ -27,7 +29,7 @@ export function App() {
    * you were and Back steps through what you had open. A chat is either a
    * session the daemon knows or one that has not been sent; see useAppLocation.
    */
-  const [{ activity, projectId, sessionId, draftId }, navigate] = useAppLocation()
+  const [{ activity, wall, projectId, sessionId, draftId }, navigate] = useAppLocation()
   /**
    * What the project has left to commit.
    *
@@ -182,34 +184,25 @@ export function App() {
   }, [projectId, holderRunId])
 
   /**
-   * Why this project cannot take another turn right now, or null. Both halves
-   * are the daemon's own rules, stated before the press rather than after it.
+   * Why this project cannot take a chat, a commit or a push right now.
    *
-   * The holder half is not the uncommitted half arriving early — it is the one
-   * thing the uncommitted half can never say in time. A run writes files nobody
-   * can anticipate, and the rail only learns of them a poll after they land, so
-   * a chat admitted beside a run in flight took a tree that was being written
-   * under it as its baseline; the block then appeared, describing damage already
-   * done. Waiting for files to show up is waiting for the wrong event.
+   * The rules themselves are in `projectGates`, in protocol, rather than here —
+   * the wall draws a column per project and needs the same four answers for each
+   * of them, and two implementations of "is this project blocked" is the shape
+   * the brief has been bitten by twice, both times as a gate nobody could clear.
+   * `pnpm smoke` asserts them there, which a component cannot be.
    *
-   * It also has to come FIRST. A held checkout is very nearly always a dirty one
-   * too, and "commit that work" is an instruction you cannot follow while a run
-   * has the repo — the commit button is locked by the same holder.
+   * Stated BEFORE the press rather than after it, which is what `start` is for:
+   * sending clears the box, so a ▶ that failed would take the parked idea with it
+   * and leave a red line where the work used to be.
    */
-  const projectHeld = project?.holder
-    ? heldBy(project.holder.title)
-    : uncommitted > 0
-      ? `${uncommitted} uncommitted file${uncommitted === 1 ? "" : "s"} — commit that work before starting another chat.`
-      : null
-
-  /**
-   * Why pressing ▶ on a parked chat would be refused right now, or null.
-   *
-   * Stated BEFORE the press rather than after it, unlike the composer's own
-   * refusal, because sending clears the box: a ▶ that fails would take the
-   * parked idea with it and leave a red line where the work used to be.
-   */
-  const startBlocked = projectHeld
+  const gates = projectGates({
+    holder: project?.holder ?? null,
+    uncommitted,
+    commitRunId,
+    held: heldBy,
+  })
+  const projectHeld = gates.start
 
   /**
    * Whether the commit we started is the thing currently holding the repo.
@@ -219,17 +212,8 @@ export function App() {
    * "committing" would clear while the drafting was still going.
    */
   const committing = starting || (commitRunId !== null && project?.holder?.runId === commitRunId)
-  /**
-   * Why the commit button cannot be pressed, or null.
-   *
-   * One reason left, and it is a wait rather than a refusal. There used to be a
-   * second — "open the conversation that made these changes" — from back when a
-   * commit was measured against a chat's checkpoint. Nothing makes the changes
-   * in the rail belong to a chat, so that was a dead button over work your own
-   * editor had made, in a project the same work was blocking every new chat in.
-   */
-  const commitBlocked =
-    project?.holder && project.holder.runId !== commitRunId ? heldBy(project.holder.title) : null
+  /** Why the commit button cannot be pressed, or null. See `projectGates`. */
+  const commitBlocked = gates.commit
 
   /**
    * Commit everything uncommitted in this project.
@@ -373,6 +357,14 @@ export function App() {
     )
   }
 
+  // The wall takes the window on the same terms and for the same reasons — see
+  // `Wall.tsx`. It polls a column per visible project, so leaving the panes
+  // mounted behind it would double the beat on the one project they are scoped
+  // to for a rail nobody can see.
+  if (wall) {
+    return <Wall onClose={() => navigate({ wall: false })} onOpen={navigate} />
+  }
+
   return (
     // No title bar. Nothing up there was worth a row of height across the whole
     // window — the app's name is in the tab, and the daemon controls are a
@@ -404,6 +396,16 @@ export function App() {
             title="Activity across every project — where the time and the money went"
           >
             stats
+          </Button>
+          {/* Beside `stats` because it is the other whole-window page and about
+              the same scope — every project rather than the open one. They
+              differ in what they do with it: `stats` counts what has already
+              happened, this one is where you steer what is happening now. */}
+          <Button
+            onClick={() => navigate({ wall: true })}
+            title="Every project side by side, one chat each — start the next thing without leaving the last"
+          >
+            wall
           </Button>
         </PaneHeader>
         <div className="flex-1 overflow-auto py-1">
@@ -582,7 +584,7 @@ export function App() {
           selectedDraft={draftId}
           // The rows are not polled; this is. See `withLock` in the list.
           holder={project?.holder ?? null}
-          startBlocked={startBlocked}
+          startBlocked={projectHeld}
           onSelect={(id) => navigate({ sessionId: id })}
           onSelectDraft={(id) => navigate({ draftId: id })}
           // Open it and send it, from the one press. The order matters only in
