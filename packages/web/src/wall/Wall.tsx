@@ -1,9 +1,12 @@
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
+import { splitHiddenColumns } from "@aide/protocol"
 import { api, type ProjectView } from "../api.js"
+import { Eye } from "../icons.js"
 import { Button, Empty } from "../ui.js"
 import { usePoll } from "../usePoll.js"
 import type { AppLocation } from "../useAppLocation.js"
 import { WallColumn } from "./Column.js"
+import { useHiddenColumns } from "./hidden.js"
 
 /**
  * Every project at once, one column each, scrolled horizontally.
@@ -40,6 +43,21 @@ import { WallColumn } from "./Column.js"
  * No broadcast box. One prompt sent to every project is five turns written with
  * one project in mind, and reviewing what comes back costs more than the typing
  * saved. One send per chat.
+ *
+ * ## Hiding a column
+ *
+ * A project you are not working on this week can be hidden, which is a view
+ * setting and nothing else — see `hidden.ts` for why it is not the registry's
+ * business. What matters HERE is that the count of hidden columns is always on
+ * screen while any are hidden, and it is the control that brings them back.
+ *
+ * That is not decoration. Hiding is the one thing on this page that makes a
+ * project stop being drawn, and the wall's whole claim is that it shows you
+ * everything at once — so a hidden column with nothing on screen to say so turns
+ * this page into a quiet liar the moment you forget you hid something. The wall
+ * would report "3 projects · one chat each" while five existed, and the missing
+ * two would be indistinguishable from projects that had been forgotten. So the
+ * header says how many are hidden, and one press restores them all.
  */
 
 /** The projects list, on the app's own beat — one request for every column. */
@@ -64,6 +82,22 @@ export function Wall({
   const [projects, setProjects] = useState<ProjectView[]>([])
   const [error, setError] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now())
+  const hidden = useHiddenColumns()
+
+  // A hidden column is not rendered at all rather than rendered and styled away:
+  // `WallColumn` polls its own project, holds a run stream and subscribes to the
+  // draft store, so a `display:none` version would keep every one of those costs
+  // for a column nobody can see — and for a remote project each poll is an ssh
+  // connection, which `useOnScreen` exists to ration. Hiding has to be at least
+  // as cheap as scrolling away.
+  //
+  // The count comes back from the same call that does the filtering, so the
+  // number in the header cannot disagree with the columns missing from the page.
+  // See `splitHiddenColumns` for the two ways they drift apart when it does not.
+  const { shown, hiddenCount } = useMemo(
+    () => splitHiddenColumns(projects, hidden.ids),
+    [projects, hidden.ids],
+  )
 
   usePoll(
     async () => {
@@ -90,8 +124,22 @@ export function Wall({
           wall
         </h1>
         <span className="font-sans text-[11px] text-fg-dim">
-          {projects.length} {projects.length === 1 ? "project" : "projects"} · one chat each
+          {shown.length} {shown.length === 1 ? "project" : "projects"} · one chat each
         </span>
+        {/* Always on screen while anything is hidden, and it is the way back.
+            A hidden column that the page never mentions is the wall quietly
+            under-reporting what exists — see the note at the top. */}
+        {hiddenCount > 0 && (
+          <button
+            type="button"
+            onClick={hidden.showAll}
+            title={`Show ${hiddenCount === 1 ? "the hidden column" : `all ${hiddenCount} hidden columns`} again`}
+            className="flex shrink-0 items-center gap-1 rounded-sm px-1.5 py-0.5 font-sans text-[11px] text-fg-dim hover:bg-hover hover:text-fg"
+          >
+            <Eye className="size-3 shrink-0" />
+            {hiddenCount} hidden
+          </button>
+        )}
         {error && <span className="font-sans text-[11px] text-err">{error}</span>}
         <div className="ml-auto">
           <Button onClick={onClose} title="Back to the panes, exactly where you left them">
@@ -102,6 +150,14 @@ export function Wall({
 
       {projects.length === 0 ? (
         <Empty>No projects yet. Add a git repository from the panes.</Empty>
+      ) : shown.length === 0 ? (
+        // Hiding everything must not look like having nothing. The message above
+        // is about an empty registry and would be a plain lie here — the way out
+        // is the `N hidden` control in the header, so this names it rather than
+        // repeating it as a second button that could drift from the first.
+        <Empty>
+          Every project is hidden. Press “{hiddenCount} hidden” above to bring them back.
+        </Empty>
       ) : (
         // Horizontal scroll is not only the layout — it is what bounds the
         // request rate, because a column only polls while it is on screen. See
@@ -125,12 +181,13 @@ export function Wall({
         // `blocked` on the card — and the dashboard is where "where did the time
         // go across everything" is asked. Being findable beats being sorted.
         <div className="flex min-h-0 flex-1 overflow-x-auto">
-          {projects.map((p) => (
+          {shown.map((p) => (
             <WallColumn
               key={p.id}
               project={p}
               now={now}
               onOpen={onOpen}
+              onHide={() => hidden.hide(p.id)}
               // Dropped here rather than waited for on the next beat. The poll
               // would notice within 1.5s, and for that beat the column is still
               // on screen and still typeable — a send in it lands on a project

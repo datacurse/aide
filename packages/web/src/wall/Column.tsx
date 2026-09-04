@@ -22,7 +22,7 @@ import {
   useUnstartedChats,
   type Draft,
 } from "../drafts.js"
-import { CaretRight, Check, GitCommit, Lock, X } from "../icons.js"
+import { CaretRight, Check, EyeSlash, GitCommit, Lock, X } from "../icons.js"
 import { draftName } from "../naming.js"
 import { Transcript, type LiveText } from "../panes/Transcript.js"
 import { TurnCardRow } from "../TurnCard.js"
@@ -106,6 +106,7 @@ export function WallColumn({
   project,
   now,
   onOpen,
+  onHide,
   onRemoved,
 }: {
   project: ProjectView
@@ -118,6 +119,17 @@ export function WallColumn({
   now: number
   /** Leave the wall for the four panes, on this project and this chat. */
   onOpen: (loc: Partial<AppLocation>) => void
+  /**
+   * Stop drawing this column, without touching the project.
+   *
+   * Deliberately NOT guarded by the holder the way `onRemoved` is. Forgetting a
+   * project under a live turn orphans that turn — the run keeps writing to a
+   * checkout nothing on screen can name — whereas hiding is a view setting that
+   * changes nothing about the run: it carries on, the daemon still owns it, and
+   * unhiding shows it exactly where it got to. A lock here would be friction
+   * bought for no failure.
+   */
+  onHide: () => void
   /** This project was forgotten, so the wall should stop drawing it. */
   onRemoved: () => void
 }) {
@@ -574,6 +586,20 @@ export function WallColumn({
             {holder.title}
           </span>
         )}
+        {/* Take this column off the wall. One press and no confirmation: it
+            changes nothing, the count in the wall's header names it immediately,
+            and one press there brings it back. Arming this the way `forget` is
+            armed would charge the price of a destructive act for a reversible
+            one — and the two sit next to each other, so the difference in
+            friction is itself what says they are different kinds of thing. */}
+        <button
+          type="button"
+          onClick={onHide}
+          title={`Hide ${project.name} from the wall. Nothing stops; any turn keeps running.`}
+          className="shrink-0 rounded-sm p-1 text-fg-dim hover:bg-hover hover:text-fg"
+        >
+          <EyeSlash className="size-3" />
+        </button>
         {/* Forget this project. Two presses, and the second one says what it
             does rather than asking a question — see `RemoveProject`. */}
         <RemoveProject

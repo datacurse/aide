@@ -32,7 +32,7 @@
  */
 import { execFile, spawn } from "node:child_process"
 import { readFile } from "node:fs/promises"
-import { dirname, join } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 // From the protocol package, NOT from `worker/stdio.js` — importing that file
@@ -58,24 +58,31 @@ const PROTOCOL_SRC = join(HERE, "..", "..", "protocol", "src")
  * that only ever needed to run one agent.
  */
 /**
- * The protocol's browser-safe half. `node.ts` and `project-io.ts` are
- * deliberately absent: they pull gray-matter, and nothing the agent runs reads
- * `project.md` — the daemon does that and sends the prose in the job.
+ * The protocol's browser-safe half, READ OFF `index.ts` rather than listed here.
+ *
+ * `node.ts`, `paths.ts` and `project-io.ts` are excluded for free by that: the
+ * barrel is browser-safe by its own rule, so what it re-exports is exactly what
+ * has no `node:*` import and no gray-matter — and nothing the agent runs reads
+ * `project.md` anyway, the daemon does that and sends the prose in the job.
+ *
+ * Hand-listed once, and it drifted the moment the package changed: `todo.ts`
+ * was deleted with the backlog file and eight modules were added after it, so a
+ * deploy died on `stat local todo.ts` AFTER the remote install had run — and had
+ * that one name still existed, the failure would instead have been a remote
+ * agent crashing on its first turn with `cannot find module ./card.js`, which is
+ * the same drift arriving somewhere far more expensive. The barrel cannot go
+ * stale the same way, because the web bundle stops building when it is wrong.
  */
-const PROTOCOL_FILES = [
-  "index.ts",
-  "events.ts",
-  "names.ts",
-  "project.ts",
-  "git.ts",
-  "health.ts",
-  "session.ts",
-  "ssh.ts",
-  "todo.ts",
-  "usage.ts",
-]
+async function protocolFiles(): Promise<string[]> {
+  const barrel = await readFile(join(PROTOCOL_SRC, "index.ts"), "utf8")
+  // The emitted specifiers are `./name.js` (verbatimModuleSyntax means the
+  // source says what the runtime resolves), and the files on disk are `.ts`.
+  const names = [...barrel.matchAll(/^export \* from "\.\/([\w-]+)\.js"/gm)].map((m) => m[1])
+  if (names.length === 0) throw new Error("no exports found in protocol/src/index.ts")
+  return ["index.ts", ...names.map((n) => `${n}.ts`)]
+}
 
-const FILES: Array<[string, string]> = [
+export const filesToShip = async (): Promise<Array<[string, string]>> => [
   [join(DAEMON_SRC, "agent.ts"), "src/agent.ts"],
   [join(DAEMON_SRC, "policy.ts"), "src/policy.ts"],
   [join(DAEMON_SRC, "worker", "loop.ts"), "src/worker/loop.ts"],
@@ -87,7 +94,7 @@ const FILES: Array<[string, string]> = [
   // side is byte-identical to what is in the repository — which is what makes a
   // remote stack trace mean something, and what stops a deploy step from
   // becoming a place where behaviour can differ.
-  ...PROTOCOL_FILES.map(
+  ...(await protocolFiles()).map(
     (name) =>
       [join(PROTOCOL_SRC, name), `node_modules/@aide/protocol/${name}`] as [string, string],
   ),
@@ -179,6 +186,17 @@ async function main(): Promise<void> {
 
   console.log(`deploying to ${alias} (protocol v${AGENT_PROTOCOL}, sdk ${sdkVersion})`)
 
+  // Resolved BEFORE anything is done to the far side. A missing source used to
+  // surface as a failed `scp` after the remote install had already run, which
+  // leaves the machine holding a half-deployed agent: new package.json, new
+  // launcher, installed SDK, and sources from the previous deploy.
+  const files = await filesToShip()
+  for (const [local] of files) {
+    await readFile(local).catch(() => {
+      throw new Error(`cannot ship ${local}: no such file`)
+    })
+  }
+
   console.log("  writing package.json and launcher")
   // Through stdin rather than as an argument, so a JSON document full of braces
   // and quotes never has to survive a shell. `spawn` and not `execFile`: the
@@ -228,8 +246,8 @@ async function main(): Promise<void> {
   // One scp per file rather than a tarball: `tar` is not on every minimal
   // image, and a handful of small transfers is a second or two. Correctness
   // over cleverness for a step that runs rarely.
-  console.log(`  copying ${FILES.length} files`)
-  for (const [local, remote] of FILES) {
+  console.log(`  copying ${files.length} files`)
+  for (const [local, remote] of files) {
     await run(
       "scp",
       ["-o", "BatchMode=yes", "-F", sshConfigPath(), local, `${alias}:${REMOTE_DIR}/${remote}`],
@@ -241,4 +259,8 @@ async function main(): Promise<void> {
   console.log(`\ndeployed to ${alias}:${REMOTE_DIR}`)
 }
 
-await main()
+// Only when RUN, never when imported. `pnpm smoke` imports this module for
+// `filesToShip` — the manifest is the thing that drifted — and a bare top-level
+// `main()` would make that import deploy to whatever `process.argv[2]` happened
+// to hold.
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) await main()

@@ -159,3 +159,46 @@ export function projectGates(opts: {
           )),
   }
 }
+
+/**
+ * Which columns the wall draws, given the set a human has hidden.
+ *
+ * Pure, and here rather than in the hook for the reason this file already
+ * exists: the hook imports React and so cannot be reached from Node, and these
+ * are the rules whose failures are quiet rather than loud. `mergedMode` was
+ * lifted into protocol on exactly this argument.
+ *
+ * The rule that matters is that the two returned halves PARTITION the projects.
+ * The wall draws one and counts the other, so anything that lets them disagree
+ * puts a number in the header that does not match the columns missing from the
+ * page — and the number is the only thing telling you a project was hidden at
+ * all. Two ways that happens, both silent:
+ *
+ *  - a duplicate id in the stored list, which a naive count of the list itself
+ *    reports as two hidden columns for one missing column;
+ *  - an id for a project that has since been FORGOTTEN, which counts a column
+ *    that cannot come back — "1 hidden" that restores nothing when pressed.
+ *
+ * Counting what is actually absent from `shown`, rather than the size of the
+ * stored set, is what makes both cases impossible instead of merely unlikely.
+ */
+export function splitHiddenColumns<T extends { id: string }>(
+  projects: readonly T[],
+  hiddenIds: readonly string[],
+): { shown: T[]; hiddenCount: number } {
+  const hidden = new Set(hiddenIds)
+  const shown = projects.filter((p) => !hidden.has(p.id))
+  return { shown, hiddenCount: projects.length - shown.length }
+}
+
+/**
+ * Add an id to the hidden set, without letting it appear twice.
+ *
+ * Re-hiding an already-hidden project is reachable — two tabs, or a stored value
+ * edited by hand — and an unguarded append is what puts a duplicate in the list
+ * that `splitHiddenColumns` then has to be careful about. Guarding both ends is
+ * deliberate: this keeps the stored value clean, and the split stays correct
+ * even for a value this function never wrote.
+ */
+export const withHidden = (hiddenIds: readonly string[], projectId: string): string[] =>
+  hiddenIds.includes(projectId) ? [...hiddenIds] : [...hiddenIds, projectId]

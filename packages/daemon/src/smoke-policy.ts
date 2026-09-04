@@ -35,8 +35,10 @@ import {
   reduceCard,
   restartDecision,
   sortCards,
+  splitHiddenColumns,
   stripPartialTurnSummary,
   stripTurnSummary,
+  withHidden,
   type Health,
   type RunEvent,
   type RunEventBody,
@@ -564,6 +566,73 @@ console.log("\nwhat a project's gates refuse")
   check(
     "one file is not pluralised",
     projectGates({ holder: null, uncommitted: 1, held }).start?.includes("1 uncommitted file —") === true,
+  )
+}
+
+console.log("\ncolumns the wall is not drawing")
+{
+  const projects = [{ id: "a" }, { id: "b" }, { id: "c" }]
+
+  const none = splitHiddenColumns(projects, [])
+  check("nothing hidden draws everything", none.shown.length === 3 && none.hiddenCount === 0)
+
+  const one = splitHiddenColumns(projects, ["b"])
+  check(
+    "a hidden project is not drawn",
+    one.shown.map((p) => p.id).join(",") === "a,c",
+    one.shown.map((p) => p.id).join(","),
+  )
+  check("and is counted", one.hiddenCount === 1)
+
+  // The header's number and the missing columns are the SAME arithmetic, and
+  // this is the case that separates them. A duplicate id is reachable from two
+  // tabs or a hand-edited value, and counting the stored list would report two
+  // hidden columns while only one is absent from the page — a "2 hidden" that
+  // restores one column when pressed.
+  const dupe = splitHiddenColumns(projects, ["b", "b"])
+  check(
+    "a duplicate id counts once",
+    dupe.hiddenCount === 1 && dupe.shown.length === 2,
+    `${dupe.hiddenCount} hidden, ${dupe.shown.length} shown`,
+  )
+
+  // The other way the two drift: a project hidden and then FORGOTTEN. Its id
+  // stays in the stored set forever, and counting the set would keep offering to
+  // restore a column that no longer exists.
+  const stale = splitHiddenColumns(projects, ["b", "gone"])
+  check(
+    "an id for a forgotten project counts for nothing",
+    stale.hiddenCount === 1,
+    "otherwise the header offers to restore a column that cannot come back",
+  )
+
+  // The property both of the above are instances of, stated directly: whatever
+  // is stored, the two halves partition the projects. This is what lets the wall
+  // draw one and count the other without them ever disagreeing.
+  for (const ids of [[], ["a"], ["a", "a"], ["a", "b", "c"], ["nope"], ["c", "nope", "c"]]) {
+    const { shown, hiddenCount } = splitHiddenColumns(projects, ids)
+    check(
+      `shown + hidden is every project (${ids.join("|") || "none"})`,
+      shown.length + hiddenCount === projects.length,
+      `${shown.length} + ${hiddenCount} of ${projects.length}`,
+    )
+  }
+
+  // Hiding everything is legal and is NOT the same as having no projects — the
+  // wall draws a different empty state for it, because the way out is the
+  // header's restore control rather than adding a repository.
+  const all = splitHiddenColumns(projects, ["a", "b", "c"])
+  check("every column can be hidden at once", all.shown.length === 0 && all.hiddenCount === 3)
+
+  // The stored set stays clean at the point of writing as well. Both ends are
+  // guarded deliberately: this keeps the value tidy, and the split above stays
+  // correct for a value this function never wrote.
+  check("hiding twice stores one id", withHidden(["a"], "a").join(",") === "a")
+  check("hiding appends", withHidden(["a"], "b").join(",") === "a,b")
+  check(
+    "and the order hidden is kept",
+    withHidden(withHidden([], "c"), "a").join(",") === "c,a",
+    "the list is a record of what you hid, not a sorted set",
   )
 }
 
@@ -1135,6 +1204,54 @@ console.log("\nprotocol stays browser-safe")
   // filesystem half, or the split has quietly collapsed back into one barrel.
   const nodeEntry = await readFile(join(src, "node.ts"), "utf8")
   check("the node entry still carries paths", nodeEntry.includes("./paths.js"))
+}
+
+console.log("\nthe remote agent ships every file it imports")
+{
+  // `deploy-agent`'s manifest was hand-listed and drifted: `todo.ts` went with
+  // the backlog file, eight modules were added after it, and nothing noticed
+  // until a deploy died on `stat local todo.ts` — AFTER the remote npm install,
+  // leaving a machine with a new launcher and last release's sources. The worse
+  // shape is the one that did not happen: had that name still existed, a missing
+  // NEW file would have deployed cleanly and crashed on the far side's first
+  // turn with `cannot find module ./card.js`, which costs an ssh round trip and
+  // a model call to discover.
+  //
+  // The manifest is derived from the barrel now, so what is worth asserting is
+  // the property the old list violated — every path it names is really there.
+  const { filesToShip } = await import("./deploy.js")
+  const shipped = await filesToShip()
+  const missing: string[] = []
+  for (const [local] of shipped) if (!existsSync(local)) missing.push(local)
+  check(
+    "every file the deploy names exists",
+    missing.length === 0,
+    missing.join("; ") || `${shipped.length} files`,
+  )
+
+  // And that the derivation actually tracks the barrel, rather than happening to
+  // agree with it today. A module exported to the browser but absent from the
+  // agent's copy is the `cannot find module` above.
+  const protocolSrc = fileURLToPath(new URL("../../protocol/src/", import.meta.url))
+  const barrel = await readFile(join(protocolSrc, "index.ts"), "utf8")
+  const exported = [...barrel.matchAll(/^export \* from "\.\/([\w-]+)\.js"/gm)].map(
+    (m) => `${m[1]}.ts`,
+  )
+  const names = new Set(shipped.map(([, remote]) => remote.split("/").pop()))
+  check(
+    "and every module the barrel exports is one of them",
+    exported.every((name) => names.has(name)),
+    exported.filter((name) => !names.has(name)).join("; ") || `${exported.length} modules`,
+  )
+
+  // Importing the deploy script must not BE a deploy. It is a CLI with a
+  // top-level `main()`, and the guard that stops that running on import is the
+  // only reason the two checks above can exist at all.
+  check(
+    "importing the deploy script deploys nothing",
+    true,
+    "reaching this line at all is the assertion",
+  )
 }
 
 console.log("\nrestarting a stale daemon")
