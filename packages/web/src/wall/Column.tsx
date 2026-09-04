@@ -11,6 +11,7 @@ import {
 import { api, type ConversationRow, type ConversationView, type GitPending, type ProjectView } from "../api.js"
 import { Composer } from "../Composer.js"
 import {
+  discardDraft,
   draftKey,
   draftSubject,
   markDraftSent,
@@ -369,6 +370,30 @@ export function WallColumn({
   }
 
   /**
+   * Throw away an unsent chat.
+   *
+   * `discardDraft` alone is not enough, and the missing half is what the column
+   * is POINTING at. The picker's store and the column's selection are two
+   * different things — `useOpenChat` keeps a `draftId` that survives the record
+   * going away — so discarding the row currently shown leaves the column aimed
+   * at an id nothing answers to: the header falls back to "New chat", the
+   * composer writes into a key with no record, and a send would start a chat
+   * from a row the list no longer draws. So the selection moves off first, and
+   * only then is the record dropped.
+   *
+   * It clears rather than picking a neighbour. Which chat to show next is a
+   * choice the human just made by deleting one, and jumping the column onto some
+   * other project's work would be the wall re-targeting itself — the same
+   * objection the holder dot answers by MARKING rather than switching.
+   */
+  const discard = (key: string) => {
+    if (open.draftId && draftKey(project.id, open.draftId) === key) {
+      setOpen({ sessionId: null, draftId: null })
+    }
+    discardDraft(key)
+  }
+
+  /**
    * Forget this project — the registry entry, and nothing on disk.
    *
    * The wall is told rather than left to notice on the next poll: a column that
@@ -474,6 +499,7 @@ export function WallColumn({
               setOpen(next)
               setPicking(false)
             }}
+            onDiscard={discard}
             onClose={() => setPicking(false)}
           />
         )}
@@ -623,7 +649,13 @@ const sameChat = (a: OpenChat, b: OpenChat): boolean =>
 /** The row a picker draws: a real conversation, or one that has not been sent. */
 type PickerRow =
   | { kind: "chat"; id: string; title: string; done: boolean }
-  | { kind: "draft"; id: string; title: string }
+  // `key` as well as `id`, because discarding one addresses the STORE and the
+  // store is keyed by `<projectId>:<id>`. Carried on the row rather than rebuilt
+  // at the ✕ from a project id the picker would otherwise have no reason to
+  // know: `draftKey(project.id, row.id)` is the same string right up until
+  // something changes how a key is spelled, and then it is a discard that
+  // silently removes nothing.
+  | { kind: "draft"; id: string; key: string; title: string }
 
 /**
  * Everything in this project you could point the column at, most recent first.
@@ -637,6 +669,7 @@ function pickerRows(chats: ConversationRow[] | null, drafts: readonly Draft[]): 
   const parked: PickerRow[] = drafts.map((d) => ({
     kind: "draft",
     id: idOf(d.key),
+    key: d.key,
     // The list's own rule, not a second one: the name if it still describes what
     // is in the box, and the first line otherwise. `draftSubject` rather than the
     // box itself, so the press that sends does not blank the row it came from.
@@ -671,6 +704,7 @@ function ChatPicker({
   open,
   holderSessionId,
   onPick,
+  onDiscard,
   onClose,
 }: {
   rows: PickerRow[]
@@ -685,6 +719,8 @@ function ChatPicker({
    */
   holderSessionId: string | null
   onPick: (next: { sessionId: string | null; draftId: string | null }) => void
+  /** Throw away an unsent chat, addressed by its store key. */
+  onDiscard: (key: string) => void
   onClose: () => void
 }) {
   const box = useRef<HTMLDivElement>(null)
@@ -707,40 +743,79 @@ function ChatPicker({
         <p className="px-3 py-2 font-sans text-[11px] text-fg-dim">No chats in this project yet.</p>
       )}
       {rows.map((row) => (
-        <button
+        // A `div` with the label as its own button, NOT one button around the
+        // whole row: the ✕ is a second control and a button inside a button is
+        // invalid markup that browsers resolve by dropping the inner one, so the
+        // discard would be unclickable rather than visibly broken.
+        <div
           key={`${row.kind}:${row.id}`}
-          type="button"
-          onClick={() =>
-            onPick(
-              row.kind === "chat"
-                ? { sessionId: row.id, draftId: null }
-                : { sessionId: null, draftId: row.id },
-            )
-          }
-          className={`flex w-full items-center gap-2 px-3 py-1.5 text-left ${
+          className={`group flex w-full items-center gap-2 pr-1 pl-3 ${
             row.id === selected ? "bg-active text-white" : "hover:bg-hover"
           }`}
         >
-          {/* The one that has the checkout, wherever it is in the list. */}
-          {row.kind === "chat" && row.id === holderSessionId ? (
-            <span className="inline-block size-1.5 shrink-0 animate-pulse rounded-full bg-info" />
-          ) : row.kind === "draft" ? (
-            <span className="inline-block size-1.5 shrink-0 rounded-full border border-fg-dim" />
-          ) : (
-            <span className="inline-block size-1.5 shrink-0" />
-          )}
-          <span
-            className={`min-w-0 flex-1 truncate font-sans text-[12px] ${
-              row.kind === "chat" && row.done ? "text-fg-dim line-through" : ""
-            }`}
+          <button
+            type="button"
+            onClick={() =>
+              onPick(
+                row.kind === "chat"
+                  ? { sessionId: row.id, draftId: null }
+                  : { sessionId: null, draftId: row.id },
+              )
+            }
+            className="flex min-w-0 flex-1 items-center gap-2 py-1.5 text-left"
           >
-            {row.title}
-          </span>
+            {/* The one that has the checkout, wherever it is in the list. */}
+            {row.kind === "chat" && row.id === holderSessionId ? (
+              <span className="inline-block size-1.5 shrink-0 animate-pulse rounded-full bg-info" />
+            ) : row.kind === "draft" ? (
+              <span className="inline-block size-1.5 shrink-0 rounded-full border border-fg-dim" />
+            ) : (
+              <span className="inline-block size-1.5 shrink-0" />
+            )}
+            <span
+              className={`min-w-0 flex-1 truncate font-sans text-[12px] ${
+                row.kind === "chat" && row.done ? "text-fg-dim line-through" : ""
+              }`}
+            >
+              {row.title}
+            </span>
+            {row.kind === "draft" && (
+              <span className="shrink-0 font-sans text-[10px] text-fg-dim">not sent</span>
+            )}
+            {row.kind === "chat" && row.done && <Check className="size-3 shrink-0 text-ok" />}
+          </button>
+          {/*
+            Discard an unsent chat. ONLY an unsent one, and that asymmetry is the
+            design rather than an omission.
+
+            A draft is held in this browser and has never happened — nothing was
+            spent on it, nothing on disk records it, and `discardDraft` is a local
+            delete. A started conversation is the opposite: its transcript is the
+            SDK's own file, shared with the Claude CLI and the VS Code extension,
+            so a ✕ here would delete a record aide does not own out of two other
+            tools as well. The list's own tick is what closes a real chat, and the
+            brief's second gate is a verdict rather than a deletion.
+
+            Hover-only, like the same control in `Conversations.tsx`: tidying the
+            list is not what the picker was opened to do. A 24px target rather
+            than the 12px glyph, for the reason written down there — the pixels
+            around a bare ✕ were a miss that discarded nothing.
+          */}
           {row.kind === "draft" && (
-            <span className="shrink-0 font-sans text-[10px] text-fg-dim">not sent</span>
+            <button
+              type="button"
+              onClick={() => onDiscard(row.key)}
+              title="Discard this unsent chat"
+              className="flex size-6 shrink-0 items-center justify-center rounded-sm text-fg-dim opacity-0 group-hover:opacity-100 hover:bg-hover hover:text-err"
+            >
+              <X className="size-3" />
+            </button>
           )}
-          {row.kind === "chat" && row.done && <Check className="size-3 shrink-0 text-ok" />}
-        </button>
+          {/* The started rows keep the ✕'s width, or the titles above and below
+              a draft would sit at a different right edge and the list would look
+              ragged as you hovered down it. */}
+          {row.kind === "chat" && <span className="size-6 shrink-0" />}
+        </div>
       ))}
     </div>
   )

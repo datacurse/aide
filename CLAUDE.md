@@ -400,6 +400,28 @@ Decisions already taken, which are not gaps to fill:
   the answer rather than waiting for the next poll, because for that beat it is
   still on screen and still typeable, and a send in it lands on a project the
   daemon has already forgotten.
+- **The wall's picker discards an UNSENT chat and only an unsent one.** A ✕ on a
+  `not sent` row, hover-only, calling the same `discardDraft` the pane's list has
+  always called — the wall could create parked chats with `new` and had no way to
+  remove one, so pressing it three times left three anonymous rows permanently at
+  the top of the picker, pushing the real conversations below a 320px fold. That
+  is what it looked like from the outside: a project whose recent chats had
+  stopped being saved. The asymmetry with a started conversation is the design
+  rather than a gap. A draft is held in THIS browser, has never run, cost nothing
+  and is recorded nowhere else, so throwing it away is a local delete. A started
+  chat's transcript is the SDK's own file under `~/.claude/projects/`, shared with
+  the Claude CLI and the VS Code extension — a ✕ there would delete a record aide
+  does not own out of two other tools as well, which is a promise this UI must not
+  make. Closing a real chat is the tick, and the brief's second gate is a verdict
+  rather than a deletion. Two details bite if reimplemented: the row became a
+  `div` with the label as its own button, because a button inside a button is
+  markup browsers fix by dropping the INNER one, so the discard would be silently
+  unclickable rather than visibly wrong; and the selection is moved off the row
+  BEFORE the record is dropped, or the column is left pointing at a `draftId`
+  nothing answers to — the header reads "New chat", the composer writes into a key
+  with no record, and a send starts a chat from a row the list no longer draws.
+  It clears rather than selecting a neighbour, because which chat to show next is
+  a choice the human just made by deleting one.
 - **The four gates are one function, and lifting them was the prerequisite.**
   `projectGates` in protocol answers why a project cannot take a chat, a commit, a
   push or a send. Those lived inline in `App.tsx`, computed for the one open
