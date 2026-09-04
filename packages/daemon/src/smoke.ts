@@ -773,6 +773,48 @@ console.log("\nthe gate is re-read after the fix, not just the tree")
   await git(root, ["reset", "--hard", "HEAD~1"])
 }
 
+console.log("\na commit whose message could not be written")
+{
+  const { fallbackMessage } = await import("./review.js")
+
+  // The drafting is the one part of a commit that can fail for a reason that has
+  // nothing to do with the work, and it used to take the commit down with it: a
+  // helper budget sized against the OUTPUT met a prompt carrying the whole diff,
+  // and a 14-file tree died on `Reached maximum budget ($0.5)` after the checks
+  // had already been paid for. The button that exists to clear the rail could not
+  // clear it. So a failed draft degrades to this instead of throwing.
+  const msg = fallbackMessage("fix the IMU health tab", ["src/a.ts", "src/b.ts"])
+  const [subject, blank] = msg.split("\n")
+  check("the request becomes the subject", subject === "fix the IMU health tab", subject)
+  check(
+    "and a blank line follows it",
+    blank === "",
+    "a body running straight on from the subject is one paragraph to git",
+  )
+  check(
+    "it says the message is mechanical",
+    /could not write a message/.test(msg),
+    "a subject nobody chose, appearing unexplained, reads as aide having stopped bothering",
+  )
+  check(
+    "the staged paths are in the body",
+    msg.includes("  src/a.ts") && msg.includes("  src/b.ts"),
+    "the file list is the part a reader can check against the diff",
+  )
+
+  const long = fallbackMessage("x".repeat(200), [])
+  const first = long.split("\n")[0] ?? ""
+  check("a long request is cut to 72 columns", first.length <= 72, `${first.length}`)
+  check("and says it was cut", first.endsWith("…"), first.slice(-8))
+
+  const empty = fallbackMessage("   \n  ", [])
+  check(
+    "a commit with no request still gets a subject",
+    (empty.split("\n")[0] ?? "") === "uncommitted work",
+    "git refuses an empty message, so this is the difference between a fallback and a second failure",
+  )
+}
+
 console.log("\ntelling a turn it left the daemon behind")
 {
   // The other half of the same fact, and the half a human actually asks about:

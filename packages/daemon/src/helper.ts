@@ -24,8 +24,23 @@ import { query } from "@anthropic-ai/claude-agent-sdk"
  */
 const MAX_DIFF_CHARS = 200_000
 
-/** A commit message is a few hundred tokens. This only catches a runaway. */
-const HELPER_BUDGET_USD = 0.5
+/**
+ * A backstop against a runaway, and nothing finer than that.
+ *
+ * The number was $0.50, sized against the OUTPUT — "a commit message is a few
+ * hundred tokens" — which ignored the input sitting right above it. The prompt
+ * is the whole working-tree diff, up to MAX_DIFF_CHARS, and 200,000 characters
+ * is on the order of 50k tokens before the model writes a word. A commit of any
+ * real size therefore spent most of its allowance on being READ, and a big one
+ * tripped the cap while drafting — which killed the commit outright, after the
+ * diff had been read and the checks had been paid for. Seen on a 14-file tree:
+ * `Reached maximum budget ($0.5)` where a commit should have been.
+ *
+ * So it is sized against the input it is actually given, with the room a cap
+ * that only ever catches pathology should have. A commit message that costs
+ * more than this is not an expensive message, it is a loop.
+ */
+const HELPER_BUDGET_USD = 5
 
 /**
  * How much of a parked chat the namer is shown.

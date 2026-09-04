@@ -11,7 +11,7 @@ import { readCheckpoint } from "./checkpoint.js"
 import type { HeldTurnOutcome } from "./chat.js"
 import { CONFIG } from "./config.js"
 import { repoOf } from "./git.js"
-import { draftCommitMessage } from "./helper.js"
+import { draftCommitMessage, type Drafted } from "./helper.js"
 import { runChecks, type CheckOutcome } from "./verify.js"
 
 /**
@@ -195,6 +195,37 @@ function repairRequest(failed: CheckOutcome): string {
 }
 
 /**
+ * A commit message for a commit whose message could not be written.
+ *
+ * Deliberately plain, and deliberately honest about being a fallback: this lands
+ * in the project's permanent history, where a subject pretending to describe work
+ * it never read would be worse than one admitting it did not. The request the
+ * button was pressed from is the best evidence available without a model, so it
+ * becomes the subject, and the body carries the file list the commit is actually
+ * staging — which is the part a reader can check against the diff.
+ *
+ * The subject is cut to git's conventional 72 columns rather than left to run,
+ * since `opts.request` is a chat title and nothing has ever bounded it.
+ *
+ * Exported for `pnpm smoke`. The path that CALLS it needs a model call to fail,
+ * which the smoke repo has no way to provoke — so the function is pinned
+ * directly rather than left as the one branch nothing covers.
+ */
+export function fallbackMessage(request: string, paths: string[]): string {
+  const subject = request.trim().split("\n")[0]?.trim() || "uncommitted work"
+  const cut = subject.length > 72 ? `${subject.slice(0, 71).trimEnd()}…` : subject
+  return [
+    cut,
+    "",
+    "aide could not write a message for this commit, so this one is mechanical:",
+    "the subject is the request it was committed from, and the list below is what",
+    "was staged. The diff is the record.",
+    "",
+    ...paths.map((p) => `  ${p}`),
+  ].join("\n")
+}
+
+/**
  * Commit everything uncommitted in the project, narrating as it goes.
  *
  * One press does all of it: read the diff, write a message from it, commit. The
@@ -295,16 +326,37 @@ export async function commitWorkingTree(
   }
 
   emit({ type: "commit.drafting", model: CONFIG.helperModel })
-  const message = await draftCommitMessage({
-    model: CONFIG.helperModel,
-    title: opts.request,
-    prompt: "",
-    diffStat: changes.stat,
-    diff: changes.diff,
-    recentSubjects: await recentSubjects(repoOf(project)),
-    // Streamed, so this step is watched rather than waited out.
-    onText: (text) => opts.delta({ kind: "text", text }),
-  })
+  // The message is the one part of a commit that can fail for a reason that has
+  // nothing to do with the work — the same argument the push below is written
+  // around, and a sharper one, because this runs BEFORE the commit rather than
+  // after it. A throw here threw away a tree that had already passed its checks:
+  // the diff was read, the gate was run and paid for, and what the human got was
+  // `Reached maximum budget ($0.5)` and no commit, from a button whose entire job
+  // is to be the thing that clears the rail. A gate that can be wedged by its own
+  // cosmetics has no release.
+  //
+  // So a failed draft degrades to a written message rather than taking the commit
+  // with it. It is deliberately NOT silent — the label says the model did not
+  // write it and why — because a subject line nobody chose, appearing with no
+  // explanation, reads as aide having quietly stopped bothering.
+  let message: Drafted
+  try {
+    message = await draftCommitMessage({
+      model: CONFIG.helperModel,
+      title: opts.request,
+      prompt: "",
+      diffStat: changes.stat,
+      diff: changes.diff,
+      recentSubjects: await recentSubjects(repoOf(project)),
+      // Streamed, so this step is watched rather than waited out.
+      onText: (text) => opts.delta({ kind: "text", text }),
+    })
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err)
+    emit({ type: "commit.step", label: `the message could not be written — ${why}` })
+    // No spend to add: a call that threw is one whose accounting never arrived.
+    message = { text: fallbackMessage(opts.request, changes.paths), costUsd: 0, modelUsage: {} }
+  }
   add(spent, message)
 
   emit({
