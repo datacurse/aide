@@ -24,9 +24,11 @@ import { runLogPath, sshConfigPath } from "@aide/protocol/node"
 import { activity } from "./activity.js"
 import { MAX_PROJECT_DOC_CHARS } from "./agent.js"
 import {
+  autoCommitEnabled,
   chatStatuses,
   closeChat,
   reopenChat,
+  setAutoCommit,
 } from "./board.js"
 import { currentBranch, pushBranch, runChanges } from "./changes.js"
 import { ChatLane } from "./chat.js"
@@ -684,6 +686,92 @@ app.get(
  * review sitting underneath the transcript is not where anybody was looking. See
  * `commitWorkingTree` for what replaced it and what that costs.
  */
+/**
+ * Start a commit run over a project's working tree.
+ *
+ * Lifted out of the route below because the auto-commit path needs exactly this
+ * and must not get a second, subtly different one — an automatic commit that
+ * skipped the gate, or attributed itself differently, or held the lock by another
+ * route would be a second implementation of the one thing in aide that writes to
+ * history. It throws what `hold` throws, which is how both callers learn the
+ * checkout is busy.
+ */
+async function startCommit(opts: {
+  project: Project
+  sessionId: string | null
+  force: boolean
+  push: boolean
+}): Promise<string> {
+  const { project, sessionId, force } = opts
+  // What the work was asked for, so the drafter can tell intent from incident.
+  // The conversation's opening message, now that there is no backlog row to
+  // carry it — which is the better source anyway: it is what you actually typed
+  // rather than a line somebody summarised it into. With no conversation there
+  // is no intent to give it, and the diff is the whole of what it has to go on.
+  const opening = sessionId
+    ? (await listConversations(project)).find((c) => c.sessionId === sessionId)
+    : undefined
+  // Read on the press rather than cached from when the project was added: the
+  // checks live in the repository, so a run that added one has changed the gate
+  // it is about to be measured by, and reading a copy from boot would apply the
+  // old gate to the diff that changed it.
+  //
+  // Passed as the READER rather than the answer, for the same reason one step
+  // further in: the commit's own repair attempt can edit `.aide/project.md`, so
+  // even a read taken on the press is stale by the time the retry runs. See
+  // `verify` in `CommitWorkingTreeOptions`.
+  const readVerify = async () => (await readProjectDoc(repoOf(project))).verify
+  // Before the hold rather than inside the run: it is one more remote read, a
+  // commit does not create an upstream so the answer cannot go stale in between,
+  // and asking only when the box is ticked keeps it off the path of every commit
+  // that is not pushing.
+  const hasUpstream = opts.push ? (await repo.pending(repoOf(project))).ahead !== null : false
+  // Throws if another conversation holds the checkout, with that conversation's
+  // name in it.
+  return chat.hold({
+    project,
+    sessionId,
+    text: "committing what is uncommitted",
+    model: CONFIG.helperModel,
+    work: (run) =>
+      commitWorkingTree({
+        project,
+        sessionId,
+        request: opening?.firstPrompt ?? "",
+        verify: readVerify,
+        push: opts.push,
+        hasUpstream,
+        force,
+        // One go at whatever the checks refused, run as a turn in the
+        // conversation this commit is attributed to — which is where its
+        // reasoning and its diff have to be readable, and the only place there
+        // is to put them. A commit pressed with no chat open gets no attempt
+        // and refuses exactly as it always did.
+        //
+        // `run.runId` rather than a fresh one: it keeps the fix inside the run
+        // the browser is already watching, and inside the lock, so nothing can
+        // be admitted into the checkout between the failure and the retry.
+        //
+        // Effort is not read from anywhere. There is nowhere honest to read it
+        // from — it is a per-turn choice in the composer, not conversation
+        // state — and `high` is what that composer defaults to.
+        repair: sessionId
+          ? (request) =>
+              chat.turnUnderHold({
+                runId: run.runId,
+                project,
+                sessionId,
+                text: request,
+                effort: "high",
+              })
+          : null,
+        emit: run.emit,
+        delta: run.delta,
+        stopped: run.stopped,
+      }),
+  })
+}
+
 app.post(
   "/api/projects/:id/commit",
   withProject(async (project, req, reply) => {
@@ -693,12 +781,6 @@ app.post(
     // only ever reaches a trailer and a lookup, so it needs no more shape than
     // this.
     const sessionId = typeof body.sessionId === "string" && body.sessionId ? body.sessionId : null
-    const force = body.force === true
-    // Chained onto this press rather than a setting, and INSIDE the same run: the
-    // checkbox says "and send it", which is a thing this press does, not a mode
-    // the project is in. It runs after the commit and only if the commit happened,
-    // so a refused gate never pushes.
-    const alsoPush = body.push === true
 
     // Committing underneath a working agent races its next write, and the diff
     // would be a half-finished turn. `hold` refuses the whole project below; this
@@ -707,78 +789,81 @@ app.post(
       return reply.code(409).send({ message: "a turn is still in flight for this conversation" })
     }
 
-    // What the work was asked for, so the drafter can tell intent from incident.
-    // The conversation's opening message, now that there is no backlog row to
-    // carry it — which is the better source anyway: it is what you actually typed
-    // rather than a line somebody summarised it into. With no conversation there
-    // is no intent to give it, and the diff is the whole of what it has to go on.
-    const opening = sessionId
-      ? (await listConversations(project)).find((c) => c.sessionId === sessionId)
-      : undefined
-    // Read on the press rather than cached from when the project was added: the
-    // checks live in the repository, so a run that added one has changed the gate
-    // it is about to be measured by, and reading a copy from boot would apply the
-    // old gate to the diff that changed it.
-    //
-    // Passed as the READER rather than the answer, for the same reason one step
-    // further in: the commit's own repair attempt can edit `.aide/project.md`, so
-    // even a read taken on the press is stale by the time the retry runs. See
-    // `verify` in `CommitWorkingTreeOptions`.
-    const readVerify = async () => (await readProjectDoc(repoOf(project))).verify
-    // Before the hold rather than inside the run: it is one more remote read, a
-    // commit does not create an upstream so the answer cannot go stale in between,
-    // and asking only when the box is ticked keeps it off the path of every commit
-    // that is not pushing.
-    const hasUpstream = alsoPush ? (await repo.pending(repoOf(project))).ahead !== null : false
     try {
-      // Throws if another conversation holds the checkout, with that
-      // conversation's name in it.
-      const runId = chat.hold({
+      const runId = await startCommit({
         project,
         sessionId,
-        text: "committing what is uncommitted",
-        model: CONFIG.helperModel,
-        work: (run) =>
-          commitWorkingTree({
-            project,
-            sessionId,
-            request: opening?.firstPrompt ?? "",
-            verify: readVerify,
-            push: alsoPush,
-            hasUpstream,
-            force,
-            // One go at whatever the checks refused, run as a turn in the
-            // conversation this commit is attributed to — which is where its
-            // reasoning and its diff have to be readable, and the only place there
-            // is to put them. A commit pressed with no chat open gets no attempt
-            // and refuses exactly as it always did.
-            //
-            // `run.runId` rather than a fresh one: it keeps the fix inside the run
-            // the browser is already watching, and inside the lock, so nothing can
-            // be admitted into the checkout between the failure and the retry.
-            //
-            // Effort is not read from anywhere. There is nowhere honest to read it
-            // from — it is a per-turn choice in the composer, not conversation
-            // state — and `high` is what that composer defaults to.
-            repair: sessionId
-              ? (request) =>
-                  chat.turnUnderHold({
-                    runId: run.runId,
-                    project,
-                    sessionId,
-                    text: request,
-                    effort: "high",
-                  })
-              : null,
-            emit: run.emit,
-            delta: run.delta,
-            stopped: run.stopped,
-          }),
+        force: body.force === true,
+        // Chained onto this press rather than a setting, and INSIDE the same
+        // run: the checkbox says "and send it", which is a thing this press
+        // does, not a mode the project is in. It runs after the commit and only
+        // if the commit happened, so a refused gate never pushes.
+        push: body.push === true,
       })
       return { runId }
     } catch (err) {
       return reply.code(409).send({ message: err instanceof Error ? err.message : String(err) })
     }
+  }),
+)
+
+/**
+ * Commit a turn's work without being asked, when the project is set to.
+ *
+ * Registered on the lane rather than polled, and it runs AFTER the turn has let
+ * go of the checkout — see `onProjectIdle`, which is only called for a chat turn
+ * ending, so a commit cannot trigger another one.
+ *
+ * Everything it skips is deliberate. It never pushes: sending work off the
+ * machine on a timer is a different promise from committing it locally, and the
+ * checkbox that does push is read at the moment of a press for exactly that
+ * reason. It never forces: a tree that fails its checks stops and asks, the same
+ * as a pressed commit, because the brief's one-attempt-then-a-person rule is not
+ * about who pressed the button. And it does not tick the chat off — that is the
+ * second gate, and it is yours.
+ *
+ * Failures are swallowed to a log line. This is a convenience hanging off the
+ * end of a turn that already succeeded; the tree is still dirty, the rail still
+ * says so, and the button still works.
+ */
+chat.onProjectIdle = (projectId, sessionId) => {
+  void (async () => {
+    try {
+      if (!(await autoCommitEnabled(projectId))) return
+      const project = await getProject(projectId)
+      if (!project) return
+      // Nothing to commit is the common case — most turns are questions. Asked
+      // before taking the lock so a read-only turn costs one `git status` rather
+      // than a run somebody has to watch start and stop.
+      const pending = await repo.pending(repoOf(project))
+      if (pending.files.length === 0) return
+      await startCommit({ project, sessionId, force: false, push: false })
+    } catch (err) {
+      // Including `hold` refusing because something else took the checkout in
+      // the moment between the release and here. That is a race with a correct
+      // outcome — the other thing is working, and the next turn to end will find
+      // the same uncommitted tree and try again.
+      app.log.warn({ err, projectId }, "auto-commit did not start")
+    }
+  })()
+}
+
+/**
+ * Whether this project commits its own work, and the switch for it.
+ *
+ * A GET and a POST rather than a field on the project, because it is machine
+ * state rather than a property of the repository — see `autoCommitEnabled`.
+ */
+app.get(
+  "/api/projects/:id/auto-commit",
+  withProject(async (project) => ({ enabled: await autoCommitEnabled(project.id) })),
+)
+app.post(
+  "/api/projects/:id/auto-commit",
+  withProject(async (project, req) => {
+    const on = (req.body as { enabled?: unknown } | null)?.enabled === true
+    await setAutoCommit(project.id, on)
+    return { enabled: on }
   }),
 )
 

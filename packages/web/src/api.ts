@@ -219,6 +219,20 @@ export const api = {
       body: JSON.stringify({ sessionId, force, push }),
     }),
   /**
+   * Whether this project commits its own work as turns finish, and the switch.
+   *
+   * Per project and machine-local — a habit of this checkout rather than a fact
+   * about the repository, so it lives beside the done-ticks and not in
+   * `.aide/project.md`.
+   */
+  autoCommit: (projectId: string) =>
+    call<{ enabled: boolean }>(`/api/projects/${projectId}/auto-commit`),
+  setAutoCommit: (projectId: string, enabled: boolean) =>
+    call<{ enabled: boolean }>(`/api/projects/${projectId}/auto-commit`, {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    }),
+  /**
    * Send the branch upstream, on its own.
    *
    * Not a run: one git call, no model, nothing to attribute, so it answers with

@@ -489,6 +489,36 @@ export function WallColumn({
    * brief's two-gates-into-one-button, which is not a simplification but the
    * removal of the review.
    */
+  /**
+   * Whether this project commits its own work as turns finish.
+   *
+   * Fetched once per column rather than polled: the daemon is the only writer
+   * and this browser is the only thing that changes it, so the optimistic set
+   * below is what the server is about to confirm rather than a guess.
+   */
+  const [autoCommit, setAutoCommit] = useState(false)
+  useEffect(() => {
+    let live = true
+    void api
+      .autoCommit(project.id)
+      .then((r) => live && setAutoCommit(r.enabled))
+      // Unreadable reads as OFF, which is the honest way round: it under-claims
+      // rather than implying work is being committed that is not. A daemon too
+      // old to know the route answers 404 and lands here.
+      .catch(() => live && setAutoCommit(false))
+    return () => {
+      live = false
+    }
+  }, [project.id])
+  const toggleAutoCommit = (on: boolean) => {
+    setAutoCommit(on)
+    void api.setAutoCommit(project.id, on).catch((err: unknown) => {
+      // Put it back, or the switch claims a setting the daemon does not have.
+      setAutoCommit(!on)
+      setError(err instanceof Error ? err.message : String(err))
+    })
+  }
+
   const commit = async (push: boolean) => {
     setCommitting(true)
     setError(null)
@@ -701,7 +731,13 @@ export function WallColumn({
           // is for is the last turn or two rather than the whole history.
           // Reading further back is what the panes are for, and the header still
           // goes there.
-          <Transcript events={events} live={liveText} tail={WALL_TAIL} scroller={body} />
+          <Transcript
+            events={events}
+            live={liveText}
+            busy={busy}
+            tail={WALL_TAIL}
+            scroller={body}
+          />
         )}
         </div>
 
@@ -753,6 +789,8 @@ export function WallColumn({
         blocked={gates.commit}
         busy={committing || (runId !== null && !finished && holder?.runId === runId)}
         onCommit={commit}
+        autoCommit={autoCommit}
+        onAutoCommit={toggleAutoCommit}
       />
     </section>
   )
@@ -1020,6 +1058,8 @@ function CommitFoot({
   blocked,
   busy,
   onCommit,
+  autoCommit,
+  onAutoCommit,
 }: {
   uncommitted: number
   /** null means no upstream, which is `publish branch` rather than nothing to do. */
@@ -1027,14 +1067,46 @@ function CommitFoot({
   blocked: string | null
   busy: boolean
   onCommit: (push: boolean) => void
+  /**
+   * This project commits each turn's work as it finishes.
+   *
+   * A setting rather than a habit — it persists and it acts on turns nobody is
+   * watching — so unlike `push` it is drawn even when there is nothing to
+   * commit. A switch that vanished on a clean tree could only be found by
+   * dirtying the repository first, which is the wrong way round for the control
+   * that decides whether the tree gets dirty at all.
+   */
+  autoCommit: boolean
+  onAutoCommit: (on: boolean) => void
 }) {
   const [push, setPush] = useState(false)
+  const auto = (
+    <label
+      className="flex shrink-0 cursor-pointer items-center gap-1 font-sans text-[10px] text-fg-dim hover:text-fg-muted"
+      title={
+        autoCommit
+          ? "Turns commit their own work as they finish. The checks still run and a failure still stops and asks — this skips the press, not the gate. It never pushes."
+          : "Commit each turn's work as it finishes, without being asked. The gate is unchanged: checks run, a failure stops and asks, and nothing is pushed."
+      }
+    >
+      <input
+        type="checkbox"
+        checked={autoCommit}
+        onChange={(e) => onAutoCommit(e.target.checked)}
+        className="size-3 accent-accent"
+      />
+      auto
+    </label>
+  )
   if (uncommitted === 0) {
     return (
       <div className="flex h-8 shrink-0 items-center gap-2 border-t border-line bg-chrome px-3 font-sans text-[11px] text-fg-dim">
         <Check className="size-3 text-ok" />
         nothing to commit
-        {ahead !== null && ahead > 0 && <span className="ml-auto">{ahead} to push</span>}
+        <span className="ml-auto flex items-center gap-2">
+          {ahead !== null && ahead > 0 && <span>{ahead} to push</span>}
+          {auto}
+        </span>
       </div>
     )
   }
@@ -1044,6 +1116,7 @@ function CommitFoot({
       <span className="min-w-0 flex-1 truncate font-sans text-[11px] text-fg-muted">
         {uncommitted} {uncommitted === 1 ? "file" : "files"}
       </span>
+      {auto}
       <label
         className="flex shrink-0 items-center gap-1 font-sans text-[10px] text-fg-dim"
         title="Push the branch after this commit lands"

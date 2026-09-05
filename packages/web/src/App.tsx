@@ -272,6 +272,38 @@ export function App() {
   }
 
   /**
+   * Whether this project commits its own work as turns finish.
+   *
+   * Fetched per project rather than polled: the daemon is the only writer that
+   * matters and this browser is the only one that changes it, so the optimistic
+   * set below is not a guess — it is what the server is about to confirm.
+   */
+  const [autoCommit, setAutoCommit] = useState(false)
+  useEffect(() => {
+    if (!projectId) return setAutoCommit(false)
+    let live = true
+    void api
+      .autoCommit(projectId)
+      .then((r) => live && setAutoCommit(r.enabled))
+      // A project whose setting cannot be read is one that is not auto-
+      // committing, which is the safe reading of an unknown: it under-promises
+      // rather than implying work is being committed that is not.
+      .catch(() => live && setAutoCommit(false))
+    return () => {
+      live = false
+    }
+  }, [projectId])
+  const toggleAutoCommit = (on: boolean) => {
+    if (!projectId) return
+    setAutoCommit(on)
+    void api.setAutoCommit(projectId, on).catch((err: unknown) => {
+      // Put the switch back, or it claims a setting the daemon does not have.
+      setAutoCommit(!on)
+      setError(err instanceof Error ? err.message : String(err))
+    })
+  }
+
+  /**
    * A chat's first turn has named its session, so the unsent record that was
    * standing in for it becomes that conversation.
    *
@@ -640,6 +672,8 @@ export function App() {
         // The same lock as a commit, and for the same reason: pushing while an
         // agent writes would send a branch whose tip is about to move.
         pushBlocked={commitBlocked}
+        autoCommit={autoCommit}
+        onAutoCommit={toggleAutoCommit}
       />
 
       {remote && (

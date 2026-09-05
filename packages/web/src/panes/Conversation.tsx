@@ -686,6 +686,7 @@ export function ConversationPane({
                 events={events}
                 onPermission={busy ? answer : undefined}
                 live={typing}
+                busy={busy}
                 tail={showAll ? undefined : VISIBLE_TAIL}
                 // So the question you are under can pin itself to the top edge of
                 // this box. It is the only thing in there that needs to know where

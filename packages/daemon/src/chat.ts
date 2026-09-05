@@ -312,6 +312,21 @@ export class ChatLane implements LiveChats {
     }
   }
 
+  /**
+   * Called once a CHAT turn has let go of a project, with the lock free.
+   *
+   * The seam auto-commit hangs off. It fires after `release()` rather than
+   * inside the turn for one load-bearing reason: a commit takes the lock, and
+   * taking it from inside the run that still holds it deadlocks the lane. So the
+   * hook is a notification that the checkout is now free, and whatever it starts
+   * queues for the lock like any other caller.
+   *
+   * Deliberately not called for a HELD run — `hold`'s own work, which is what a
+   * commit is. A commit that finished would otherwise trigger another one, and
+   * that one another, for as long as anything remained uncommitted.
+   */
+  onProjectIdle: ((projectId: string, sessionId: string | null) => void) | null = null
+
   #idleMs: number
   #closeGraceMs: number
 
@@ -1109,6 +1124,12 @@ export class ChatLane implements LiveChats {
       // for a fresh one. Local projects have no cache and this is a no-op.
       forgetConversations(worker.projectId)
       this.#armIdle(worker)
+      // Last, and only once the lock is genuinely free. A held run — a commit —
+      // returned above and never reaches here, so this fires for a CHAT turn
+      // ending and nothing else, which is what stops a commit triggering another
+      // commit. Errors are the hook's own to handle: a turn that succeeded must
+      // not be reported as failed because something downstream of it did not.
+      this.onProjectIdle?.(worker.projectId, worker.sessionId)
     }
     // The RECORD is what holds the project, so it waits. Nothing else can be let
     // into the checkout until this turn's boundary has been written from it.

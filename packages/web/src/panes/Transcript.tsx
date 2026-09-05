@@ -1546,6 +1546,7 @@ export function Transcript({
   events,
   onPermission,
   live,
+  busy,
   tail,
   scroller,
   children,
@@ -1555,6 +1556,21 @@ export function Transcript({
   onPermission?: (requestId: string, allowed: boolean) => void
   /** The reply being typed right now, if there is one. See `LiveText`. */
   live?: LiveText | null
+  /**
+   * The last turn is still running, so it has no answer yet.
+   *
+   * Separate from `live` and NOT derivable from it, which is the bug this exists
+   * to fix. `live` is the reply being TYPED, and it goes null in every gap
+   * between one block finishing and the next beginning — many times a turn. Read
+   * as "the turn is over" that made the transcript shake: whichever paragraph had
+   * landed last was promoted to the answer and lifted out of the fold, then
+   * swallowed back the moment another tool call arrived. Every new block surfaced
+   * as the final one in turn.
+   *
+   * A turn's own busy flag changes once at each end of a turn, which is what the
+   * fold boundary has to follow.
+   */
+  busy?: boolean
   /**
    * Render at most this many lines, counting back from the end.
    *
@@ -1577,9 +1593,9 @@ export function Transcript({
   // drawn. Slicing first would cut the unfolded list and then collapse what
   // survived, and a column asking for 60 lines would get however many a fold
   // happened to leave — the number would mean something different on every turn.
-  // `live` is the turn being typed right now, so its presence is what says the
-  // trailing calls are still the progress indicator rather than history.
-  const lines = useMemo(() => foldSteps(toLines(events, live), !!live), [events, live])
+  // `busy`, NOT `!!live`. See the prop: `live` empties between blocks, so using
+  // it here made the fold boundary jump on every one of those gaps.
+  const lines = useMemo(() => foldSteps(toLines(events, live), busy ?? false), [events, live, busy])
   const shown = tail !== undefined && lines.length > tail ? lines.slice(-tail) : lines
   /**
    * The transcript's own element, held as state rather than in a ref: it is not

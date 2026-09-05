@@ -953,6 +953,47 @@ console.log("\nfolding the derivation, not the answer")
     "a lone `committed a1b2c3d` loose in the transcript is the unmarked row this exists to stop",
   )
 
+  // The shake, pinned as a SEQUENCE rather than a single answer — which is the
+  // only way to see it. Every frame below is individually defensible; the bug
+  // was that consecutive frames disagreed about which row was the answer, so a
+  // paragraph was lifted out of the fold and swallowed back as the turn went.
+  //
+  // What caused it was upstream of this function: the caller passed `!!live`,
+  // and `live` is the reply being TYPED, which empties in the gap between one
+  // block and the next. So `live` went false mid-turn, the turn briefly counted
+  // as settled, and the newest prose was promoted. The lesson is the assertion:
+  // while a turn runs, NOTHING is ever the answer, whatever it has said so far.
+  const frames = [
+    [asked("go"), tool("Grep"), text("Confirmed.")],
+    [asked("go"), tool("Grep"), text("Confirmed."), tool("Bash")],
+    [asked("go"), tool("Grep"), text("Confirmed."), tool("Bash"), text("Also this.")],
+    [asked("go"), tool("Grep"), text("Confirmed."), tool("Bash"), text("Also this."), tool("Edit")],
+  ]
+  const promoted = frames.filter((f) =>
+    foldRows(f, true).some((r) => !r.folded && "kind" in r.row && r.row.kind === "text"),
+  )
+  check(
+    "no prose escapes the fold while the turn is running",
+    promoted.length === 0,
+    `${promoted.length} of ${frames.length} frames promoted one — a block lifted out and swallowed back is the shake`,
+  )
+  check(
+    "and the fold only ever grows across those frames",
+    frames.every((f, i) => {
+      const held = foldRows(f, true).find((r) => r.folded)
+      const before = i === 0 ? 0 : (foldRows(frames[i - 1] as typeof f, true).find((r) => r.folded)?.folded ? 1 : 0)
+      return before === 0 || (held?.folded === true && held.group.rows.length >= i + 1)
+    }),
+    "a fold that shrinks between frames has handed a row back to the transcript",
+  )
+  check(
+    "and the answer appears exactly once, at the end",
+    foldRows(frames[3] as (typeof frames)[0], false).filter(
+      (r) => !r.folded && "kind" in r.row && r.row.kind === "text",
+    ).length === 1,
+    "the same rows, settled — one answer, not one per block",
+  )
+
   // A live conversation is one running turn on top of finished ones, and the
   // finished ones must not be held hostage to it.
   const mixed = foldRows(

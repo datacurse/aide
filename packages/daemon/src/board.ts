@@ -31,6 +31,21 @@ import { NO_TURNS, type LiveChats } from "./sessions.js"
 interface ProjectBoard {
   /** Session id to when it was ticked off. */
   done: Record<string, { at: number }>
+  /**
+   * Commit this project's work as soon as a turn leaves it dirty.
+   *
+   * Off by default and per project, because it trades away the brief's first
+   * gate — you read the diff, then you commit it — and that is not a trade to
+   * make on somebody's behalf. What it does NOT trade away is the checks: an
+   * auto-commit runs the same gate a pressed one does, so a tree that fails
+   * still refuses and still asks. The second gate is untouched either way; a
+   * chat is finished when you tick it off, which nothing here does.
+   *
+   * It lives beside `done` rather than in `.aide/project.md` because it is a
+   * habit of this machine rather than a fact about the project — the same
+   * reasoning that keeps `done` out of the repo.
+   */
+  autoCommit?: boolean
 }
 
 /** `{ "<projectId>": { done } }` */
@@ -39,7 +54,8 @@ type LinkFile = Record<string, ProjectBoard>
 /** Tolerant on every field: this file is machine-local and hand-editable. */
 const boardFor = (links: LinkFile, projectId: string): ProjectBoard => {
   const held = links[projectId] as (ProjectBoard & { verdicts?: unknown }) | undefined
-  if (held?.done && typeof held.done === "object") return { done: held.done }
+  const auto = held?.autoCommit === true ? { autoCommit: true } : {}
+  if (held?.done && typeof held.done === "object") return { done: held.done, ...auto }
   // Written by an older aide, which stored `{ verdict, at }` per session under
   // three vocabularies in turn. Any of them meant the human had settled it, so
   // they all read back as done rather than being dropped on the floor.
@@ -49,9 +65,9 @@ const boardFor = (links: LinkFile, projectId: string): ProjectBoard => {
     for (const [sessionId, v] of Object.entries(legacy as Record<string, { at?: unknown }>)) {
       done[sessionId] = { at: typeof v?.at === "number" ? v.at : 0 }
     }
-    return { done }
+    return { done, ...auto }
   }
-  return { done: {} }
+  return { done: {}, ...auto }
 }
 
 async function readLinks(): Promise<LinkFile> {
@@ -121,6 +137,27 @@ async function checkpointNotice(project: Project, sessionId: string): Promise<st
   const found = await readCheckpoint(repoOf(project), sessionId).catch(() => null)
   if (!found) return null
   return `the tree as it was before this conversation is kept at ${found.ref} — undo with \`${restoreCommand(found.ref)}\``
+}
+
+// ---------------------------------------------------------------------------
+// Committing without being asked each time
+// ---------------------------------------------------------------------------
+
+/** Whether this project commits its own work as turns finish. */
+export async function autoCommitEnabled(projectId: string): Promise<boolean> {
+  return boardFor(await readLinks(), projectId).autoCommit === true
+}
+
+/** Turn it on or off. Read on every turn's end, so it takes effect immediately. */
+export async function setAutoCommit(projectId: string, on: boolean): Promise<void> {
+  const links = await readLinks()
+  const board = boardFor(links, projectId)
+  // Deleted rather than written false, so a project that never turned it on and
+  // one that turned it off read identically on disk.
+  if (on) board.autoCommit = true
+  else delete board.autoCommit
+  links[projectId] = board
+  await writeLinks(links)
 }
 
 /** Untick it, for when it was the wrong button. */

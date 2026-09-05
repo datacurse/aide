@@ -1085,5 +1085,50 @@ console.log("\nstopping a commit before it writes")
   )
 }
 
+console.log("\ncommitting without being asked each time")
+// The seam auto-commit hangs off, and the two properties that make it safe. It
+// is a hook rather than a poll, so what matters is WHEN it is called: after the
+// lock is free, and never for the commit's own run.
+{
+  const fired: Array<string | null> = []
+  lane.onProjectIdle = (_projectId, sessionId) => {
+    fired.push(sessionId)
+  }
+
+  await say(null, "a turn that changes something")
+  await settled(lane)
+
+  check(
+    "a finished chat turn announces the project is free",
+    fired.length === 1,
+    `${fired.length} — without this nothing downstream of a turn can act on it`,
+  )
+  check(
+    "and the lock really is free by then",
+    lane.holderFor(project.id) === null,
+    "a commit started from inside the run that still holds the lock deadlocks the lane",
+  )
+
+  // The failure that would otherwise be a loop: a commit is a held run, and if
+  // finishing one announced the project as idle it would start another, which
+  // would start another, for as long as anything remained uncommitted.
+  fired.length = 0
+  lane.hold({
+    project,
+    sessionId: "cccccccc-dddd-4eee-8fff-000000000000",
+    text: "committing what is uncommitted",
+    model: "helper-model",
+    work: async () => ({ costUsd: 0.01, modelUsage: {} }),
+  })
+  await settled(lane)
+  check(
+    "a commit does NOT announce it",
+    fired.length === 0,
+    `${fired.length} — a commit that triggered a commit is a loop with a model call in it`,
+  )
+
+  lane.onProjectIdle = null
+}
+
 console.log(`\n${failures === 0 ? "all checks passed" : `${failures} FAILED`}`)
 process.exit(failures === 0 ? 0 : 1)

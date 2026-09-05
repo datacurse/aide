@@ -125,6 +125,8 @@ export function PendingRail({
   onPush,
   pushing,
   pushBlocked,
+  autoCommit,
+  onAutoCommit,
 }: {
   projectId: string | null
   pending: GitPending | null
@@ -164,6 +166,15 @@ export function PendingRail({
   pushing: boolean
   /** Why a push cannot happen from here, or null. Same contract as `commitBlocked`. */
   pushBlocked: string | null
+  /**
+   * This project commits each turn's work as it finishes.
+   *
+   * A SETTING, unlike the "and push" checkbox below — it persists per project
+   * and acts on turns nobody is watching, which is why it is drawn in the header
+   * rather than beside the button it automates.
+   */
+  autoCommit: boolean
+  onAutoCommit: (on: boolean) => void
 }) {
   const files = pending?.files ?? []
   /**
@@ -186,7 +197,33 @@ export function PendingRail({
           to reconcile. The sentence wins because it is the copy that also names
           the branch and what to do about it; the badge could only ever be the
           number. */}
-      <PaneHeader title="uncommitted" />
+      {/* The auto-commit switch lives in the HEADER, not beside the button, and
+          the difference from "and push" is the whole reason. That checkbox is
+          read at the moment of a press and stored nowhere — a habit. This is a
+          setting: it persists, it acts when nobody is looking, and it changes
+          what happens after turns you have not sent yet. Something that survives
+          a reload has to be visible without one, so it sits with the pane's
+          identity rather than under the verb it modifies. */}
+      <PaneHeader title="uncommitted">
+        {projectId && (
+          <label
+            className="flex cursor-pointer select-none items-center gap-1 text-[10px] text-fg-dim hover:text-fg-muted"
+            title={
+              autoCommit
+                ? "Turns commit their own work when they finish. The checks still run, and a failure still stops and asks — this skips the press, not the gate. It never pushes."
+                : "Commit each turn's work as it finishes, without being asked. The gate is unchanged: checks run, a failure stops and asks, and nothing is pushed."
+            }
+          >
+            <input
+              type="checkbox"
+              className="accent-accent"
+              checked={autoCommit}
+              onChange={(e) => onAutoCommit(e.target.checked)}
+            />
+            auto
+          </label>
+        )}
+      </PaneHeader>
 
       {error && (
         <div className="shrink-0 border-b border-line px-3 py-1 font-sans text-[11px] text-err">
