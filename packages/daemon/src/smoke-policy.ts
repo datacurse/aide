@@ -750,12 +750,11 @@ console.log("\nfolding the derivation, not the answer")
     rows.flatMap((r) => (r.folded ? r.group.rows : [r.row]))
 
   const think = (t: string) => ({ kind: "thinking", text: t })
+  const asked = (t: string) => ({ kind: "user", text: t })
 
-  // The shape a real turn has, and the one the first version got wrong: prose
-  // BETWEEN the calls, not only at the end. Folding by "consecutive tool calls"
-  // broke on every one of these paragraphs and produced a dozen small folds with
-  // narration between them — more rows than it removed.
+  // The shape a real turn has: prose BETWEEN the calls, not only at the end.
   const turn = [
+    asked("remove the steer correction"),
     think("planning"),
     tool("Grep"),
     text("Confirmed — the loader never reads it. Let me build and verify what that leaves behind."),
@@ -774,6 +773,11 @@ console.log("\nfolding the derivation, not the answer")
     `${one.filter((r) => r.folded).length} folds — a fold per burst is the transcript with extra clicks in it`,
   )
   check(
+    "the question it answers stays out of the fold",
+    one[0]?.folded === false && "kind" in one[0].row && one[0].row.kind === "user",
+    "the ask is what a fold hangs under — burying it leaves a collapsed row explaining nothing",
+  )
+  check(
     "and the answer is the last thing the turn said",
     one.some(
       (r) => !r.folded && "text" in r.row && r.row.text.startsWith("The approach now rides"),
@@ -789,6 +793,35 @@ console.log("\nfolding the derivation, not the answer")
     "what follows the answer stays out of the fold",
     one.at(-1)?.folded === false,
     "the outcome line is structural — folding it would hide how the turn ended",
+  )
+
+  // The case the old rules had no concept of, and the reason the unit is the
+  // turn: a conversation is many of these, and each one gets its own fold and
+  // its own answer. Folding by content rather than by the ask cannot express
+  // this at all — it sees one long stream and picks one boundary in it.
+  const conversation = [
+    asked("first thing"),
+    tool("Grep"), tool("Bash"), think("hm"),
+    text("Done, the first one is fixed."),
+    asked("second thing"),
+    tool("Edit"), tool("Bash"), think("checking"),
+    text("Done, and the second one too."),
+  ]
+  const many = foldRows(conversation, false)
+  check(
+    "each question gets its own fold",
+    many.filter((r) => r.folded).length === 2,
+    `${many.filter((r) => r.folded).length} folds for 2 questions`,
+  )
+  check(
+    "and its own answer",
+    many.filter((r) => !r.folded && "kind" in r.row && r.row.kind === "text").length === 2,
+    "one turn's answer is not the next turn's — a single boundary over the whole log conflates them",
+  )
+  check(
+    "a turn's work never crosses into the one before it",
+    many.every((r) => !r.folded || r.group.rows.length === 3),
+    "3 rows apiece — a fold that swallowed a user message would hold six",
   )
 
   // The property that makes every other one safe.
@@ -826,29 +859,64 @@ console.log("\nfolding the derivation, not the answer")
     "a fold the same height as the row it replaces has traded readability for a click",
   )
 
-  // A turn with no prose at all — it happens when a turn is cut short. There is
-  // no answer to keep out, and folding everything would leave a row saying only
-  // that something happened.
-  const silent = foldRows([tool("Grep"), tool("Bash"), { kind: "outcome" }], false)
+  // A turn with no prose at all — cut short, or interrupted. It still folds,
+  // because the fold hangs off the ASK rather than off the answer: work you
+  // requested is work that collapses, whether or not anything was said at the
+  // end of it. The outcome line stays out, so how it ended is still on screen.
+  const silent = foldRows(
+    [asked("do it"), tool("Grep"), tool("Bash"), { kind: "outcome" }],
+    false,
+  )
   check(
-    "a turn that never answered is left readable",
-    silent.every((r) => !r.folded),
-    "with no closing prose there is nothing the fold could be hiding the derivation BEHIND",
+    "a turn that never answered still folds its work",
+    silent.filter((r) => r.folded).length === 1,
+    "the fold hangs off the question, so it does not need an answer to exist",
+  )
+  check(
+    "and how it ended is still visible",
+    silent.at(-1)?.folded === false,
+    "an interrupted turn with its outcome folded away is one you cannot tell from a finished one",
   )
 
+  // A live turn DOES fold — this is the change your eye caught. It used to fold
+  // nothing while running, so the split point crept down the screen as the turn
+  // went: `28 steps` with two calls hanging below it, then `31 steps` a moment
+  // later. Every frame was defensible and the boundary was never twice in the
+  // same place, which is unlearnable. Now the fold opens at the question and
+  // simply grows, so the only thing that moves is its own count.
+  const running = [asked("do the thing"), tool("Grep"), think("a"), tool("Bash"), text("so far")]
+  const inFlight = foldRows(running, true)
   check(
-    "a LIVE turn does not fold",
-    foldRows([tool("Grep"), think("a"), tool("Bash"), text("working on it")], true).every(
-      (r) => !r.folded,
-    ),
-    "those rows are the progress indicator — collapsing them blanks the screen while somebody watches",
+    "a live turn folds from the question down",
+    inFlight.filter((r) => r.folded).length === 1,
+    "a boundary that moves as the turn runs is one a reader cannot learn",
   )
   check(
-    "but the same turn folds once it is over",
-    foldRows([tool("Grep"), think("a"), tool("Bash"), text("working on it")], false).some(
-      (r) => r.folded,
+    "and claims no answer while it is still writing",
+    inFlight.every((r) => r.folded || !("text" in r.row) || r.row.kind === "user"),
+    "the prose arriving now is the turn in progress, not its conclusion",
+  )
+  check(
+    "the same turn yields its answer once it is over",
+    foldRows(running, false).some(
+      (r) => !r.folded && "text" in r.row && r.row.text === "so far",
     ),
-    "otherwise history would never collapse either",
+    "settled is what decides the answer, and it is decided once",
+  )
+
+  // A live conversation is one running turn on top of finished ones, and the
+  // finished ones must not be held hostage to it.
+  const mixed = foldRows(
+    [
+      asked("first"), tool("Grep"), tool("Bash"), text("first is done."),
+      asked("second"), tool("Edit"), tool("Read"),
+    ],
+    true,
+  )
+  check(
+    "an earlier turn keeps its answer while a later one runs",
+    mixed.some((r) => !r.folded && "text" in r.row && r.row.text === "first is done."),
+    "only the LAST turn is unsettled — the ones above it finished and are not going to change",
   )
 }
 

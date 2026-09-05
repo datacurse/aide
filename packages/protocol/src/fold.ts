@@ -21,21 +21,15 @@
 export const FOLD_FROM = 2
 
 /**
- * Rows that are the DERIVATION: everything the agent did on the way to an
+ * Rows that are the DERIVATION: everything the agent does on the way to an
  * answer. All of it folds.
  *
- * The first version asked instead whether a given block of prose was narration,
- * by LENGTH — under 120 characters folded, over it broke the run. That was the
- * wrong instrument, and the failure is worth keeping because it looked like a
- * near miss rather than a wrong idea. Length does not distinguish narration from
- * conclusion: a mid-turn paragraph explaining what a check printed is long AND
- * is derivation, so every one of them ended a run. What came out was a dozen
- * small folds separated by prose — "6 steps", two paragraphs, "4 steps" — which
- * is the transcript with extra clicks in it, not a summary of one.
- *
- * What actually marks the answer is POSITION, not size: it is the last thing the
- * turn says. So the rule inverted — instead of asking which prose is narration,
- * fold everything and keep the final block out. See `foldRows`.
+ * `text` is in here, which is the counter-intuitive one and the whole reason the
+ * fold works. An earlier version asked whether a given block of prose was
+ * narration by LENGTH — under 120 characters folded, over it did not — and that
+ * is the wrong instrument: a mid-turn paragraph explaining what a check printed
+ * is long AND is derivation. Prose is not special. Only its POSITION is, and
+ * `foldRows` decides that once per turn.
  */
 const DERIVATION = new Set(["tool", "thinking", "text"])
 
@@ -73,44 +67,52 @@ export interface FoldGroup<T> {
 export type Folded<T> = { folded: false; row: T } | { folded: true; group: FoldGroup<T> }
 
 /**
- * Fold a turn's derivation into one openable row, leaving the answer out.
+ * Fold each turn's derivation into one openable row, leaving its answer out.
  *
- * The shape this produces is the whole point: ONE fold, then the closing prose.
- * Not a fold per burst of tool calls — that was the first version, and against a
- * real transcript it produced a dozen small folds with paragraphs between them,
- * which is more rows to look at than it removed.
+ * The unit is the TURN, and that is the whole design: a question you asked opens
+ * a fold, everything the agent did in reply goes into it, and the last thing it
+ * said comes back out as the answer. One fold and one answer per thing you
+ * asked for, however long the turn ran and whatever it did in the middle.
  *
- * `liveTail` says the turn is still being written. There is no answer yet — the
- * prose arriving now is not a conclusion, it is the turn in progress — and the
- * tool rows are the only thing on screen saying it is going somewhere, so
- * nothing folds until it is over. That is the working bar's argument again.
+ * Two earlier rules are worth keeping as the reason this one is shaped like it
+ * is, because both looked reasonable and both produced a transcript that folded
+ * in places nobody could predict.
+ *
+ * (1) By CONSECUTIVE TOOL CALLS. Every paragraph between two calls ended a run,
+ * so a turn came out as a dozen small folds with prose between them — more rows
+ * to look at than it removed.
+ *
+ * (2) By the LAST PROSE BLOCK in the log, with a live turn folding nothing. That
+ * fixed the fragmentation and introduced a moving boundary: while a turn ran the
+ * fold covered whatever had happened so far and the newest rows hung outside it,
+ * so the split point crept down the screen as the turn went. Watched doing it —
+ * `28 steps` with two running calls and a paragraph below them, then `31 steps`
+ * a moment later. Nothing was wrong with any single frame; it just meant the
+ * reader could not learn where the boundary was, because it was never in the
+ * same place twice.
+ *
+ * The fix is to stop deriving the boundary from CONTENT and take it from
+ * STRUCTURE. A user message is an unambiguous, already-recorded fact about where
+ * a turn begins, so the fold opens there and the only question left is which row
+ * ends it — which is answered once, when the turn is over.
+ *
+ * `live` says the last turn is still being written. Its derivation still folds
+ * from the user message down; what it does NOT do is guess at an answer, since
+ * the prose arriving now is the turn in progress rather than its conclusion.
  */
-export function foldRows<T extends FoldableRow>(rows: T[], liveTail = true): Folded<T>[] {
-  // The answer is the LAST block of prose in the log — everything after it is
-  // structural (the outcome line, a checkpoint) and everything before it is how
-  // the agent got there. Found first, because the fold below is defined by where
-  // it is rather than by any property of the rows themselves.
-  //
-  // A live turn has no answer yet: the prose still being typed is the last block
-  // there is, and treating it as the conclusion would fold the tool rows that are
-  // the only thing on screen saying the turn is progressing.
-  let answer = -1
-  if (!liveTail) {
-    for (let i = rows.length - 1; i >= 0; i--) {
-      if (rows[i]?.kind === "text") {
-        answer = i
-        break
-      }
-    }
-  }
+export function foldRows<T extends FoldableRow>(rows: T[], live = true): Folded<T>[] {
+  // Where each turn starts: the row after a user message. A transcript that
+  // opens mid-conversation — the wall tails one — has no user row at the top, so
+  // index 0 starts a turn too, or the first turn on screen would never fold.
+  const starts: number[] = []
+  rows.forEach((row, i) => {
+    if (row.kind === "user") starts.push(i + 1)
+  })
+  if (starts[0] !== 0) starts.unshift(0)
 
   const out: Folded<T>[] = []
-  // ONE list, in the order the rows arrived. Accumulating calls and asides
-  // separately and re-joining them on flush is what reordered the transcript —
-  // see `FoldGroup`.
-  let run: T[] = []
 
-  const flush = () => {
+  const flush = (run: T[]) => {
     if (run.length >= FOLD_FROM) {
       out.push({
         folded: true,
@@ -123,23 +125,49 @@ export function foldRows<T extends FoldableRow>(rows: T[], liveTail = true): Fol
     } else {
       for (const r of run) out.push({ folded: false, row: r })
     }
-    run = []
   }
 
-  rows.forEach((row, i) => {
-    // Everything on the way to the answer folds together, whatever it is and
-    // however long it is — calls, reasoning, and the prose between them. One
-    // fold per turn is the whole point: a dozen small ones separated by
-    // paragraphs is the transcript with extra clicks in it.
-    if (i < answer && DERIVATION.has(row.kind)) {
-      run.push(row)
-      return
+  for (let s = 0; s < starts.length; s++) {
+    const from = starts[s] ?? 0
+    // Up to the next user message, or the end of the log.
+    const to = s + 1 < starts.length ? (starts[s + 1] ?? rows.length) - 1 : rows.length
+    if (from > 0 && rows[from - 1]?.kind === "user") {
+      out.push({ folded: false, row: rows[from - 1] as T })
     }
-    // Anything else — the answer, the outcome, a checkpoint, a permission
-    // prompt — ends the run and stands on its own.
-    flush()
-    out.push({ folded: false, row })
-  })
-  flush()
+
+    const turn = rows.slice(from, to)
+    if (turn.length === 0) continue
+
+    // The answer is the last prose block of a FINISHED turn. The final turn of a
+    // live transcript has not got one yet, so everything it has done so far
+    // folds and the fold simply grows — which is the stable thing to do, because
+    // the boundary above it never moves.
+    const settled = !live || s + 1 < starts.length
+    let answer = -1
+    if (settled) {
+      for (let i = turn.length - 1; i >= 0; i--) {
+        if (turn[i]?.kind === "text") {
+          answer = i
+          break
+        }
+      }
+    }
+
+    // Everything from the question to the answer folds, whatever it is: calls,
+    // reasoning, and the prose in between. A row that is neither derivation nor
+    // the answer — an outcome line, a checkpoint, a permission prompt — is
+    // structural and stands on its own wherever it falls.
+    let run: T[] = []
+    turn.forEach((row, i) => {
+      if (i !== answer && DERIVATION.has(row.kind)) {
+        run.push(row)
+        return
+      }
+      flush(run)
+      run = []
+      out.push({ folded: false, row })
+    })
+    flush(run)
+  }
   return out
 }

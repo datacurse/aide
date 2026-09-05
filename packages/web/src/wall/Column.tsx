@@ -21,7 +21,7 @@ import {
   useUnstartedChats,
   type Draft,
 } from "../drafts.js"
-import { CaretRight, Check, EyeSlash, GitCommit, Lock, X } from "../icons.js"
+import { ArrowDown, CaretRight, Check, EyeSlash, GitCommit, Lock, X } from "../icons.js"
 import { draftName } from "../naming.js"
 import { Transcript, type LiveText } from "../panes/Transcript.js"
 import { Button, heldBy, LOCKED } from "../ui.js"
@@ -29,6 +29,7 @@ import { readOpenChat, rememberProjectChat, watchOpenChats, type AppLocation } f
 import { useOnScreen } from "../useOnScreen.js"
 import { usePoll } from "../usePoll.js"
 import { useRunStream } from "../useRunStream.js"
+import { useStickToEnd } from "../useStickToEnd.js"
 
 /**
  * One project, as a column of the wall.
@@ -132,6 +133,11 @@ export function WallColumn({
    * reuse of `box`.
    */
   const body = useRef<HTMLDivElement>(null)
+  /**
+   * The content inside that scrollport, held as state so the follower learns
+   * when it appears — see `useStickToEnd` for why a ref cannot do this job.
+   */
+  const [inner, setInner] = useState<HTMLDivElement | null>(null)
   /**
    * Only a visible column polls. Not a nicety — it is what stops the request rate
    * being a function of how many projects you happen to have added. See
@@ -427,6 +433,24 @@ export function WallColumn({
     [busy, runId, draft.text, draft.thinking, draft.tools],
   )
 
+  /**
+   * The column follows a turn writing into it, exactly as the pane does.
+   *
+   * It did not before — the scroller was handed to `Transcript` purely so the
+   * pinned question had something to measure against, and nothing ever moved
+   * it. A turn streaming into a column wrote off the bottom of the box while
+   * the visible rows sat still, which reads as the column having frozen.
+   *
+   * Reset on the open chat and on the run, the same two the pane uses: picking a
+   * different chat, and a turn starting, are both you asking to see what is
+   * about to appear down there.
+   */
+  const { atEnd, toBottom } = useStickToEnd(body, inner, [
+    open.sessionId,
+    open.draftId,
+    runId,
+  ])
+
   const gates = projectGates({
     holder,
     uncommitted,
@@ -627,7 +651,15 @@ export function WallColumn({
       {/* The chat itself. Newest at the BOTTOM, like a conversation — the column
           is a thing you talk into, and a box at the foot with the newest turn
           far away at the top reads as two unrelated halves. */}
-      <div ref={body} className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
+      {/* `relative` so the jump pill below is positioned against the scrollport
+          rather than against the page. */}
+      <div ref={body} className="relative min-h-0 flex-1 overflow-y-auto px-2 py-2">
+        {/* The growing box, measured by the follower. A wrapper rather than the
+            scrollport itself because a ResizeObserver on an `overflow-y-auto`
+            element reports the VIEWPORT, which does not change as content
+            arrives — so the follow would never fire and a streaming turn would
+            write off the bottom, which is the bug this whole hook exists for. */}
+        <div ref={setInner}>
         {events.length === 0 ? (
           /*
            * An empty chat is not always an empty box, and conflating the two is
@@ -670,6 +702,24 @@ export function WallColumn({
           // Reading further back is what the panes are for, and the header still
           // goes there.
           <Transcript events={events} live={liveText} tail={WALL_TAIL} scroller={body} />
+        )}
+        </div>
+
+        {/* Only while the follow is paused: this is the way back into it. Shown
+            whenever you are scrolled up, running or not — a transcript you have
+            walked back through needs a way home whether or not a turn is
+            writing. Smaller and cornered tighter than the pane's, because a
+            column is a fifth of the width and the pane's pill would cover the
+            text it is offering to take you past. */}
+        {!atEnd && events.length > 0 && (
+          <button
+            type="button"
+            onClick={toBottom}
+            className="absolute right-2 bottom-2 z-10 flex items-center gap-1 rounded-full border border-line bg-chrome px-2 py-0.5 font-sans text-[10px] text-fg-muted shadow-lg hover:text-fg"
+          >
+            <ArrowDown className="size-2.5" />
+            latest
+          </button>
         )}
       </div>
 
