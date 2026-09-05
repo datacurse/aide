@@ -18,12 +18,11 @@ import { currentActivity, type RunEvent } from "@aide/protocol"
  * the component, and nothing outside this file needs it.
  */
 /**
- * The bar's line, from the same derivation the card uses.
+ * The bar's line.
  *
- * `currentActivity` lives in `protocol/card.ts` and is shared rather than
- * written twice here: the card at the top of the conversation and this bar at
- * the bottom describe the SAME live turn, and two implementations of "what is
- * happening" drift into two different answers on one screen.
+ * `currentActivity` lives in `protocol/activity-line.ts` rather than here, so
+ * `pnpm smoke` can assert the vocabulary — a React component cannot be. See
+ * `assertNarrationIsExhaustive` below for the half a test cannot catch.
  */
 function describeActivity(events: readonly RunEvent[], runId: string | null): string {
   if (!runId) return ""

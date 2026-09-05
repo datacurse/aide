@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
-  cardsForConversation,
   projectGates,
   type Attachment,
   type ChatMode,
@@ -20,7 +19,6 @@ import { useKeyed } from "../useKeyed.js"
 import { useRemembered } from "../useRemembered.js"
 import { useRunStream } from "../useRunStream.js"
 import { TYPING_KEY, useTyped } from "../typing.js"
-import { TurnCardRow } from "../TurnCard.js"
 import { CommitMessageDraft, Transcript, type LiveText } from "./Transcript.js"
 
 /**
@@ -475,33 +473,6 @@ export function ConversationPane({
   const truncating = !showAll && events.length > VISIBLE_TAIL
 
   /**
-   * The same events, one card per turn, oldest first.
-   *
-   * Split on `user.message`, NOT grouped by `runId`, and that is the whole
-   * correctness of this view. Grouping by run id is the obvious version and it
-   * draws ONE card for an entire conversation: only the live turn comes from a
-   * run log, and `sessions.ts` stamps every event it replays out of the session
-   * store with `runId: sessionId` — so 586 replayed messages share one id and
-   * reduce to a single row, with the turn that just ran beside it. Watched doing
-   * exactly that on a 587-message chat.
-   *
-   * A human message is what starts a turn in every source there is, which makes
-   * it the one boundary both halves agree on. Events before the first one — a
-   * `run.started` that beat its own prompt into the log — open an implicit turn
-   * rather than being dropped, because a card missing its first row reads as
-   * lost history.
-   *
-   * Keyed by the run id when there is a real one and by position otherwise. The
-   * replayed half has no distinct ids to offer, and reusing `sessionId` for
-   * every row would give React duplicate keys across the whole list.
-   *
-   * Oldest first, unlike `sortCards`, which is for the LIST across projects.
-   * Inside one conversation the order is the conversation's, and re-sorting a
-   * chat you are reading by urgency would move the turn under your cursor.
-   */
-  const cards = useMemo(() => cardsForConversation(events), [events])
-
-  /**
    * The reply being typed, handed to the transcript rather than rendered after
    * it, so that the finished copy of it lands in the same element. See
    * `LiveText`. A commit run is the exception: it streams a commit message, not
@@ -522,35 +493,6 @@ export function ConversationPane({
     (v): v is boolean => typeof v === "boolean",
   )
 
-  /**
-   * Cards, or the whole transcript.
-   *
-   * Remembered rather than per-conversation state, because it is a preference
-   * about how you read rather than a fact about one chat — the same argument the
-   * typewriter toggle above makes. It defaults to the TRANSCRIPT, which is the
-   * view that exists today: a new surface should have to earn its way to being
-   * the default, and switching everybody to a view whose parse rate is unknown
-   * would hide exactly the thing the first month is meant to measure.
-   */
-  const [cardView, setCardView] = useRemembered<boolean>(
-    "aide.cardView",
-    false,
-    (v): v is boolean => typeof v === "boolean",
-  )
-
-  /**
-   * Ticks the ages on the cards, once a minute.
-   *
-   * A minute rather than a second: the shortest unit a card prints is a minute
-   * after its first, so a faster clock would re-render the list to change
-   * nothing. The live turn's own seconds counter is the working bar's job.
-   */
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    if (!cardView) return
-    const timer = setInterval(() => setNow(Date.now()), 60_000)
-    return () => clearInterval(timer)
-  }, [cardView])
   /**
    * Both blocks paced, and paced separately.
    *
@@ -764,23 +706,6 @@ export function ConversationPane({
         {view && (
           <span className="font-sans text-[11px] text-fg-dim">{view.totalMessages} messages</span>
         )}
-        {/* The two readings of one conversation. Cards are what happened and
-            what to do about it; the transcript is how it happened. Offered only
-            when there is something to reduce — a chat with no runs of its own
-            has no cards to draw, and a toggle that switches to an empty pane
-            reads as a broken button rather than as an empty view. */}
-        {cards.length > 0 && (
-          <Button
-            onClick={() => setCardView(!cardView)}
-            title={
-              cardView
-                ? "Read the turns in full"
-                : "One card per turn: what happened, and what needs you"
-            }
-          >
-            {cardView ? "transcript" : "cards"}
-          </Button>
-        )}
         {/* Only for a conversation that has actually run. A chat with no
             session id has no event log to measure, and offering the button
             anyway would answer every press with the same empty document. */}
@@ -839,25 +764,6 @@ export function ConversationPane({
             // itself with `h-full`, which resolves against its parent and would
             // quietly become "as tall as the text" inside a wrapper.
             <div ref={setBody}>
-              {/* The simplified reading. Deliberately NOT a different scroller,
-                  a different pane or a different route: it is the same
-                  conversation, the same events and the same follow-to-the-end
-                  behaviour, reduced. Anything that made it a separate surface
-                  would mean two places for a live turn to arrive and one of them
-                  being wrong. */}
-              {cardView ? (
-                <div className="pt-1">
-                  {cards.map((card) => (
-                    <TurnCardRow
-                      key={card.runId}
-                      card={card}
-                      now={now}
-                      onOpen={() => setCardView(false)}
-                    />
-                  ))}
-                </div>
-              ) : (
-                <>
               {(truncating || view?.truncated) && (
                 <div className="mb-2 border-b border-line pb-2 text-center font-sans text-[11px] text-fg-dim">
                   {view?.truncated
@@ -888,8 +794,6 @@ export function ConversationPane({
                   <CommitMessageDraft text={draft.text} model={draftingCommit} />
                 ) : null}
               </Transcript>
-                </>
-              )}
             </div>
           )}
           {error && <p className="mt-2 font-sans text-[11px] text-err">{error}</p>}

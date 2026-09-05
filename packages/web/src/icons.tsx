@@ -148,60 +148,6 @@ export function Warning({ className }: IconProps) {
   )
 }
 
-/**
- * The four fields a turn writes about itself, as glyphs.
- *
- * These replaced the words `did` / `next` / `why` / `risk` in a label column.
- * Four repeated words down a list of cards is a lot of ink spent on furniture,
- * and at this size an icon is read as a category faster than a word is read as a
- * word — but only if the four are unmistakable from each other, which is what
- * picked these rather than the more literal options.
- *
- * `check-circle` for what happened, `arrow-right` for what to do next,
- * `lightbulb` for why, `warning-circle` for what to watch. The last two are
- * deliberately different OUTLINES — a bulb and a circle — because at 14px a
- * reader tells them apart by silhouette before colour, and two round glyphs
- * would need the colour to do the work the shape should.
- *
- * Every field also keeps its word on the row's `title`, so the legend is one
- * hover away rather than something to be memorised.
- */
-export function CheckCircle({ className }: IconProps) {
-  return (
-    <Icon
-      className={className}
-      d="M173.66,98.34a8,8,0,0,1,0,11.32l-56,56a8,8,0,0,1-11.32,0l-24-24a8,8,0,0,1,11.32-11.32L112,148.69l50.34-50.35A8,8,0,0,1,173.66,98.34ZM232,128A104,104,0,1,1,128,24,104.11,104.11,0,0,1,232,128Zm-16,0a88,88,0,1,0-88,88A88.1,88.1,0,0,0,216,128Z"
-    />
-  )
-}
-
-export function ArrowRight({ className }: IconProps) {
-  return (
-    <Icon
-      className={className}
-      d="M221.66,133.66l-72,72a8,8,0,0,1-11.32-11.32L196.69,136H40a8,8,0,0,1,0-16H196.69L138.34,61.66a8,8,0,0,1,11.32-11.32l72,72A8,8,0,0,1,221.66,133.66Z"
-    />
-  )
-}
-
-export function Lightbulb({ className }: IconProps) {
-  return (
-    <Icon
-      className={className}
-      d="M176,232a8,8,0,0,1-8,8H88a8,8,0,0,1,0-16h80A8,8,0,0,1,176,232Zm40-128a87.55,87.55,0,0,1-33.64,69.21A16.24,16.24,0,0,0,176,186v6a16,16,0,0,1-16,16H96a16,16,0,0,1-16-16v-6a16,16,0,0,0-6.23-12.66A87.59,87.59,0,0,1,40,104.49C39.74,56.83,78.26,17,125.88,16A88,88,0,0,1,216,104Zm-16,0a72,72,0,0,0-73.74-72c-39,.79-70.47,33.42-70.26,72.75a71.61,71.61,0,0,0,27.64,56.3A32,32,0,0,1,96,186v6h64v-6a32.12,32.12,0,0,1,12.47-25.35A71.65,71.65,0,0,0,200,104Z"
-    />
-  )
-}
-
-export function WarningCircle({ className }: IconProps) {
-  return (
-    <Icon
-      className={className}
-      d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Zm-8-80V80a8,8,0,0,1,16,0v56a8,8,0,0,1-16,0Zm20,36a12,12,0,1,1-12-12A12,12,0,0,1,140,172Z"
-    />
-  )
-}
-
 export function Minus({ className }: IconProps) {
   return (
     <Icon

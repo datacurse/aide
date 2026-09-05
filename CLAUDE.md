@@ -35,8 +35,7 @@ record. They are all rows in the same list, in that order of urgency.
 | The one turn aide knows how to ask for — `survey` | `packages/web/src/survey.ts` |
 | An event log rendered as a conversation | `packages/web/src/panes/Transcript.tsx` |
 | The block a turn writes about itself, and how it is read | `packages/protocol/src/summary.ts` |
-| A turn reduced to the facts you decide on | `packages/protocol/src/card.ts` |
-| That reduction drawn as one row | `packages/web/src/TurnCard.tsx` |
+| What a turn is doing right now, in one line | `packages/protocol/src/activity-line.ts` |
 | What is left to commit, and the two readings under it | `packages/web/src/panes/Pending.tsx` |
 | The project's files, one directory at a time | `packages/web/src/panes/Files.tsx` |
 | What kind of file a name is, and its colour | `packages/web/src/filetypes.ts` |
@@ -97,8 +96,11 @@ Decisions already taken, which are not gaps to fill:
   static import is hoisted and its output would print above `repo: <path>` — the
   run would still be correct and would read as though the sections had been
   shuffled. When changing any of this, the check that matters is that the
-  assertion count does not move: it was 334, and every one of the 325 that
-  predate this session still prints the same line.
+  assertion count does not fall: `pnpm smoke` prints 553 `ok` lines, and a
+  refactor that quietly drops some is the failure this number exists to catch.
+  It fell once on purpose — the card view was removed and took ~30 of its own
+  assertions with it, leaving the ten that cover `currentActivity`, which
+  outlived it.
 - **`taskId` is gone from the wire and kept in the session reader, and that is
   not an inconsistency.** They were two different fields wearing one name. The
   wire one — `run.started.taskId`, `RunAgentOptions.taskId` — was a required
@@ -283,35 +285,23 @@ Decisions already taken, which are not gaps to fill:
   projects is five turns written with one project in mind, and reviewing what
   comes back costs more than the typing saved. One send per chat, one commit per
   column.
-- **A column draws CARDS, and that is what makes the width work.** At 24rem a
-  transcript is unreadable — markdown, tool rows and code fences reflowing into a
-  gutter — and `reduceCard` already produces exactly the fixed, scannable set of
-  facts that fits. `TurnCardRow` is reused rather than narrowed into a copy,
-  because a second card drifts from `reduceCard`'s contract and the drift shows
-  up as the wall and the conversation disagreeing about one turn; it has a
-  `max-w` rather than a width, so it shrinks on its own. Reading a turn in full
-  means clicking through to the panes, which is the escape hatch and the division
-  of labour: the wall steers, the panes read. A column deliberately has no file
-  tree, no history and no graph — those answer "where am I", which is a question
-  you ask inside one project.
-- **A column FLIPS between cards and the transcript, and the flip is per column.**
-  `full` on the chat row, and `read the turn` on a card presses the same thing.
-  It used to navigate to the panes, which answered "was that card detailed
-  enough" by spending the entire page on one turn and putting you somewhere you
-  then had to find your way back from — a question that small should not cost the
-  view. Both readings now live in the column, and flipping back is one press.
-  Per COLUMN rather than per page, so reading one project in full leaves the
-  other four scanning; not remembered and not in the URL, because a preference
-  here means opening the wall tomorrow to five transcripts, which is exactly the
-  view cards exist to replace. It draws the panes' own `Transcript` rather than a
-  narrow copy — same argument as `TurnCardRow` — but `tail`ed to 60 lines against
-  the pane's 250, because a column is a fifth of the width and the flip is about
-  the turn you were just looking at. Reading further back is still the panes, and
-  the project name in the header still goes there; what changed is that it is no
-  longer the only way to see one turn's detail. The live reply is handed in as
-  `LiveText` so a turn arriving lands in the same element it will finish in, and
-  it is RAW here — the typewriter is a reading preference the panes carry, and a
-  column is a glance.
+- **A column draws the TRANSCRIPT, tailed — there is no reduced reading of a
+  turn any more.** There was one: a card per turn, a strip of facts off exit
+  codes and git with four model-written fields under it, drawn in the column and
+  offered as a toggle in the conversation pane. It is gone, removed on the
+  judgement that it compressed badly — you ended up seeing LESS, from a summary
+  that could be wrong, with the thing you actually wanted a click away. The cost
+  it was buying down was width, and the answer to width turned out to be `tail`
+  rather than compression: a column draws the panes' own `Transcript` at 60 lines
+  against the pane's 250, so what a column gives up is HISTORY, not detail.
+  Reading further back is the panes, and the project name in the header goes
+  there. The live reply is handed in as `LiveText` so a turn arriving lands in
+  the same element it will finish in, and it is RAW here — the typewriter is a
+  reading preference the panes carry, and a column is a glance. A column
+  deliberately has no file tree, no history and no graph — those answer "where am
+  I", which is a question you ask inside one project. What survived the card is
+  `currentActivity`, in `protocol/activity-line.ts`, which was always the working
+  bar's line rather than part of that view.
 - **The picker writes the store the PANES read, and that is the point of it.**
   `rememberProjectChat` and `readOpenChat` are the same per-project memory
   `useAppLocation` already kept for the four panes, so picking a chat on the wall
@@ -378,7 +368,8 @@ Decisions already taken, which are not gaps to fill:
   are doubly disqualified: they are polled per VISIBLE column, so ranking on them
   would reorder the page as you scrolled it. What is lost is that the urgent
   project is no longer leftmost, and that is answered without moving anything —
-  the column carries the holder dot and the card says `needs you`, and the
+  the column carries the holder dot and its transcript says what is happening,
+  and the
   dashboard is where the across-everything question belongs. A page you steer
   from cannot rearrange itself under the pointer.
 - **A column can FORGET its project, and the word is the design.** The ✕ on a
@@ -763,22 +754,23 @@ Decisions already taken, which are not gaps to fill:
   `pagehide` transaction is not guaranteed to commit. Looking at the code you
   loaded with until the turn is over is the price, and it is the cheap half of
   the trade.
-- **A conversation has two readings, and the card is three layers.** `cards` and
-  the transcript, toggled from the conversation's header. The card is one row per
-  turn — state, checks, diffstat, headline, next, age — and what makes it worth
-  trusting is where each field comes from. The DETERMINISTIC layer is most of it
-  and is computed by `reduceCard` off events that came from exit codes and git:
-  `verify.result` for the checks, `commit.landed` for the sha and the paths,
-  `run.finished` for the outcome, `permission.request` for whether it is blocked
-  on you. The MODEL layer is `turn.summary` and is deliberately four fields —
-  headline, next, intent, risk — which are the things only the turn knows. The
-  RAW layer is the transcript, which this replaces on screen and not on disk.
-  The rule that keeps them from collapsing is that nothing model-written may
-  assert pass/fail: a `status: ok` field would be a second, softer answer to a
-  question the exit codes have already answered hard, and the two would disagree
-  eventually, on the line a human reads first. `pnpm smoke` pins exactly that — a
-  summary claiming "all green, everything passed" over a failed check must not
-  move one field of what the card reports.
+- **A conversation has ONE reading, and that is the transcript. Cards were tried
+  and removed.** There was a second reading — `reduceCard` in
+  `protocol/card.ts` and `TurnCardRow` in the web package, a row per turn holding
+  state, checks, diffstat and the summary's four fields, toggled from the
+  conversation's header and the default on the wall. It was correct, it was
+  asserted against the real logs, and it was removed anyway, because the thing it
+  was for did not survive contact: a fixed handful of lines per turn showed LESS
+  than the transcript it replaced, and the compression was lossy in the direction
+  that matters — what you wanted was usually the part that had been reduced away,
+  one click behind a summary that could be wrong about it. Rebuilding it is not
+  a gap to fill. The layering argument it was built on was sound and is worth
+  keeping for whatever comes next: nothing model-written may assert pass/fail,
+  because a soft `status: ok` beside an exit code is a second answer to a
+  question already answered hard, and the two disagree eventually on the line a
+  human reads first. Two things outlived it — `currentActivity`, which was always
+  the working bar's, and the `aide-summary` block, which is still asked for,
+  still logged and still stripped at render.
 - **That block is text, not a tool call, and the reason is the lock.** The
   obvious design is a `submit_summary` tool the model must call last, which gets
   a validated object for free. `canUseTool` is awaited BEFORE the SDK runs a
@@ -796,109 +788,24 @@ Decisions already taken, which are not gaps to fill:
   mid-stream the closing fence has not arrived and the ordinary one matches
   nothing, leaving the reader watching the block's own field names type
   themselves out.
-- **A missing summary is drawn as missing.** A turn that writes no block gets a
-  visible gap rather than a fallback to the first line of its reply. Falling back
-  is friendlier and hides the parse rate, and this exists to change behaviour —
-  so for the first stretch the ugly version is the useful one, because it says
-  how often the model complies, which is the number that decides whether the
-  layer is worth keeping. For the same reason the event is logged from day one
-  whether or not every field is drawn: in a few weeks the question "which of
-  these four did I ever actually read" is answerable from the logs, and cutting
-  the rest is then a measurement rather than a matter of taste. The precedent is
-  the dashboard — its first version was correct, every figure a sum, and nearly
-  useless, and the fix was reading the log bodies.
-- **A card is one TURN, split on `user.message` — never grouped by `runId`.**
-  The obvious grouping is by run id and it draws ONE card for a whole
-  conversation, which is what reached the screen: only the live turn comes from
-  a run log, and `sessions.ts` stamps every event it replays out of the SDK's
-  session store with `runId: sessionId` and `ts: 0`, so hundreds of replayed
-  messages share a single id. A 587-message chat rendered as a single row. Two
-  more consequences of that same seam, both of which had to be fixed before the
-  view was usable: a replayed turn has no `run.finished` — that event is aide's
-  own — so a reduction trusting its events reports every past turn as still
-  working, a chat of thirty spinning rows in which the one that IS running
-  cannot be found; and `ts: 0` subtracted from now prints an age of 20700d.
-  Hence `reduceCard`'s `settled`, passed by the caller rather than inferred from
-  a missing outcome, because "no outcome" genuinely means two different things
-  and only the caller knows which source it read. `cardsForConversation` lives
-  in `protocol` rather than in the component so `pnpm smoke` can assert the
-  split; a React component cannot be. The lesson is the one below, again: this
-  typechecked, built, and was wrong in the only way that mattered.
-- **`blocked` means still waiting, not "ended with a question open".** Both
-  corrections to `reduceCard` came from running it over the 742 real logs on this
-  machine rather than from reading it, and neither was visible in a hand-built
-  test. (1) The first version let an unanswered `permission.request` outrank
-  everything, which put two runs at the top of the worklist as "needs you" with
-  wall times of 44 HOURS — both killed by a daemon restart with a question still
-  open. Nobody can answer a request whose run is gone: the `resolve` it would
-  call is in a process that no longer exists, so it is a needs-you row no action
-  can clear, which teaches you to ignore the column. A dead run holding a
-  question is `failed`. (2) The card took the LAST terminal event; three logs
-  carry a `success` followed by a `cancelled` from before `EventLog` sealed them,
-  and reported as failures — while the transcript beside them, which already
-  drops the redundant second, said they succeeded. Two views of one file
-  disagreeing is the bug, so the first outcome wins in both. The general lesson
-  is the dashboard's: run a new reducer over the real corpus before trusting it,
-  because the interesting inputs are the ones nobody would think to write down.
-- **The card's fields are LABELLED, and that was the fix for "which line is
-  what".** The first version stacked headline, next, intent and risk as four bare
-  paragraphs at one indent, told apart only by colour — and a colour code only
-  works on a reader who already knows it, which the reader of a new view by
-  definition does not. It read as an undifferentiated wall. Now each names its
-  role in a fixed left column (`did` / `next` / `why` / `risk`) and the values
-  all start at the same x; colour is reinforcement rather than the carrier. The
-  column is a fixed width, not `auto`: `auto` is measured per grid, so a card
-  whose longest label is `next` would indent differently from one whose longest
-  is `risk` and the list would ripple as you scrolled. The card reads as three
-  bands with different provenance — the facts strip off exit codes and git, the
-  question behind a quote rule, then the model's labelled fields — and the state
-  glyph carries its WORD, because a bare icon asks the reader to know a legend
-  nobody gave them.
-- **A running card names its step, and clocks THAT step.** The card of a live
-  turn was a spinner and a total elapsed time, which answers "is it still going"
-  rather than the question actually being asked, which is "is it still going
-  SOMEWHERE" — a number that only counts up looks identical whether the agent is
-  working through files or wedged on a call that will never return. So
-  `TurnCard.activity` carries the current step's label and the stamp of the event
-  that OPENED it: a clock that keeps resetting is visible progress, one sitting
-  at 4m is worth interrupting. It reports the OLDEST open call rather than the
-  newest, because one message opens several at once and taking the newest resets
-  the clock on every batch, hiding the stall this exists to show. The derivation
-  is `currentActivity` in `protocol/card.ts` and the working bar shares it rather
-  than keeping its own copy — two implementations of "what is happening" drift,
-  and the drift shows up as the bar and the card above it disagreeing about one
-  live turn. A Bash label drops its leading `cd <root>;` and `VAR=value`
-  prefixes: nearly every command in this project's logs opens with 34 identical
-  characters, so the truncated line read the same for a typecheck, a build and a
-  smoke run — the one distinction it exists to draw.
-- **The card's fields are glyphs, and it took three passes to get there.** First
-  version: four bare paragraphs at one indent, told apart only by colour, which
-  only works on a reader who already knows the code. Second: each role named in a
-  word (`did` / `next` / `why` / `risk`), which fixed the ambiguity and spent
-  four repeated words per card on furniture. Now a Phosphor glyph opens each row
-  — `check-circle`, `arrow-right`, `lightbulb`, `warning-circle` — with the word
-  on the row's `title`, so the legend is a hover away rather than memorised. The
-  two that could be confused are deliberately different SILHOUETTES rather than
-  two circles, because at this size shape is read before colour. The card is a
-  real card: its own surface, a rounded border and a `max-w`, because lines that
-  run the full width of the pane are not scannable and the thing being built is a
-  scan.
-- **A harness line does not open a turn.** The CLI writes `[Image: original
-  2560x1259…]` as its own user message directly AFTER the question a screenshot
-  was pasted with, so treating every `user.message` as a boundary cut the
-  question away from its answer: one card holding a prompt with no reply, the
-  next holding a reply captioned with image dimensions — which reads as the model
-  having ignored you. `isHarnessPrompt` keeps those out of the split, and the
-  leftover rule drops a turn opened by nothing but bookkeeping that then produced
-  nothing either (a bare "Continue from where you left off."). Filtered on having
-  NOTHING TO SHOW rather than on the text, so the same nudge keeps its card when
-  the turn actually did work. On this conversation it took 11 cards to 7 and gave
-  three answers back to the questions they belonged to.
-- **Cost and turn count are not on the card.** They were on the first sketch and
-  they are the two numbers nobody acts on mid-review — the brief already says a
-  cost figure is an estimate never to be trusted. A card whose every field has to
-  change a decision has no room for one that cannot; both are in the profile, one
-  press away, which is where they were being read anyway.
+- **The working bar names its STEP, and clocks that step.** A spinner and a total
+  elapsed time answers "is it still going" rather than the question actually
+  being asked, which is "is it still going SOMEWHERE" — a number that only counts
+  up looks identical whether the agent is working through files or wedged on a
+  call that will never return. So `currentActivity` returns the current step's
+  label and the stamp of the event that OPENED it: a clock that keeps resetting
+  is visible progress, one sitting at 4m is worth interrupting. It reports the
+  OLDEST open call rather than the newest, because one message opens several at
+  once and taking the newest resets the clock on every batch, hiding the stall
+  this exists to show. A Bash label drops its leading `cd <root>;` and
+  `VAR=value` prefixes: nearly every command in this project's logs opens with 34
+  identical characters, so the truncated line read the same for a typecheck, a
+  build and a smoke run — the one distinction it exists to draw. It lives in
+  `protocol/activity-line.ts` rather than in the component so `pnpm smoke` can
+  assert the vocabulary; a React component cannot be. The half a test cannot
+  catch is `assertNarrationIsExhaustive` in `Working.tsx` — the derivation ends
+  in a fallback, so a new event type would otherwise be narrated as "Thinking"
+  forever.
 - **A shell that reads a file is refused, and the refusal names the tool.** The
   system prompt had asked for Read/Grep/Glob over `cat`/`sed`/`grep` for a long
   time, with the measurement in it, and eight archived conversations then spent

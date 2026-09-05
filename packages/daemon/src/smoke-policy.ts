@@ -23,18 +23,15 @@ import { join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import {
   SUMMARY_FENCE,
-  cardsForConversation,
   chatModeFromSdk,
-  checkVerdict,
+  currentActivity,
   formatLocation,
   parseLocation,
   parseTurnSummary,
   PerProjectMemo,
   planChecks,
   projectGates,
-  reduceCard,
   restartDecision,
-  sortCards,
   splitHiddenColumns,
   stripPartialTurnSummary,
   stripTurnSummary,
@@ -636,380 +633,75 @@ console.log("\ncolumns the wall is not drawing")
   )
 }
 
-console.log("\na turn reduced to a card")
+console.log("\nwhat a turn is doing right now")
 {
-  // The card's contract: everything but the summary comes off exit codes and
-  // git, so nothing a model writes can contradict a check, a sha or an outcome.
+  // The working bar's line. There was a card view reduced from these same
+  // events; it was removed, and this is what survived it — see
+  // `protocol/activity-line.ts`.
   let seq = 0
   const ev = (body: RunEventBody, ts = 1000 + seq * 10): RunEvent =>
     ({ ...body, runId: "r1", seq: (seq += 1), ts }) as RunEvent
 
-  const done = reduceCard("r1", [
-    ev({ type: "user.message", text: "fix the poll" }),
-    ev({ type: "turn.summary", headline: "fixed it", next: "read the diff" }),
-    ev({ type: "verify.result", command: "pnpm typecheck", ok: true, exitCode: 0, durationMs: 5, output: "" }),
-    ev({ type: "verify.skipped", command: "pnpm build", reason: "web only" }),
-    ev({ type: "commit.landed", sha: "abc1234", paths: ["a.ts", "b.ts"] }),
-    ev({
-      type: "run.finished",
-      subtype: "success",
-      status: "success",
-      totalCostUsd: 1.5,
-      modelUsage: {},
-      numTurns: 4,
-      durationMs: 90,
-      permissionDenials: [],
-    }),
-  ])
-  check("a finished turn is done", done.state === "done", done.state)
-  check("the summary is carried", done.summary?.headline === "fixed it")
-  check("the checks are counted from events", done.checks.length === 2)
-  check("and the skipped one is IN the list", done.checks.some((c) => c.skipped), "a gate that quietly shrinks looks like one that broke")
-  check("the diffstat is the commit's paths", done.changed === 2)
-  check("and the sha came with it", done.sha === "abc1234")
-
-  const verdict = checkVerdict(done.checks)
-  check("the badge is green when nothing failed", verdict?.ok === true)
-  check("it counts what RAN, not what was listed", verdict?.ran === 1, String(verdict?.ran))
-  check("and says how many were skipped", verdict?.skipped === 1)
-  check("a turn that ran no checks gets no badge", checkVerdict([]) === null, "an empty badge on every row spends the best pixel saying nothing")
-
-  // A failed check must reach the badge even on a turn the SDK called a success:
-  // the commit gate refuses, the turn ends fine, and the card has to say so.
-  const broken = reduceCard("r2", [
-    ev({ type: "verify.result", command: "pnpm smoke", ok: false, exitCode: 1, durationMs: 5, output: "boom" }),
-    ev({
-      type: "run.finished",
-      subtype: "success",
-      status: "success",
-      totalCostUsd: 0,
-      modelUsage: {},
-      numTurns: 1,
-      durationMs: 5,
-      permissionDenials: [],
-    }),
-  ])
-  check("a failed check shows red", checkVerdict(broken.checks)?.ok === false)
-  check(
-    "even though the turn itself succeeded",
-    broken.state === "done",
-    "the check badge and the run outcome are different facts",
-  )
-
-  // Blocked means still waiting, and the AND with "not finished" is the whole
-  // rule. A LIVE run with an open question is the one thing on the list a person
-  // can act on.
-  const blocked = reduceCard("r3", [
-    ev({ type: "permission.request", requestId: "q1", name: "Bash", input: {} }),
-  ])
-  check("a live run with an open question needs you", blocked.state === "blocked", blocked.state)
-
-  // ...and a DEAD one does not, which is the correction real logs forced. Two
-  // runs on this machine died holding a question — killed by a daemon restart —
-  // and the first version put both at the top of the worklist as "needs you",
-  // 44 hours old. Nobody can answer a request whose run is gone: the `resolve`
-  // it would call is in a process that no longer exists. A needs-you row no
-  // action can clear teaches you to ignore the column.
-  const abandoned = reduceCard("r3b", [
-    ev({ type: "permission.request", requestId: "q1", name: "Bash", input: {} }),
-    ev({ type: "run.error", message: "worker exited" }),
-  ])
-  check(
-    "a dead run holding a question is failed, not needs-you",
-    abandoned.state === "failed",
-    `${abandoned.state} — a row nobody can clear is worse than no row`,
-  )
-  const answered = reduceCard("r4", [
-    ev({ type: "permission.request", requestId: "q1", name: "Bash", input: {} }),
-    ev({ type: "permission.resolved", requestId: "q1", allowed: true, reason: "" }),
-    ev({
-      type: "run.finished",
-      subtype: "success",
-      status: "success",
-      totalCostUsd: 0,
-      modelUsage: {},
-      numTurns: 1,
-      durationMs: 5,
-      permissionDenials: [],
-    }),
-  ])
-  check("an answered one is not", answered.state === "done", answered.state)
-
-  // A turn in flight is `working`, not `failed`. Asking for a card mid-turn is
-  // the normal case for the live view, and drawing a red X on the turn that is
-  // currently going fine is the same mistake the profile documents.
-  const live = reduceCard("r5", [ev({ type: "user.message", text: "go" })])
-  check("an unfinished turn is working", live.state === "working", live.state)
-  check("a cancelled one is not done", reduceCard("r6", [
-    ev({
-      type: "run.finished",
-      subtype: "interrupted",
-      status: "cancelled",
-      totalCostUsd: 0,
-      modelUsage: {},
-      numTurns: 1,
-      durationMs: 5,
-      permissionDenials: [],
-    }),
-  ]).state === "failed", "a stopped turn must not wear a green tick")
-
-  // The model gets no say in pass/fail. This is the assertion that catches the
-  // layers collapsing: a summary claiming success over a failed check must not
-  // change one field of what the card reports.
-  const lying = reduceCard("r7", [
-    ev({ type: "turn.summary", headline: "all green, everything passed" }),
-    ev({ type: "verify.result", command: "pnpm smoke", ok: false, exitCode: 1, durationMs: 5, output: "" }),
-    ev({
-      type: "run.finished",
-      subtype: "success",
-      status: "failed",
-      totalCostUsd: 0,
-      modelUsage: {},
-      numTurns: 1,
-      durationMs: 5,
-      permissionDenials: [],
-    }),
-  ])
-  check(
-    "a summary cannot talk a failed check green",
-    checkVerdict(lying.checks)?.ok === false && lying.state === "failed",
-    "the whole point of the three layers",
-  )
-
-  // A log with TWO terminal events, which is not hypothetical: three runs on
-  // this machine carry a `success` followed by a `cancelled`, from `#retire`
-  // writing over an outcome the turn had already reported before `EventLog`
-  // sealed logs. The first one is what the run actually said, and the transcript
-  // already drops the redundant second — a card reading the other end would
-  // disagree with the transcript beside it about a run both draw from one file.
-  const doubled = reduceCard("r8", [
-    ev({
-      type: "run.finished",
-      subtype: "success",
-      status: "success",
-      totalCostUsd: 2,
-      modelUsage: {},
-      numTurns: 3,
-      durationMs: 5,
-      permissionDenials: [],
-    }),
-    ev({
-      type: "run.finished",
-      subtype: "interrupted",
-      status: "cancelled",
-      totalCostUsd: 0,
-      modelUsage: {},
-      numTurns: 0,
-      durationMs: 0,
-      permissionDenials: [],
-    }),
-  ])
-  check(
-    "the first outcome wins, not the last",
-    doubled.state === "done",
-    `${doubled.state} — old logs carry a second terminal event that overwrote the real one`,
-  )
-  check("and its spend is not overwritten by the stray", doubled.costUsd === 2, String(doubled.costUsd))
-  check(
-    "a stray run.error after an outcome is ignored too",
-    reduceCard("r9", [
-      ev({
-        type: "run.finished",
-        subtype: "success",
-        status: "success",
-        totalCostUsd: 0,
-        modelUsage: {},
-        numTurns: 1,
-        durationMs: 5,
-        permissionDenials: [],
-      }),
-      ev({ type: "run.error", message: "transport died" }),
-    ]).state === "done",
-    "the transcript drops this one; the card has to agree",
-  )
-
-  // A turn read back from the SDK's session store, which is MOST of what the
-  // card view draws and is the case the first version got wrong end to end.
-  //
-  // `sessions.ts` stamps every replayed event with `runId: sessionId` and
-  // `ts: 0`, because the SDK envelope carries neither. Two consequences, both
-  // seen on screen before they were understood: grouping cards by run id drew
-  // ONE card for a 587-message conversation, and a card that trusts its events
-  // for an outcome reports every past turn as still working — a chat of thirty
-  // spinning rows, in which the one row that IS running cannot be found.
-  //
-  // `settled` is what the caller passes when it knows the source records no
-  // outcomes. Asserted here because the alternative — inferring it from a
-  // missing `run.finished` — silently turns the live turn into a finished one.
-  const replayed = reduceCard(
-    "session-id",
-    [
-      { type: "user.message", text: "what changed?", runId: "session-id", seq: 1, ts: 0 },
-      { type: "assistant.text", text: "this and that", parentToolUseId: null, runId: "session-id", seq: 2, ts: 0 },
-    ] as RunEvent[],
-    { settled: true },
-  )
-  check(
-    "a replayed turn is done, not forever working",
-    replayed.state === "done",
-    `${replayed.state} — the session store records no outcome, so the events cannot say`,
-  )
-  check("and it keeps the prompt, which is what the row is found by", replayed.prompt === "what changed?")
-  check(
-    "an unstamped turn reports no duration",
-    replayed.wallMs === 0,
-    "ts: 0 minus ts: 0 is not a measurement",
-  )
-  check(
-    "and without `settled` the same events are still working",
-    reduceCard("x", [{ type: "user.message", text: "hi", runId: "x", seq: 1, ts: 0 }] as RunEvent[]).state ===
-      "working",
-    "the live turn must not be swept up by the same rule",
-  )
-
-  // The split, over a conversation shaped exactly like the one the pane builds:
-  // replayed history (one shared runId, ts 0) followed by the live turn from a
-  // run log. This is the bug that reached the screen — grouping by run id drew
-  // ONE card for 587 messages, because every replayed event carries the session
-  // id as its run id.
-  const mixed = cardsForConversation([
-    { type: "user.message", text: "first question", runId: "sess", seq: 1, ts: 0 },
-    { type: "assistant.text", text: "first answer", parentToolUseId: null, runId: "sess", seq: 2, ts: 0 },
-    { type: "user.message", text: "second question", runId: "sess", seq: 3, ts: 0 },
-    { type: "assistant.text", text: "second answer", parentToolUseId: null, runId: "sess", seq: 4, ts: 0 },
-    { type: "user.message", text: "the live one", runId: "run-9", seq: 1, ts: 5000 },
-    { type: "assistant.text", text: "working on it", parentToolUseId: null, runId: "run-9", seq: 2, ts: 5100 },
-  ] as RunEvent[])
-  check(
-    "a conversation splits into one card per turn",
-    mixed.length === 3,
-    `${mixed.length} cards — grouping by runId gives 2, and by session id gives 1`,
-  )
-  check("each card keeps its own question", mixed[1]?.prompt === "second question", mixed[1]?.prompt)
-  check(
-    "the replayed turns read as finished",
-    mixed[0]?.state === "done" && mixed[1]?.state === "done",
-    `${mixed[0]?.state},${mixed[1]?.state} — a chat of spinning rows hides the one that is running`,
-  )
-  check(
-    "and the live one is still working",
-    mixed[2]?.state === "working",
-    `${mixed[2]?.state} — this is the row the view exists to show`,
-  )
-  check(
-    "the live card keeps its real run id",
-    mixed[2]?.runId === "run-9",
-    "the key has to be stable, and the replayed rows have no distinct id to offer",
-  )
-  check(
-    "and the replayed cards get distinct keys anyway",
-    mixed[0]?.runId !== mixed[1]?.runId,
-    "reusing the session id for every row is duplicate React keys across the list",
-  )
-  // Events before the first human message open a turn rather than vanishing: a
-  // `run.started` can beat its own prompt into the log.
-  const headless = cardsForConversation([
-    { type: "run.started", projectId: "p", model: "m", cwd: "/", sessionId: "s", runId: "r", seq: 1, ts: 10 },
-    { type: "user.message", text: "hello", runId: "r", seq: 2, ts: 20 },
-  ] as RunEvent[])
-  check(
-    "an event before the first prompt is not dropped",
-    headless.length === 2,
-    `${headless.length} — a card missing its opening row reads as lost history`,
-  )
-  check("an empty conversation is no cards", cardsForConversation([]).length === 0)
-
-  // The CLI writes an image caption as its own user message directly AFTER the
-  // question a screenshot was pasted with. Treating that as a turn boundary cuts
-  // the question away from its answer: one card holding a prompt with no reply,
-  // the next holding a reply captioned with image dimensions — which reads as
-  // the model having ignored you.
-  const pasted = cardsForConversation([
-    { type: "user.message", text: "why is this broken?", runId: "s", seq: 1, ts: 0 },
-    {
-      type: "user.message",
-      text: "[Image: original 2560x1259, displayed at 2000x984. Multiply coordinates by 1.28]",
-      runId: "s",
-      seq: 2,
-      ts: 0,
-    },
-    { type: "assistant.text", text: "because of X", parentToolUseId: null, runId: "s", seq: 3, ts: 0 },
-    { type: "turn.summary", headline: "fixed X", runId: "s", seq: 4, ts: 0 },
-  ] as RunEvent[])
-  check(
-    "a pasted screenshot does not split the turn it belongs to",
-    pasted.length === 1,
-    `${pasted.length} cards — the caption is the harness talking, not a new question`,
-  )
-  check(
-    "so the question keeps the answer it was asked with",
-    pasted[0]?.prompt === "why is this broken?" && pasted[0]?.summary?.headline === "fixed X",
-    `${pasted[0]?.prompt} :: ${pasted[0]?.summary?.headline}`,
-  )
-
-  // A resume nudge that produced nothing is not a row. Dropped on having nothing
-  // to show rather than on its text, so the same nudge KEEPS its card when the
-  // turn it opened actually did work.
-  const resumed = cardsForConversation([
-    { type: "user.message", text: "Continue from where you left off.", runId: "s", seq: 1, ts: 0 },
-    { type: "assistant.text", text: "ok", parentToolUseId: null, runId: "s", seq: 2, ts: 0 },
-  ] as RunEvent[])
-  check(
-    "an empty resume nudge is not a card",
-    resumed.length === 0,
-    `${resumed.length} — a row that says only that the harness spoke`,
-  )
-  const resumedWorked = cardsForConversation([
-    { type: "user.message", text: "Continue from where you left off.", runId: "s", seq: 1, ts: 0 },
-    { type: "turn.summary", headline: "finished the migration", runId: "s", seq: 2, ts: 0 },
-  ] as RunEvent[])
-  check(
-    "but one that did work keeps its card",
-    resumedWorked.length === 1,
-    "filtering on the sentence rather than on the content would lose this",
-  )
-
   // What a running turn says it is doing, and SINCE WHEN. The clock is the
   // point: an elapsed time measured from the start of the turn counts up at the
-  // same rate whether the agent is making progress or wedged, so the card
+  // same rate whether the agent is making progress or wedged, so the line
   // measures the current STEP instead and a step whose clock keeps resetting is
   // visible progress.
-  const running = reduceCard("r10", [
+  const running = currentActivity([
     ev({ type: "user.message", text: "go" }, 1000),
     ev({ type: "tool.start", toolUseId: "t1", name: "Bash", input: { command: "pnpm smoke" }, parentToolUseId: null }, 2000),
   ])
-  check("a running turn says what it is doing", running.activity?.label === "Running Bash pnpm smoke", running.activity?.label)
+  check("a running turn says what it is doing", running?.label === "Running Bash pnpm smoke", running?.label)
   check(
     "and the clock starts at that STEP, not at the turn",
-    running.activity?.since === 2000,
-    `${running.activity?.since} — 1000 would be the turn, which cannot distinguish progress from a stall`,
+    running?.since === 2000,
+    `${running?.since} — 1000 would be the turn, which cannot distinguish progress from a stall`,
   )
 
   // The OLDEST open call, not the newest. One message opens several at once, and
   // reporting the newest resets the clock every time a batch goes out — hiding
   // exactly the stall this exists to show.
-  const batch = reduceCard("r11", [
+  const batch = currentActivity([
     ev({ type: "tool.start", toolUseId: "a", name: "Bash", input: { command: "pnpm build" }, parentToolUseId: null }, 1000),
     ev({ type: "tool.start", toolUseId: "b", name: "Read", input: { file_path: "/x/y.ts" }, parentToolUseId: null }, 1100),
   ])
   check(
     "a batch reports the call that has been open longest",
-    batch.activity?.since === 1000 && batch.activity?.label.includes("pnpm build"),
-    `${batch.activity?.label} @ ${batch.activity?.since}`,
+    batch?.since === 1000 && batch.label.includes("pnpm build"),
+    `${batch?.label} @ ${batch?.since}`,
   )
+
   // A closed call stops being the answer, or the line names something that has
   // already returned.
-  const closed = reduceCard("r12", [
+  const closed = currentActivity([
     ev({ type: "tool.start", toolUseId: "a", name: "Bash", input: { command: "pnpm build" }, parentToolUseId: null }, 1000),
     ev({ type: "tool.end", toolUseId: "a", ok: true, summary: "" }, 1500),
   ])
-  check("a finished call is not still running", closed.activity?.label === "Thinking", closed.activity?.label)
+  check("a finished call is not still running", closed?.label === "Thinking", closed?.label)
+
+  // A pending permission outranks everything: nothing moves until it is answered.
+  const asking = currentActivity([
+    ev({ type: "tool.start", toolUseId: "a", name: "Bash", input: { command: "pnpm build" }, parentToolUseId: null }, 1000),
+    ev({ type: "permission.request", requestId: "q1", name: "Write", input: {} }, 1200),
+  ])
+  check(
+    "an open question outranks an open call",
+    asking?.label === "Waiting for you · Write" && asking.since === 1200,
+    `${asking?.label} @ ${asking?.since} — nothing moves until it is answered`,
+  )
+  check(
+    "and an answered one stops being the line",
+    currentActivity([
+      ev({ type: "permission.request", requestId: "q1", name: "Write", input: {} }, 1200),
+      ev({ type: "permission.resolved", requestId: "q1", allowed: true, reason: "" }, 1300),
+    ])?.label !== "Waiting for you · Write",
+  )
 
   // The boilerplate in front of a command comes off. Nearly every Bash call in
   // this project's logs opens `cd C:/Users/loki/code/aide; CI=true pnpm …` — 34
   // identical characters — so a truncated label read the same for a typecheck, a
   // build and a smoke run, which is the one distinction the line is for.
-  const shell = reduceCard("r13b", [
+  const shell = currentActivity([
     ev(
       {
         type: "tool.start",
@@ -1021,28 +713,26 @@ console.log("\na turn reduced to a card")
       1000,
     ),
   ])
-  check(
-    "a command loses its cd and env prefix",
-    shell.activity?.label === "Running Bash pnpm smoke",
-    shell.activity?.label,
-  )
+  check("a command loses its cd and env prefix", shell?.label === "Running Bash pnpm smoke", shell?.label)
 
-  // A path is reduced to its basename: the pane is a few hundred pixels wide and
+  // A path is reduced to its basename: the bar is a few hundred pixels wide and
   // a full absolute path pushes the tool's own name off the front of the line.
-  const reading = reduceCard("r13", [
-    ev({ type: "tool.start", toolUseId: "a", name: "Read", input: { file_path: "C:/Users/loki/code/aide/packages/protocol/src/card.ts" }, parentToolUseId: null }, 1000),
+  const reading = currentActivity([
+    ev({ type: "tool.start", toolUseId: "a", name: "Read", input: { file_path: "C:/Users/loki/code/aide/packages/protocol/src/events.ts" }, parentToolUseId: null }, 1000),
   ])
-  check("a file path is shown as its basename", reading.activity?.label === "Running Read card.ts", reading.activity?.label)
+  check("a file path is shown as its basename", reading?.label === "Running Read events.ts", reading?.label)
 
-  // A finished turn has no "now". Leaving it on would put a stale "Running pnpm
-  // smoke" under every completed card in the list.
-  check("a finished turn reports no activity", done.activity === null, "the question stops being asked once it is over")
-  check("but a blocked one still does", blocked.activity !== null, "a turn waiting on you is still live")
+  // A check with no result yet is the same idea for a commit run.
+  const checking = currentActivity([
+    ev({ type: "verify.started", command: "pnpm typecheck" }, 1000),
+  ])
+  check("a check in flight names itself", checking?.label === "Running pnpm typecheck", checking?.label)
 
-  // Needs-you, then working, then done — the list's grouping, as a sort.
-  const order = sortCards([done, live, blocked]).map((c) => c.state)
-  check("the list leads with what needs you", order[0] === "blocked", order.join(","))
-  check("and buries what is finished", order.at(-1) === "done", order.join(","))
+  check(
+    "a run with no events yet has no line",
+    currentActivity([]) === null,
+    "the caller decides what an unstarted turn says — `Sending` is a different statement",
+  )
 }
 
 console.log("\nnothing may stop for a human mid-turn")
@@ -1214,7 +904,7 @@ console.log("\nthe remote agent ships every file it imports")
   // leaving a machine with a new launcher and last release's sources. The worse
   // shape is the one that did not happen: had that name still existed, a missing
   // NEW file would have deployed cleanly and crashed on the far side's first
-  // turn with `cannot find module ./card.js`, which costs an ssh round trip and
+  // turn with `cannot find module ./gates.js`, which costs an ssh round trip and
   // a model call to discover.
   //
   // The manifest is derived from the barrel now, so what is worth asserting is

@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
-  cardsForConversation,
   projectGates,
   sortChats,
   type Attachment,
@@ -25,7 +24,6 @@ import {
 import { CaretRight, Check, EyeSlash, GitCommit, Lock, X } from "../icons.js"
 import { draftName } from "../naming.js"
 import { Transcript, type LiveText } from "../panes/Transcript.js"
-import { TurnCardRow } from "../TurnCard.js"
 import { Button, heldBy, LOCKED } from "../ui.js"
 import { readOpenChat, rememberProjectChat, watchOpenChats, type AppLocation } from "../useAppLocation.js"
 import { useOnScreen } from "../useOnScreen.js"
@@ -44,14 +42,15 @@ import { useRunStream } from "../useRunStream.js"
  * "where am I", which is a question you ask inside one project; the wall answers
  * "what is everything doing", which is the question none of the panes can.
  *
- * ## Cards, not the transcript, and that is the load-bearing choice
+ * ## The transcript, tailed
  *
- * At this width a transcript is unreadable — markdown, tool rows and code fences
- * all reflowing into a gutter. A card is already the fixed set of facts a turn
- * reduces to, already designed to be scanned, and already has its own surface.
- * `reduceCard` is what makes this page possible at all. Reading a turn in full
- * means clicking through to the panes, which is the escape hatch: the wall
- * steers, the panes read.
+ * A column draws the panes' own transcript rather than a reduction of it. There
+ * was one — a card per turn, four model-written fields over a strip of facts —
+ * and it was removed because compressing a turn to a fixed handful of lines lost
+ * more than the narrow column saved: you ended up reading less, from a summary
+ * that could be wrong, with the thing you wanted a click away. What a column
+ * gives up to width is HISTORY, not detail, so it is `tail`ed hard instead. The
+ * panes are still where a long chat is read, and the header still goes there.
  *
  * ## Why the picker writes the shared store
  *
@@ -92,31 +91,23 @@ const HANDOFF_MS = 1500
 const CONFIRM_MS = 4000
 
 /**
- * How many transcript lines a flipped column draws.
+ * How many transcript lines a column draws.
  *
  * Far shorter than the pane's 250. A column is a fifth of the width, so the same
- * events are several times the scroll, and the flip answers "was that card
- * enough" about the turn you were just looking at — not "what happened in this
- * chat last week", which is what the panes are for and what the header still
+ * events are several times the scroll, and what a column answers is "what is
+ * this project doing" about the turn in front of you — not "what happened in
+ * this chat last week", which is what the panes are for and what the header still
  * opens.
  */
 const WALL_TAIL = 60
 
 export function WallColumn({
   project,
-  now,
   onOpen,
   onHide,
   onRemoved,
 }: {
   project: ProjectView
-  /**
-   * The clock the ages are measured against, ticked by the wall rather than by
-   * each column — the same reason `TurnCardRow` takes it rather than reading it:
-   * a page of columns each running their own timer redraws at N times the rate
-   * for one shared answer, and the ages drift apart between them.
-   */
-  now: number
   /** Leave the wall for the four panes, on this project and this chat. */
   onOpen: (loc: Partial<AppLocation>) => void
   /**
@@ -156,17 +147,6 @@ export function WallColumn({
   const [sent, setSent] = useState<Map<string, RunEvent>>(new Map())
   const [picking, setPicking] = useState(false)
   const [committing, setCommitting] = useState(false)
-  /**
-   * This column is showing the transcript rather than the cards.
-   *
-   * Per COLUMN, and deliberately not shared with the panes' own toggle or
-   * remembered anywhere. Flipping one column to read a turn in full is a thing
-   * you do for a few seconds and undo; making it a preference would mean opening
-   * the wall tomorrow to five transcripts, which is the view the cards exist to
-   * replace. It is not in the URL either — the wall's location is which project
-   * and which chat, and a reload landing back on the scan is the right default.
-   */
-  const [full, setFull] = useState(false)
   /** Bumped to refetch the chat list — a new chat has no id until it starts. */
   const [seq, setSeq] = useState(0)
 
@@ -244,14 +224,13 @@ export function WallColumn({
     if (before !== null && heldRunId === null) setSeq((n) => n + 1)
   }, [heldRunId])
 
-  // The open chat's transcript. Cards are reduced from it, so a column with no
-  // chat selected simply has none.
+  // The open chat's transcript, so a column with no chat selected has none.
   //
   // Going off screen does NOT blank it — only changing chat does. Blanking on
   // visibility is the obvious way to write this and it makes the scroll destroy
-  // what it passes over: come back to a column and its cards are gone until a
-  // refetch answers, so scrolling the wall left and right empties every column
-  // in turn. Off screen means "stop asking", never "forget".
+  // what it passes over: come back to a column and it is empty until a refetch
+  // answers, so scrolling the wall left and right empties every column in turn.
+  // Off screen means "stop asking", never "forget".
   useEffect(() => {
     if (!open.sessionId) {
       setView(null)
@@ -308,7 +287,7 @@ export function WallColumn({
     })
     // A new chat learns its session id mid-turn. The column has to follow it, or
     // the turn it just started belongs to a draft that no longer stands for
-    // anything and the cards would vanish when it finished.
+    // anything and the transcript would vanish when it finished.
     for (const e of live) {
       if (e.type === "run.started" && e.sessionId && !open.sessionId) {
         adopt(open.draftId, e.sessionId)
@@ -400,22 +379,22 @@ export function WallColumn({
   const busy = runId !== null && !finished
 
   /**
-   * The cards, oldest first, with the live turn folded in.
+   * The chat, oldest first, with the live turn folded in.
    *
    * The transcript on disk plus this sitting's events, exactly as the pane does
    * it — the daemon normalizes session messages into the same events a run emits,
-   * so one reducer reads both.
+   * so one reader draws both.
    */
-  const cards = useMemo(() => {
+  const events = useMemo(() => {
     const history = view?.events ?? []
     // Trimmed at the opening user message, NOT deduped on `runId:seq`. The two
     // sources do not share run ids: `sessions.ts` stamps everything it replays
     // out of the session store with `runId: sessionId`, while the live stream
     // carries the actual run's id — so the same turn appears under two different
     // ids, every key misses, and the turn is appended a second time. That draws
-    // one card per turn TWICE, which is what a remote chat looked like the
-    // moment its transcript had caught up: the same prompt, once from disk and
-    // once from the stream, the second copy the only one with an age.
+    // the turn TWICE, which is what a remote chat looked like the moment its
+    // transcript had caught up: the same prompt, once from disk and once from
+    // the stream.
     //
     // Matched on the text rather than assuming the last user message is the live
     // turn's: if the session file has not caught up there is no overlap to trim,
@@ -426,13 +405,13 @@ export function WallColumn({
       const at = history.findLastIndex(
         (e) => e.type === "user.message" && e.text === opening.text,
       )
-      if (at !== -1) return cardsForConversation([...history.slice(0, at), ...turnEvents])
+      if (at !== -1) return [...history.slice(0, at), ...turnEvents]
     }
-    return cardsForConversation([...history, ...turnEvents])
+    return [...history, ...turnEvents]
   }, [view, turnEvents])
 
   /**
-   * The reply arriving right now, for the flipped view.
+   * The reply arriving right now.
    *
    * Handed to the transcript rather than drawn after it, so the finished copy
    * lands in the same element — see `LiveText`. Raw, with no typewriter: that is
@@ -573,9 +552,8 @@ export function WallColumn({
         <button
           type="button"
           onClick={() => onOpen({ wall: false, projectId: project.id, ...open })}
-          // Still the way out, but no longer the way to read one turn — `full`
-          // does that without leaving. This is for the questions a column cannot
-          // answer: the files, the history, the whole of a long transcript.
+          // The way out, for the questions a column cannot answer: the files,
+          // the history, the whole of a long transcript.
           title={`${project.root} — open the panes on this project`}
           className="min-w-0 flex-1 truncate text-left font-sans text-[12px] text-fg hover:underline"
         >
@@ -610,7 +588,7 @@ export function WallColumn({
       </header>
 
       {/* Which chat this column is about. A dropdown rather than a list, because
-          the column's height belongs to the cards. */}
+          the column's height belongs to the chat. */}
       <div className="relative flex shrink-0 items-center gap-1 border-b border-line bg-chrome px-2 py-1">
         <button
           type="button"
@@ -623,19 +601,6 @@ export function WallColumn({
             {openTitle}
           </span>
         </button>
-        {/* The flip. Cards are the scan and the transcript is the detail, and
-            both live HERE — reading one turn in full used to mean leaving for
-            the panes, which threw away the whole page to answer a question about
-            one card. Offered only once there is something to read, so it is
-            never a button that switches to an empty view. */}
-        {cards.length > 0 && (
-          <Button
-            onClick={() => setFull((v) => !v)}
-            title={full ? "Back to one card per turn" : "Read this chat in full, here"}
-          >
-            {full ? "cards" : "full"}
-          </Button>
-        )}
         <Button
           locked={gates.start}
           onClick={() => setOpen({ sessionId: null, draftId: openNewChat(project.id) })}
@@ -659,12 +624,11 @@ export function WallColumn({
         )}
       </div>
 
-      {/* The two readings of one chat, in the same column. Newest at the BOTTOM
-          in both, like a conversation — the column is a thing you talk into, and
-          a box at the foot with the newest turn far away at the top reads as two
-          unrelated halves. */}
+      {/* The chat itself. Newest at the BOTTOM, like a conversation — the column
+          is a thing you talk into, and a box at the foot with the newest turn
+          far away at the top reads as two unrelated halves. */}
       <div ref={body} className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
-        {cards.length === 0 ? (
+        {events.length === 0 ? (
           /*
            * An empty chat is not always an empty box, and conflating the two is
            * how a message goes missing. A draft that has been sent has had its
@@ -696,37 +660,16 @@ export function WallColumn({
                 : "No chat open. Pick one above, or press new."}
             </p>
           )
-        ) : full ? (
-          // The panes' own transcript, not a narrower copy — same argument as the
-          // card below. It is `tail`ed harder here than in the pane: a column is
-          // a fifth of the width, so the same event count is several times the
-          // scroll, and what the flip is for is the last turn or two rather than
-          // the whole history. Reading further back is what the panes are for,
-          // and the header still goes there.
-          <Transcript
-            events={turnEvents.length > 0 ? turnEvents : (view?.events ?? [])}
-            live={liveText}
-            tail={WALL_TAIL}
-            scroller={body}
-          />
         ) : (
-          // The same component the panes draw, deliberately not a narrow copy of
-          // it. A second card would drift from `reduceCard`'s contract, and the
-          // drift would show up as the wall and the conversation disagreeing
-          // about one turn. It has a `max-w` rather than a width, so it shrinks
-          // to the column on its own.
-          cards.map((card) => (
-            <TurnCardRow
-              key={`${card.runId}:${card.startedAt}`}
-              card={card}
-              now={now}
-              // Flips this column rather than leaving the page. Going to the
-              // panes to answer "was that card enough" spent the whole wall on
-              // one turn and put you somewhere you then had to navigate back
-              // from — the question is small and local, so the answer is too.
-              onOpen={() => setFull(true)}
-            />
-          ))
+          // The panes' own transcript, deliberately not a narrower copy of it: a
+          // second reader would drift, and the drift would show up as the wall
+          // and the conversation disagreeing about one turn. It is `tail`ed
+          // harder here than in the pane — a column is a fifth of the width, so
+          // the same event count is several times the scroll, and what a column
+          // is for is the last turn or two rather than the whole history.
+          // Reading further back is what the panes are for, and the header still
+          // goes there.
+          <Transcript events={events} live={liveText} tail={WALL_TAIL} scroller={body} />
         )}
       </div>
 

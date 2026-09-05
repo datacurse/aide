@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useMemo, useState } from "react"
 import { splitHiddenColumns } from "@aide/protocol"
 import { api, type ProjectView } from "../api.js"
 import { Eye } from "../icons.js"
@@ -63,15 +63,6 @@ import { useHiddenColumns } from "./hidden.js"
 /** The projects list, on the app's own beat — one request for every column. */
 const POLL_MS = 1500
 
-/**
- * How often the ages on the cards are recomputed.
- *
- * Slower than the poll, because it only moves text like "3m" and "2h". A card's
- * live step keeps its own second-by-second clock; that is the one row on screen
- * that has to move, and it is one row rather than every card in every column.
- */
-const CLOCK_MS = 30_000
-
 export function Wall({
   onClose,
   onOpen,
@@ -81,7 +72,6 @@ export function Wall({
 }) {
   const [projects, setProjects] = useState<ProjectView[]>([])
   const [error, setError] = useState<string | null>(null)
-  const [now, setNow] = useState(() => Date.now())
   const hidden = useHiddenColumns()
 
   // A hidden column is not rendered at all rather than rendered and styled away:
@@ -111,11 +101,6 @@ export function Wall({
     POLL_MS,
     [],
   )
-
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), CLOCK_MS)
-    return () => clearInterval(timer)
-  }, [])
 
   return (
     <main className="flex h-full flex-col bg-editor font-mono text-fg antialiased">
@@ -204,7 +189,6 @@ export function Wall({
               <WallColumn
                 key={p.id}
                 project={p}
-                now={now}
                 onOpen={onOpen}
                 onHide={() => hidden.hide(p.id)}
                 // Dropped here rather than waited for on the next beat. The poll

@@ -69,7 +69,7 @@ const PROTOCOL_SRC = join(HERE, "..", "..", "protocol", "src")
  * was deleted with the backlog file and eight modules were added after it, so a
  * deploy died on `stat local todo.ts` AFTER the remote install had run — and had
  * that one name still existed, the failure would instead have been a remote
- * agent crashing on its first turn with `cannot find module ./card.js`, which is
+ * agent crashing on its first turn with `cannot find module ./gates.js`, which is
  * the same drift arriving somewhere far more expensive. The barrel cannot go
  * stale the same way, because the web bundle stops building when it is wrong.
  */

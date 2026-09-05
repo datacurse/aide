@@ -11,7 +11,7 @@
  */
 export * from "./names.js"
 export * from "./activity.js"
-export * from "./card.js"
+export * from "./activity-line.js"
 export * from "./events.js"
 export * from "./chatlist.js"
 export * from "./gates.js"
