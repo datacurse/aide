@@ -262,11 +262,26 @@ interface StepsLine {
   kind: "steps"
   key: string
   /** The run as it happened, calls and narration interleaved — what opening draws. */
-  rows: (ToolLine | BlockLine)[]
+  rows: Line[]
   /** The calls alone, for the closed row's label. */
   steps: ToolLine[]
   /** Reasoning blocks inside the run, counted so the label can admit to them. */
   thought: number
+  /**
+   * A commit rather than a turn's derivation — drawn as its own kind of row.
+   *
+   * The closed row has to say how the commit ENDED, because that is the fact you
+   * would otherwise open it for: a sha and a file count, or that it was refused.
+   * A fold you must expand to learn whether it worked is a fold nobody leaves
+   * closed.
+   */
+  commit?: {
+    sha: string | null
+    paths: number
+    pushed: string | null
+    checks: number
+    failed: boolean
+  }
 }
 type Line =
   | ToolLine
@@ -330,13 +345,30 @@ function humanizeError(message: string): string {
 function foldSteps(lines: Line[], live: boolean): Line[] {
   return foldRows(lines, live).map((r) => {
     if (!r.folded) return r.row
-    const steps = r.group.steps as ToolLine[]
-    return {
+    const rows = r.group.rows as Line[]
+    const line: StepsLine = {
       kind: "steps",
-      key: `steps:${r.group.rows[0]?.key ?? ""}`,
-      rows: r.group.rows as (ToolLine | BlockLine)[],
-      steps,
-      thought: r.group.rows.filter((x) => x.kind === "thinking").length,
+      key: `steps:${rows[0]?.key ?? ""}`,
+      rows,
+      steps: r.group.steps as ToolLine[],
+      thought: rows.filter((x) => x.kind === "thinking").length,
+    }
+    if (!r.group.commit) return line
+
+    // Read off the rows themselves rather than carried down from the events, so
+    // the closed row and the opened one cannot disagree about what happened.
+    const landed = rows.find((x) => x.kind === "commit-landed")
+    const pushed = rows.find((x) => x.kind === "push-landed")
+    const checks = rows.filter((x) => x.kind === "verify")
+    return {
+      ...line,
+      commit: {
+        sha: landed?.kind === "commit-landed" ? landed.sha : null,
+        paths: landed?.kind === "commit-landed" ? landed.paths.length : 0,
+        pushed: pushed?.kind === "push-landed" ? pushed.branch : null,
+        checks: checks.length,
+        failed: checks.some((c) => c.kind === "verify" && c.ok === false),
+      },
     }
   })
 }
@@ -751,6 +783,53 @@ function summarizeSteps(steps: ToolLine[]): string {
  * A folded run of tool calls: what it was made of, what it wrote, how long it
  * took. Closed by default — see `StepsLine` for why this is not the card.
  */
+/**
+ * A commit, closed: what it did, in one line, with a clear top and bottom.
+ *
+ * Bordered rather than drawn as a plain row — this is the one thing in a
+ * transcript that is neither the model talking nor a tool it called, and the
+ * complaint that produced it was that a commit had no visible beginning or end.
+ * A box has both. Open, the same border wraps every row it contains, so the
+ * episode still reads as one thing at whichever size you are looking at.
+ */
+function CommitFold({ line }: { line: StepsLine & { commit: NonNullable<StepsLine["commit"]> } }) {
+  const [open, setOpen] = useState(false)
+  const c = line.commit
+  const tone = c.failed && !c.sha ? "text-err" : c.sha ? "text-diff-add-fg" : "text-fg-muted"
+
+  return (
+    <div className="my-1.5 overflow-hidden rounded border border-line">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full min-w-0 items-baseline gap-2 bg-chrome px-2 py-1 text-left text-[11px] hover:bg-hover"
+      >
+        <CaretRight
+          className={`${MARK} shrink-0 text-fg-dim transition-transform ${open ? "rotate-90" : ""}`}
+        />
+        <GitCommit className={`${MARK} ${tone}`} />
+        <span className={`shrink-0 ${tone}`}>
+          {c.sha ? `committed ${c.sha.slice(0, 7)}` : c.failed ? "commit refused" : "commit"}
+        </span>
+        <span className="min-w-0 truncate text-fg-dim">
+          {c.paths > 0 && `${c.paths} file${c.paths === 1 ? "" : "s"}`}
+          {c.checks > 0 && `${c.paths > 0 ? " · " : ""}${c.checks} check${c.checks === 1 ? "" : "s"}`}
+          {c.pushed && <span className="text-diff-add-fg"> · pushed {c.pushed}</span>}
+        </span>
+      </button>
+      {open && (
+        // The originals, unchanged — including the message box, which is the
+        // whole of the review left once a commit has happened and so is shown in
+        // full HERE rather than trimmed. Closed, it costs one line; open, it is
+        // exactly what it always was.
+        <div className="border-t border-line px-2 py-1">
+          {line.rows.map((r) => renderLine(r))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function StepsRow({ line }: { line: StepsLine }) {
   const [open, setOpen] = useState(false)
   const failed = line.steps.filter((s) => s.ok === false).length
@@ -783,25 +862,7 @@ function StepsRow({ line }: { line: StepsLine }) {
             `rows` rather than steps-then-asides is what keeps it true: joining
             the two lists put every remark after every call, so an opened fold
             said "Clean." about work that had not run yet. */}
-        {line.rows.map((r) =>
-          r.kind === "tool" ? (
-            <ToolRow key={r.key} line={r} />
-          ) : r.kind === "thinking" ? (
-            // The same italic comment styling an unfolded thinking block gets.
-            // Opening a fold has to show what was there, not a second rendering
-            // of it — that was the card's mistake.
-            <p
-              key={r.key}
-              className="px-1 break-words whitespace-pre-wrap text-syn-comment italic"
-            >
-              {r.text}
-            </p>
-          ) : (
-            <div key={r.key} className="px-1">
-              <Markdown text={r.text} />
-            </div>
-          ),
-        )}
+        {line.rows.map((r) => renderLine(r))}
       </div>
     )
   }
@@ -1361,7 +1422,12 @@ function renderLine(
   onPermission?: (requestId: string, allowed: boolean) => void,
 ): ReactNode {
   if (line.kind === "tool") return <ToolRow key={line.key} line={line} />
-  if (line.kind === "steps") return <StepsRow key={line.key} line={line} />
+  if (line.kind === "steps")
+    return line.commit ? (
+      <CommitFold key={line.key} line={{ ...line, commit: line.commit }} />
+    ) : (
+      <StepsRow key={line.key} line={line} />
+    )
   if (line.kind === "push-landed") return <PushLandedRow key={line.key} line={line} />
   if (line.kind === "commit-step")
     return (

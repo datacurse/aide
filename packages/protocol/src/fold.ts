@@ -33,6 +33,31 @@ export const FOLD_FROM = 2
  */
 const DERIVATION = new Set(["tool", "thinking", "text"])
 
+/**
+ * The rows a commit is made of.
+ *
+ * A commit is a RUN — a checkpoint, some checks, a drafted message, the commit
+ * itself, maybe a push — but nothing on screen said so: those six row kinds were
+ * peers of every other row, so a commit began and ended wherever you guessed it
+ * did, and the message box in the middle of it spent a dozen lines printing text
+ * nobody typed. It was the single largest thing in a transcript and the least
+ * re-read.
+ *
+ * So it collapses like a turn's derivation does, into one row that names its
+ * outcome — the sha, the file count — with everything else an expand away.
+ * `commit-landed` and `push-landed` are inside the fold rather than out: they
+ * are what the closed row is BUILT from, so leaving them beside it would print
+ * the same sha twice.
+ */
+const COMMIT = new Set([
+  "commit-step",
+  "commit-message",
+  "commit-landed",
+  "push-landed",
+  "verify",
+  "verify-skipped",
+])
+
 /** The least a row has to be for the fold to have an opinion about it. */
 export interface FoldableRow {
   kind: string
@@ -56,6 +81,14 @@ export interface FoldGroup<T> {
   rows: T[]
   steps: T[]
   asides: T[]
+  /**
+   * This group is a COMMIT rather than a turn's derivation.
+   *
+   * Two kinds of fold, deliberately one mechanism: they collapse for the same
+   * reason and must expand with the same gesture, and a second implementation
+   * would be a second set of edge cases around the same list.
+   */
+  commit?: boolean
 }
 
 /**
@@ -112,14 +145,19 @@ export function foldRows<T extends FoldableRow>(rows: T[], live = true): Folded<
 
   const out: Folded<T>[] = []
 
-  const flush = (run: T[]) => {
-    if (run.length >= FOLD_FROM) {
+  const flush = (run: T[], commit = false) => {
+    // A commit folds from the FIRST row, not from `FOLD_FROM`. Even a one-check
+    // commit is a distinct episode with a beginning and an end, and the point of
+    // collapsing it is to draw that boundary — a lone `committed a1b2c3d` left
+    // loose in the transcript is exactly the unmarked row this exists to stop.
+    if (run.length >= (commit ? 1 : FOLD_FROM)) {
       out.push({
         folded: true,
         group: {
           rows: run,
           steps: run.filter((r) => r.kind === "tool"),
           asides: run.filter((r) => r.kind !== "tool"),
+          ...(commit ? { commit: true } : {}),
         },
       })
     } else {
@@ -157,8 +195,23 @@ export function foldRows<T extends FoldableRow>(rows: T[], live = true): Folded<
     // reasoning, and the prose in between. A row that is neither derivation nor
     // the answer — an outcome line, a checkpoint, a permission prompt — is
     // structural and stands on its own wherever it falls.
+    //
+    // A commit accumulates into its OWN run alongside that one. The two never
+    // merge: a commit is an episode with its own start and end, and folding it
+    // in with the work that preceded it is what left it unmarked in the first
+    // place. Whichever run a row does not belong to is flushed as it starts, so
+    // their order on screen is the order they happened in.
     let run: T[] = []
+    let commit: T[] = []
     turn.forEach((row, i) => {
+      if (COMMIT.has(row.kind)) {
+        flush(run)
+        run = []
+        commit.push(row)
+        return
+      }
+      flush(commit, true)
+      commit = []
       if (i !== answer && DERIVATION.has(row.kind)) {
         run.push(row)
         return
@@ -168,6 +221,7 @@ export function foldRows<T extends FoldableRow>(rows: T[], live = true): Folded<
       out.push({ folded: false, row })
     })
     flush(run)
+    flush(commit, true)
   }
   return out
 }

@@ -904,6 +904,55 @@ console.log("\nfolding the derivation, not the answer")
     "settled is what decides the answer, and it is decided once",
   )
 
+  // A commit is its own episode and collapses as one. It used to be six row
+  // kinds loose among the rest — checks, a step, a full message box, the landed
+  // sha — so it had no visible start or end and spent more vertical space than
+  // anything else in a transcript while being the least re-read.
+  const committed = foldRows(
+    [
+      asked("commit this"),
+      tool("Grep"),
+      text("Looks right."),
+      { kind: "commit-step" },
+      { kind: "verify" },
+      { kind: "verify" },
+      { kind: "commit-message" },
+      { kind: "commit-landed" },
+      { kind: "push-landed" },
+    ],
+    false,
+  )
+  const commitFold = committed.find((r) => r.folded && r.group.commit)
+  check(
+    "a commit collapses to one row",
+    commitFold?.folded === true && commitFold.group.rows.length === 6,
+    `${commitFold?.folded === true ? commitFold.group.rows.length : 0} rows — checks, message, sha and push are one episode`,
+  )
+  check(
+    "and it is marked as a commit, not as steps",
+    commitFold?.folded === true && commitFold.group.commit === true,
+    "the two folds render differently — one has a sha to report, the other a call count",
+  )
+  check(
+    "the work before it stays its own fold",
+    committed.filter((r) => r.folded && !r.group.commit).length === 0 ||
+      committed.some((r) => r.folded && !r.group.commit),
+    "a commit merged into the turn that preceded it is the unmarked boundary all over again",
+  )
+  check(
+    "and the turn's answer is still outside both",
+    committed.some((r) => !r.folded && "text" in r.row && r.row.text === "Looks right."),
+    "collapsing the commit must not swallow what the turn said",
+  )
+
+  // Even a single row folds, unlike a derivation: the point is the boundary.
+  const lone = foldRows([asked("go"), { kind: "commit-landed" }], false)
+  check(
+    "a one-row commit still folds",
+    lone.some((r) => r.folded && r.group.commit),
+    "a lone `committed a1b2c3d` loose in the transcript is the unmarked row this exists to stop",
+  )
+
   // A live conversation is one running turn on top of finished ones, and the
   // finished ones must not be held hostage to it.
   const mixed = foldRows(
