@@ -48,6 +48,16 @@ let cwd = ""
 let job: RunAgentOptions | null = null
 /** The id this session reports. Minted once and repeated on every turn. */
 let named = ""
+/**
+ * The model this session is currently on, which is the job's until a follow-up
+ * changes it — the stub's stand-in for the real loop's `q.setModel`.
+ *
+ * Kept as session state rather than read off each turn, because that is the
+ * property under test: `#followUp` sends the field only when it CHANGED, so a
+ * turn that omits it must go out on the last one, and a stub that re-read the
+ * job every turn would report the cold-start model forever and pass either way.
+ */
+let model = ""
 /** Turns the stub has been given, so a test can assert the session was reused. */
 let turnsTaken = 0
 let timer: ReturnType<typeof setTimeout> | undefined
@@ -73,7 +83,7 @@ function announce(): void {
     body: {
       type: "run.started",
       projectId: job?.projectId ?? "",
-      model: job?.model ?? "",
+      model,
       cwd,
       sessionId: named,
     },
@@ -94,6 +104,7 @@ process.on("message", (raw: unknown) => {
     runId = job.runId
     cwd = job.cwd
     named = job.resume ?? stubSessionId()
+    model = job.model
     turnsTaken = 1
     work()
     // A chat session reports its id the way the SDK's init message does, or the
@@ -106,6 +117,10 @@ process.on("message", (raw: unknown) => {
     runId = msg.turn.runId
     turnsTaken += 1
     interrupted = false
+    // Applied before the turn is announced, the way the real loop applies its
+    // control requests before the message goes in. A turn that carries no model
+    // keeps the one the session is already on.
+    if (msg.turn.model) model = msg.turn.model
     work()
     // A follow-up reports the session too. The SDK sends its init message on
     // every turn of an open session, not only on the first, and that repetition

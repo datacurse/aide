@@ -289,6 +289,19 @@ export interface SendOptions {
    * is one the compiler stops asking anybody about.
    */
   thinking: boolean
+  /**
+   * Which model answers this turn. Omitted means `CONFIG.taskModel`.
+   *
+   * Optional where `thinking` above is not, and the asymmetry is deliberate:
+   * every caller of `send` is a human's turn from the composer, but
+   * `turnUnderHold` also builds one of these for the commit gate's repair
+   * attempt, and there is no honest model for that turn to name. Nobody is at
+   * the composer when it runs, so it takes the daemon's default rather than
+   * inheriting whatever the last human turn happened to be sent under — which
+   * would silently hand the one turn that gets a single attempt to whichever
+   * model was cheapest for the message before it.
+   */
+  model?: string
 }
 
 export class ChatLane implements LiveChats {
@@ -394,6 +407,15 @@ export class ChatLane implements LiveChats {
    * suboptimal: a busy worker would interleave two turns into one transcript, a
    * closing one is on its way out, and a stale brief means the system prompt no
    * longer matches `project.md`.
+   *
+   * The MODEL is deliberately not one of them, and it is the condition somebody
+   * will be tempted to add. A model is a per-query option in the SDK but it has
+   * a control request — `setModel` — exactly as mode, effort and thinking do, so
+   * `#followUp` switches it inside the live session. Discarding a warm worker
+   * over it would make switching model the one toolbar control that silently
+   * costs a fork, a CLI boot and a replay of the transcript from disk; the brief
+   * that is fixed for the life of a query is the system prompt, which is what
+   * `projectDoc` above is actually guarding.
    */
   #reusable(opts: SendOptions, projectDoc: string): SessionWorker | null {
     // `projectDoc` here is `promptFingerprint(doc)`, not `doc.body` — see there.
@@ -727,6 +749,11 @@ export class ChatLane implements LiveChats {
       // one nobody reads before it runs, it gets exactly one attempt, and what
       // it is being handed is a check that already failed once.
       thinking: true,
+      // `model` is left off for the same reason, and it matters more here than
+      // it reads: this turn appends to a conversation whose warm session may be
+      // sitting on whatever the human last picked, so omitting it puts the one
+      // unsupervised turn back on the daemon's default rather than letting a
+      // cheap model chosen for the previous message inherit the repair attempt.
     }
 
     // The warm session if there is one, and that is not only for the ~1.4s: a
@@ -805,6 +832,11 @@ export class ChatLane implements LiveChats {
     // Only what CHANGED. Each of these is a control round trip into the CLI, and
     // sending three every turn to restate settings the session already has is
     // the kind of overhead this whole change exists to remove.
+    // Resolved to the same default the cold path uses, so a turn that omits it
+    // compares equal to a warm session started without one — the alternative is
+    // an undefined that never matches `worker.model` and spends a `setModel`
+    // round trip every turn to set what is already set.
+    const model = opts.model ?? CONFIG.taskModel
     const turn: FollowUpTurn = {
       runId,
       text: opts.text,
@@ -812,10 +844,12 @@ export class ChatLane implements LiveChats {
       ...(opts.mode !== worker.mode ? { mode: opts.mode } : {}),
       ...(opts.effort !== worker.effort ? { effort: opts.effort } : {}),
       ...(opts.thinking !== worker.thinking ? { thinking: opts.thinking } : {}),
+      ...(model !== worker.model ? { model } : {}),
     }
     worker.mode = opts.mode
     worker.effort = opts.effort
     worker.thinking = opts.thinking
+    worker.model = model
 
     worker.runner.send({ cmd: "turn", turn } satisfies ToWorker)
   }
@@ -872,6 +906,10 @@ export class ChatLane implements LiveChats {
     const { project } = opts
     const { runId } = record
     const cwd = project.root
+    // Resolved once and used for both the query and the worker's record of it,
+    // or a session started with no choice would remember `undefined` and the
+    // first follow-up would read that as a change away from it.
+    const model = opts.model ?? CONFIG.taskModel
 
     // A turn inside a held run reports its own interrupt to the run that asked
     // for it and to nobody else: the log is the COMMIT's, and a terminal event
@@ -912,7 +950,7 @@ export class ChatLane implements LiveChats {
       verifyCommands: doc.verify.map((v) => v.command),
       // Always the project root. There is no other place a run can happen.
       cwd,
-      model: CONFIG.taskModel,
+      model,
       // Read-only tools only. Edit, Write and Bash deliberately fall through to
       // the mode and to canUseTool, because a bare name here auto-approves the
       // tool before either is consulted — which would let a Plan turn edit the
@@ -950,7 +988,7 @@ export class ChatLane implements LiveChats {
       mode: opts.mode,
       effort: opts.effort,
       thinking: opts.thinking,
-      model: CONFIG.taskModel,
+      model,
       // The fingerprint, not the body — it is only ever compared, and it has to
       // cover every part of the system prompt that came out of `project.md`.
       projectDoc: promptFingerprint(doc),

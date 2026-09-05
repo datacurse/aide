@@ -19,7 +19,7 @@ import type {
   SshHost,
   SshListing,
 } from "@aide/protocol"
-import { CHAT_MODES, EFFORT_LEVELS } from "@aide/protocol"
+import { CHAT_MODES, EFFORT_LEVELS, isChatModel } from "@aide/protocol"
 import { runLogPath, sshConfigPath } from "@aide/protocol/node"
 import { activity } from "./activity.js"
 import { MAX_PROJECT_DOC_CHARS } from "./agent.js"
@@ -945,6 +945,7 @@ app.post(
       mode?: string
       effort?: string
       thinking?: boolean
+      model?: string
     }
     if (!body.text?.trim() && !body.attachments?.length) {
       return reply.code(400).send({ message: "nothing to send" })
@@ -1002,6 +1003,14 @@ app.post(
     const effort = (EFFORT_LEVELS as readonly string[]).includes(body.effort ?? "")
       ? (body.effort as EffortLevel)
       : "high"
+    // An unrecognised id is dropped rather than refused, and the turn goes out
+    // on the daemon's default. Refusing would be the stricter answer and the
+    // wrong one: this is a page that may be older than the list — a model
+    // retired between the tab loading and the send — and the cost of that is a
+    // turn on Opus rather than a red line over a message somebody has typed.
+    // The composer only ever offers ids from `CHAT_MODELS`, so this is the
+    // stale-tab case rather than a typo, which is why there is no free-text box.
+    const model = isChatModel(body.model) ? body.model : undefined
     // Only an explicit `false` turns it off. A page that has not reloaded since
     // the toggle existed sends nothing, and the answer for it is the behaviour it
     // has always had — thinking on — rather than a silent downgrade of every turn
@@ -1017,6 +1026,10 @@ app.post(
         mode,
         effort,
         thinking,
+        // Spread, so an unrecognised or absent id leaves the field off entirely
+        // rather than sending an explicit `undefined` — `SendOptions.model` is
+        // optional and "not chosen" is the state it is optional for.
+        ...(model ? { model } : {}),
       })
       return { runId }
     } catch (err) {

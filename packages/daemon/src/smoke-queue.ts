@@ -480,6 +480,76 @@ console.log("\nthe lock — one agent has the repo")
     (await readCheckpoint(root, smokeSession))?.sha === adopted?.sha,
   )
 
+  // ---- which model answered ------------------------------------------------
+  // `run.started.model` is the only record of it, and the field a profile bills
+  // against. The stub applies a follow-up's `model` the way the real loop
+  // applies `q.setModel`, so what these read is the setting the SESSION is on
+  // rather than what the composer happened to send.
+  const modelOf = (runId: string): string => {
+    const started = log.read(runId).find((e) => e.type === "run.started")
+    return started?.type === "run.started" ? started.model : "(none)"
+  }
+  // The default is read from CONFIG rather than spelled out, because it is
+  // overridable by `AIDE_TASK_MODEL` and a literal here would assert the
+  // environment instead of the fallback.
+  const { CONFIG } = await import("./config.js")
+
+  check(
+    "a turn that names no model gets the daemon's default",
+    modelOf(firstRun) === CONFIG.taskModel,
+    modelOf(firstRun),
+  )
+
+  // The switch itself, mid-conversation, into a session that is already warm.
+  // This is the whole feature: it must NOT cost a cold start, because a model is
+  // a control request like the mode and the effort — see `#reusable`.
+  const turnsBefore = log
+    .read(firstRun)
+    .concat(log.read(secondRun))
+    .filter((e) => e.type === "run.started").length
+  const switched = await locked.send({
+    project,
+    sessionId: smokeSession,
+    text: "and again, cheaper",
+    attachments: [],
+    mode: "auto",
+    effort: "medium",
+    thinking: true,
+    model: "claude-haiku-4-5-20251001",
+  })
+  await settled(locked)
+  check(
+    "a turn can name a different model",
+    modelOf(switched) === "claude-haiku-4-5-20251001",
+    modelOf(switched),
+  )
+  check(
+    "and switching model reuses the warm session",
+    !log.read(switched).some((e) => e.type === "checkpoint.taken") && turnsBefore === 2,
+    "a model is a control request, not a new system prompt — a cold start here is ~1.4s and a transcript replay for nothing",
+  )
+
+  // The half that a diff-only follow-up gets wrong in the silent direction:
+  // `#followUp` sends the field only when it CHANGED, so a turn sent with no
+  // model of its own must fall back to the DAEMON'S DEFAULT, not sit on
+  // whichever model the previous message picked. Without the resolve-then-
+  // compare in `#followUp` this turn stays on Haiku and nothing says so.
+  const reverted = await locked.send({
+    project,
+    sessionId: smokeSession,
+    text: "back to normal",
+    attachments: [],
+    mode: "auto",
+    effort: "medium",
+    thinking: true,
+  })
+  await settled(locked)
+  check(
+    "and a turn that names none goes back to the default rather than inheriting",
+    modelOf(reverted) === CONFIG.taskModel,
+    `${modelOf(reverted)} — a turn with no model must not inherit the last one's`,
+  )
+
   locked.shutdown()
 }
 

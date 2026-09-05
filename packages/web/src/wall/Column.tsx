@@ -4,6 +4,7 @@ import {
   sortChats,
   type Attachment,
   type ChatMode,
+  type ChatModel,
   type EffortLevel,
   type RunEvent,
 } from "@aide/protocol"
@@ -466,6 +467,7 @@ export function WallColumn({
     mode: ChatMode
     effort: EffortLevel
     thinking: boolean
+    model: ChatModel
   }): Promise<boolean> => {
     setError(null)
     try {

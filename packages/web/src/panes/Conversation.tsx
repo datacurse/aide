@@ -3,6 +3,7 @@ import {
   projectGates,
   type Attachment,
   type ChatMode,
+  type ChatModel,
   type ContextUsage,
   type EffortLevel,
   type RunEvent,
@@ -567,6 +568,7 @@ export function ConversationPane({
     mode: ChatMode
     effort: EffortLevel
     thinking: boolean
+    model: ChatModel
   }): Promise<boolean> => {
     if (!projectId) return false
     setError(null)

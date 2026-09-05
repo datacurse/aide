@@ -102,6 +102,51 @@ export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const
 export type EffortLevel = (typeof EFFORT_LEVELS)[number]
 
 /**
+ * The models a turn can be sent to, and the only ones a picker offers.
+ *
+ * A closed list rather than a free-text box, for the same reason `CHAT_MODES` is
+ * one: an id the API does not recognise fails at the START of a turn that has
+ * already taken the project's checkout, and the error arrives as an SDK message
+ * rather than as anything the composer could have refused. A typo in a text box
+ * would be a held lock and a red line.
+ *
+ * `label` is what the picker shows and `hint` is what it is FOR, because the
+ * choice being made here is a trade — speed against depth — and an id like
+ * `claude-haiku-4-5-20251001` says nothing about which end of it you are picking.
+ *
+ * Ids and not aliases (`opus`, `sonnet`): an alias is resolved by whatever the
+ * CLI happens to point it at, so a conversation's log would record a name whose
+ * meaning changes under it, and `run.started.model` is the field the profile
+ * bills against. Dated ids are used where the model has one.
+ */
+export const CHAT_MODELS = [
+  {
+    id: "claude-opus-5",
+    label: "Opus 5",
+    hint: "The most capable, and the slowest. What aide sends when nothing is chosen",
+  },
+  {
+    id: "claude-sonnet-5",
+    label: "Sonnet 5",
+    hint: "Most of the ability at a fraction of the cost. The one to reach for on a long, mechanical turn",
+  },
+  {
+    id: "claude-haiku-4-5-20251001",
+    label: "Haiku 4.5",
+    hint: "Fast and cheap, and out of its depth on anything it has to work out",
+  },
+] as const
+
+export type ChatModel = (typeof CHAT_MODELS)[number]["id"]
+
+export const isChatModel = (v: unknown): v is ChatModel =>
+  typeof v === "string" && CHAT_MODELS.some((m) => m.id === v)
+
+/** The label for an id, falling back to the id — a log may name a model this build does not list. */
+export const chatModelLabel = (id: string): string =>
+  CHAT_MODELS.find((m) => m.id === id)?.label ?? id
+
+/**
  * An image pasted into the composer.
  *
  * Carried as base64 rather than written to disk: it belongs to one turn, the

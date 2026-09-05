@@ -22,9 +22,12 @@ import { readFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import {
+  CHAT_MODELS,
   SUMMARY_FENCE,
   chatModeFromSdk,
+  chatModelLabel,
   currentActivity,
+  isChatModel,
   foldRows,
   formatLocation,
   parseLocation,
@@ -1127,6 +1130,37 @@ console.log("\ninherited chat mode")
   check("bypassPermissions is never inherited", chatModeFromSdk("bypassPermissions") === null)
   check("a future mode is not guessed at", chatModeFromSdk("somethingNew") === null)
   check("junk is not a mode", chatModeFromSdk(undefined) === null && chatModeFromSdk(7) === null)
+}
+
+console.log("\nthe models a turn can be sent to")
+{
+  // The composer offers a closed list and the daemon validates against the same
+  // one, so what is asserted here is that the two cannot drift: an id the picker
+  // can produce must be one `isChatModel` admits, or a send is refused at the
+  // endpoint over a value the human chose from a menu.
+  for (const m of CHAT_MODELS) {
+    check(`${m.label} is admitted by the guard that gates a send`, isChatModel(m.id), m.id)
+    check(`${m.label} says what it is for`, m.hint.length > 0, "an id alone says nothing about the trade")
+  }
+  check(
+    "the default the composer starts on is in the list",
+    isChatModel("claude-opus-5"),
+    "the composer names this id literally — a rename here is a picker that falls back on every load",
+  )
+  // The endpoint drops an unrecognised id and sends the turn on the default
+  // rather than refusing it, so this guard is what decides "unrecognised".
+  check("an unknown id is not a model", !isChatModel("gpt-4"), "the endpoint falls back to the default")
+  check("an alias is not an id", !isChatModel("opus"), "aliases resolve to whatever the CLI points at")
+  check("junk is not a model", !isChatModel(undefined) && !isChatModel(7) && !isChatModel(null))
+  // A log may name a model this build no longer lists — every run in
+  // `~/.aide/runs` predates the picker — so the label has to degrade to the id
+  // rather than render as nothing.
+  check("a known id shows its label", chatModelLabel("claude-opus-5") === "Opus 5")
+  check(
+    "and an unknown one shows itself",
+    chatModelLabel("claude-3-opus-20240229") === "claude-3-opus-20240229",
+    "a retired model must read as its id, not as a blank",
+  )
 }
 
 console.log("\nprotocol stays browser-safe")

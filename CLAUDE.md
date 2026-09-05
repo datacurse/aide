@@ -33,6 +33,8 @@ record. They are all rows in the same list, in that order of urgency.
 | Unstarted chats, drafts, pasted images (IndexedDB) | `packages/web/src/drafts.ts` |
 | What a parked chat is called before it has run | `packages/web/src/naming.ts` |
 | The one turn aide knows how to ask for — `survey` | `packages/web/src/survey.ts` |
+| The mode, the effort, the thinking toggle and the model picker | `packages/web/src/Composer.tsx` |
+| Which models a turn can be sent to | `packages/protocol/src/session.ts` |
 | An event log rendered as a conversation | `packages/web/src/panes/Transcript.tsx` |
 | The block a turn writes about itself, and how it is read | `packages/protocol/src/summary.ts` |
 | What a turn is doing right now, in one line | `packages/protocol/src/activity-line.ts` |
@@ -96,7 +98,7 @@ Decisions already taken, which are not gaps to fill:
   static import is hoisted and its output would print above `repo: <path>` — the
   run would still be correct and would read as though the sections had been
   shuffled. When changing any of this, the check that matters is that the
-  assertion count does not fall: `pnpm smoke` prints 553 `ok` lines, and a
+  assertion count does not fall: `pnpm smoke` prints 592 `ok` lines, and a
   refactor that quietly drops some is the failure this number exists to catch.
   It fell once on purpose — the card view was removed and took ~30 of its own
   assertions with it, leaving the ten that cover `currentActivity`, which
@@ -739,6 +741,35 @@ Decisions already taken, which are not gaps to fill:
   Absent has to keep meaning "thought" — every log written before the toggle
   existed is that case. The one turn that never gets it is the commit gate's
   single repair attempt: nobody reads that one before it runs.
+- **The model is a per-MESSAGE choice, and it is the one setting a conversation
+  does not inherit.** A picker beside the mode, from a closed list in
+  `protocol/session.ts` — `CHAT_MODELS`, ids and not aliases, because an alias
+  resolves to whatever the CLI points it at and `run.started.model` is what a
+  profile bills against. Almost all of the plumbing already existed and was
+  reachable from nowhere: `FollowUpTurn.model` and `SessionWorker.model` were
+  there, `worker/loop.ts` already called `q.setModel`, and both ends were
+  hardcoded to `CONFIG.taskModel` — so the whole change is a list, a picker, and
+  letting `SendOptions` carry the choice. Three things about it are decisions
+  rather than details. (1) A model change must NOT be added to `#reusable`: it
+  has a control request exactly as mode, effort and thinking do, so discarding a
+  warm worker over it would make switching model the one control that silently
+  costs a fork, a CLI boot and a transcript replay — what is fixed for the life
+  of a query is the system prompt, which is what the `projectDoc` fingerprint
+  guards. (2) `#followUp` sends only what CHANGED, so the omitted case has to be
+  RESOLVED to the default before it is compared, or a turn that names no model
+  inherits whichever one the last message picked — a deliberate one-off on Haiku
+  would quietly become the setting for the chat, and nothing on screen would say
+  so. `pnpm smoke:queue` pins that revert directly, because it is invisible
+  otherwise. (3) The composer does not inherit from the session even though it
+  could — every assistant message names the model that wrote it. Mode IS
+  inherited because it is a property of how a conversation is being driven; the
+  model is a property of the message. The commit gate's repair attempt names
+  none for the same reason it always thinks: nobody reads that turn before it
+  runs, so it takes the daemon's default rather than whatever was cheapest for
+  the message before it. An unrecognised id at the endpoint is dropped rather
+  than refused — that is the stale-tab case, and the cost of a model retired
+  since the page loaded should be a turn on the default, not a red line over
+  something somebody typed.
 - **The page does not hot-update while a turn is in flight.** A run in this repo
   rewrites the modules the page is running, and a module Fast Refresh cannot
   swap in reloads the browser out from under the turn you are watching — taking

@@ -4,6 +4,7 @@ import type {
   ChatSpend,
   ChatStatus,
   ChatMode,
+  ChatModel,
   ConversationSummary,
   EffortLevel,
   FolderPick,
@@ -272,6 +273,8 @@ export const api = {
       effort: EffortLevel
       /** False sends the turn with extended thinking switched off. */
       thinking: boolean
+      /** Which model answers. The daemon's default when absent. */
+      model: ChatModel
     },
   ) =>
     call<{ runId: string }>(`/api/projects/${projectId}/chat`, {

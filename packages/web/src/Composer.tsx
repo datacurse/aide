@@ -7,11 +7,15 @@ import { TYPING_KEY } from "./typing.js"
 import { useAutoGrow } from "./useAutoGrow.js"
 import { useRemembered } from "./useRemembered.js"
 import {
+  CHAT_MODELS,
   CHAT_MODES,
   CHAT_MODE_LABEL,
   EFFORT_LEVELS,
+  chatModelLabel,
+  isChatModel,
   type Attachment,
   type ChatMode,
+  type ChatModel,
   type ContextUsage,
   type EffortLevel,
 } from "@aide/protocol"
@@ -58,6 +62,86 @@ function ContextMeter({ usage }: { usage: ContextUsage | null }) {
   )
 }
 
+/**
+ * Close a menu when the next click lands outside it.
+ *
+ * Shared by the two pickers in this bar rather than written twice, because the
+ * failure of a second copy is not a duplicate listener — it is one of the two
+ * menus staying open under the other, which on a row of controls this narrow
+ * means the open one covers the button you were reaching for.
+ */
+function useClickAway(open: boolean, close: () => void) {
+  const box = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const away = (e: MouseEvent) => {
+      if (box.current && !box.current.contains(e.target as Node)) close()
+    }
+    document.addEventListener("mousedown", away)
+    return () => document.removeEventListener("mousedown", away)
+  }, [open, close])
+  return box
+}
+
+/**
+ * Which model answers the turn.
+ *
+ * Its own button rather than a row inside the mode menu, and the reason is what
+ * the two choices are. Mode and effort are about the SAME model being told how
+ * to behave; this replaces it. It is also the control most likely to be changed
+ * for one message and put back — a long mechanical edit sent to Sonnet, the next
+ * question back on Opus — which is the argument the thinking toggle already
+ * makes for living in the bar rather than behind a menu.
+ *
+ * It shows the label at all times, including the default. A picker that renders
+ * as nothing until you touch it cannot answer the question you actually have,
+ * which is "what is about to answer this" — and with a per-message control that
+ * you deliberately flip and mean to restore, a blank reading of "whatever it was
+ * last time" is the state that sends an expensive turn to a cheap model.
+ */
+function ModelPicker({ model, onModel }: { model: ChatModel; onModel: (m: ChatModel) => void }) {
+  const [open, setOpen] = useState(false)
+  const box = useClickAway(open, () => setOpen(false))
+
+  return (
+    <div ref={box} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        title="Which model answers this turn"
+        className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-fg-muted hover:bg-hover hover:text-fg"
+      >
+        {chatModelLabel(model)}
+      </button>
+      {open && (
+        <div className="absolute bottom-7 left-0 z-20 w-[22rem] rounded border border-line bg-chrome py-1 shadow-lg">
+          <div className="px-3 py-1 font-sans text-[11px] text-fg-dim">Model</div>
+          {CHAT_MODELS.map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              onClick={() => {
+                onModel(m.id)
+                setOpen(false)
+              }}
+              className={`flex w-full flex-col gap-0.5 px-3 py-1.5 text-left ${
+                m.id === model ? "bg-active text-white" : "hover:bg-hover"
+              }`}
+            >
+              <span className="font-sans text-[12px]">{m.label}</span>
+              <span
+                className={`font-sans text-[11px] ${m.id === model ? "text-white/70" : "text-fg-dim"}`}
+              >
+                {m.hint}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ModePicker({
   mode,
   effort,
@@ -70,16 +154,7 @@ function ModePicker({
   onEffort: (e: EffortLevel) => void
 }) {
   const [open, setOpen] = useState(false)
-  const box = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (!open) return
-    const away = (e: MouseEvent) => {
-      if (box.current && !box.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener("mousedown", away)
-    return () => document.removeEventListener("mousedown", away)
-  }, [open])
+  const box = useClickAway(open, () => setOpen(false))
 
   const label = CHAT_MODE_LABEL[mode].label
 
@@ -264,6 +339,7 @@ export function Composer({
     mode: ChatMode
     effort: EffortLevel
     thinking: boolean
+    model: ChatModel
   }) => Promise<boolean>
   onInterrupt: () => void
 }) {
@@ -295,6 +371,24 @@ export function Composer({
    * nothing looks identical to one that was not allowed to.
    */
   const [thinking, setThinking] = useRemembered<boolean>("aide.chat.thinking", true, isBool)
+  /**
+   * Remembered like the mode and the effort, and NOT inherited from the
+   * conversation — for a different reason from thinking's, which is that there
+   * is nowhere to read it from. There is somewhere here: every assistant message
+   * in the session store names the model that wrote it. It is not read on
+   * purpose. A conversation's last turn was answered by whatever was picked for
+   * THAT message, so inheriting would make one deliberate turn on Haiku the
+   * standing setting for the chat, and the next real question would go out cheap
+   * with the picker showing why only if you looked. The mode is inherited
+   * because it is a property of how a conversation is being driven; the model is
+   * a property of the message.
+   *
+   * The default is the daemon's default named again rather than imported: the
+   * daemon reads `AIDE_TASK_MODEL` and this is a browser. If the two ever
+   * disagree the picker is the honest one, because it is what somebody read
+   * before pressing send.
+   */
+  const [model, setModel] = useRemembered<ChatModel>("aide.chat.model", "claude-opus-5", isChatModel)
   /**
    * Unlike the three above, this one is not sent anywhere. It is read by the
    * transcript, out of the same key, which is why it is not in `onSend`'s
@@ -354,7 +448,7 @@ export function Composer({
   const send = () => {
     if (!canSend) return
     const outgoing = { text: text.trim(), attachments }
-    void onSend({ ...outgoing, mode, effort, thinking }).then((started) => {
+    void onSend({ ...outgoing, mode, effort, thinking, model }).then((started) => {
       // A refused turn must not also swallow what it refused. The daemon turns
       // a chat away while another one has the repo, and with ▶ on a parked
       // chat the thing being cleared is the whole of a parked idea — one press
@@ -386,7 +480,7 @@ export function Composer({
   const canProceed = !busy && !blocked && text.trim().length === 0 && attachments.length === 0
   const proceed = () => {
     if (!canProceed) return
-    void onSend({ text: PROCEED, attachments: [], mode, effort, thinking })
+    void onSend({ text: PROCEED, attachments: [], mode, effort, thinking, model })
     setNote(null)
   }
 
@@ -401,9 +495,10 @@ export function Composer({
    * The ref is not belt and braces: StrictMode mounts effects twice, and
    * without it every ▶ would send the same message twice in development.
    *
-   * No dependency array, deliberately. `send` closes over the box, the mode,
-   * the effort and the thinking toggle, so a list would either be all of them — which is
-   * every render anyway — or a stale closure sending last render's message.
+   * No dependency array, deliberately. `send` closes over the box, the mode, the
+   * effort, the model and the thinking toggle, so a list would either be all of
+   * them — which is every render anyway — or a stale closure sending last
+   * render's message.
    */
   const acted = useRef(false)
   useEffect(() => {
@@ -513,6 +608,7 @@ export function Composer({
 
       <div className="mt-1.5 flex items-center gap-3">
         <ModePicker mode={mode} effort={effort} onMode={chooseMode} onEffort={setEffort} />
+        <ModelPicker model={model} onModel={setModel} />
         <ThinkingToggle on={thinking} onToggle={() => setThinking(!thinking)} />
         <TypingToggle on={typewriter} onToggle={() => setTypewriter(!typewriter)} />
         <ContextMeter usage={usage} />
