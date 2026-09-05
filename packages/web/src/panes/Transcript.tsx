@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode, type RefObject } from "react"
 import {
+  foldRows,
   stripPartialTurnSummary,
   stripTurnSummary,
   type MessageImage,
@@ -9,6 +10,7 @@ import {
 import {
   ArrowClockwise,
   ArrowUp,
+  CaretRight,
   Check,
   Circle,
   GitCommit,
@@ -238,8 +240,37 @@ export interface LiveText {
    */
   tools: LiveTool[]
 }
+/**
+ * A run of consecutive tool calls, drawn as one row you can open.
+ *
+ * The transcript's problem was never that it lacked a concise reading — the
+ * closing prose IS that reading, and it was correct — but that it sat under
+ * thirty rows of derivation with no more visual weight than a `Grep` that
+ * matched nothing. A turn of 34 tool calls and a turn of 2 read the same until
+ * you had scrolled both.
+ *
+ * This is the opposite trade to the card that was tried and removed. A card was
+ * FIXED-SIZE and MODEL-WRITTEN: it spent the same three lines on every turn, so
+ * it carried least where there was most, and what it said could be wrong about
+ * the very rows it replaced. A fold is variable-size and derived — it counts
+ * calls and sums stamps off the event log, asserts nothing, and hides nothing,
+ * because `steps` holds the original `ToolLine`s and opening it renders exactly
+ * the rows that were there before. The compression is structural, not semantic,
+ * which is the only kind that cannot lie about the turn.
+ */
+interface StepsLine {
+  kind: "steps"
+  key: string
+  /** The run as it happened, calls and narration interleaved — what opening draws. */
+  rows: (ToolLine | BlockLine)[]
+  /** The calls alone, for the closed row's label. */
+  steps: ToolLine[]
+  /** Reasoning blocks inside the run, counted so the label can admit to them. */
+  thought: number
+}
 type Line =
   | ToolLine
+  | StepsLine
   | OutcomeLine
   | BlockLine
   | UserLine
@@ -282,6 +313,32 @@ function humanizeError(message: string): string {
     return "The run ended before finishing its turn (usually an interrupt or a dropped connection)."
   }
   return message
+}
+
+/**
+ * Group runs of consecutive tool calls into one openable row.
+ *
+ * A separate pass over the finished lines rather than a branch inside `toLines`,
+ * because everything that makes those lines correct — the run-scoped keys, the
+ * live-delta matching, the block ordinals — is decided there and would have to be
+ * reasoned about twice if this were interleaved. Here the input is already right
+ * and the only question is which neighbours travel together.
+ *
+ * The rule itself is `foldRows` in protocol, where `pnpm smoke` can reach it;
+ * this is the part that knows what a row looks like on screen.
+ */
+function foldSteps(lines: Line[], live: boolean): Line[] {
+  return foldRows(lines, live).map((r) => {
+    if (!r.folded) return r.row
+    const steps = r.group.steps as ToolLine[]
+    return {
+      kind: "steps",
+      key: `steps:${r.group.rows[0]?.key ?? ""}`,
+      rows: r.group.rows as (ToolLine | BlockLine)[],
+      steps,
+      thought: r.group.rows.filter((x) => x.kind === "thinking").length,
+    }
+  })
 }
 
 function toLines(events: RunEvent[], live?: LiveText | null): Line[] {
@@ -669,6 +726,126 @@ function took(ms: number): string {
  */
 const SLOW_TOOL_MS = 2000
 
+/**
+ * Tools whose calls are named in a closed fold rather than merely counted.
+ *
+ * A `Grep` that matched nothing is derivation and a `Read` is how the agent
+ * looked; neither predicts anything you are about to review. A write does — the
+ * files named here are the files about to appear in the rail, so folding them
+ * into "9 steps" would hide the one part of a turn that says what the diff will
+ * be. This is what stops the fold from being the card again.
+ */
+const WRITING_TOOLS = new Set(["Edit", "Write", "NotebookEdit"])
+
+/** `3 Grep · 2 Bash`, newest concern first: what the run was made of. */
+function summarizeSteps(steps: ToolLine[]): string {
+  const counts = new Map<string, number>()
+  for (const s of steps) counts.set(s.name, (counts.get(s.name) ?? 0) + 1)
+  return [...counts]
+    .sort((a, b) => b[1] - a[1])
+    .map(([name, n]) => (n > 1 ? `${n} ${name}` : name))
+    .join(" · ")
+}
+
+/**
+ * A folded run of tool calls: what it was made of, what it wrote, how long it
+ * took. Closed by default — see `StepsLine` for why this is not the card.
+ */
+function StepsRow({ line }: { line: StepsLine }) {
+  const [open, setOpen] = useState(false)
+  const failed = line.steps.filter((s) => s.ok === false).length
+  // Summed rather than measured end-to-end: calls in one message run
+  // concurrently, so the span would report wall-clock the turn did not spend
+  // waiting on these. The same distinction the dashboard draws between its
+  // `agent time` tile and its share bar.
+  const ms = line.steps.reduce((n, s) => n + (s.ms ?? 0), 0)
+  const wrote = [
+    ...new Set(
+      line.steps
+        .filter((s) => WRITING_TOOLS.has(s.name))
+        .map((s) => describeInput(s.name, s.input))
+        .filter(Boolean),
+    ),
+  ]
+
+  if (open) {
+    return (
+      <div>
+        <button
+          onClick={() => setOpen(false)}
+          className="flex w-full min-w-0 items-baseline gap-2 rounded px-1 py-0.5 text-left text-[11px] text-fg-dim hover:bg-hover hover:text-fg-muted"
+        >
+          <Minus className={MARK} />
+          <span className="shrink-0">hide {line.steps.length} steps</span>
+        </button>
+        {/* The originals, in the order they happened — not a rendering of the
+            summary. This is the whole claim that nothing is lost by folding, and
+            `rows` rather than steps-then-asides is what keeps it true: joining
+            the two lists put every remark after every call, so an opened fold
+            said "Clean." about work that had not run yet. */}
+        {line.rows.map((r) =>
+          r.kind === "tool" ? (
+            <ToolRow key={r.key} line={r} />
+          ) : r.kind === "thinking" ? (
+            // The same italic comment styling an unfolded thinking block gets.
+            // Opening a fold has to show what was there, not a second rendering
+            // of it — that was the card's mistake.
+            <p
+              key={r.key}
+              className="px-1 break-words whitespace-pre-wrap text-syn-comment italic"
+            >
+              {r.text}
+            </p>
+          ) : (
+            <div key={r.key} className="px-1">
+              <Markdown text={r.text} />
+            </div>
+          ),
+        )}
+      </div>
+    )
+  }
+
+  // 11px, the same as the rows it stands for — a fold that shouted louder than
+  // its own contents would be the derivation getting MORE weight for being
+  // collapsed.
+  return (
+    <button
+      onClick={() => setOpen(true)}
+      className="flex w-full min-w-0 items-baseline gap-2 rounded px-1 py-0.5 text-left text-[11px] hover:bg-hover"
+      title={line.steps.map((s) => `${s.name} ${describeInput(s.name, s.input)}`).join("\n")}
+    >
+      {/* The same caret the file tree opens a folder with, for the same gesture. */}
+      <CaretRight className={`${MARK} text-fg-dim`} />
+      {/* A fold can hold no calls at all — a turn that reasons at length and then
+          answers — so the count names whichever it actually contains rather than
+          reporting "0 steps" over a page of hidden thinking. */}
+      <span className="shrink-0 text-fg-muted">
+        {line.steps.length > 0
+          ? `${line.steps.length} steps`
+          : `thought ${line.thought > 1 ? `${line.thought}×` : ""}`.trim()}
+      </span>
+      <span className="min-w-0 truncate text-fg-dim">
+        {summarizeSteps(line.steps)}
+        {/* Named, not just counted: a fold that hid six blocks of reasoning
+            behind a bare call count would be understating what is inside it. */}
+        {line.steps.length > 0 && line.thought > 0 && (
+          <span> · thought {line.thought > 1 ? `${line.thought}×` : ""}</span>
+        )}
+        {wrote.length > 0 && <span className="text-syn-string"> · wrote {wrote.join(", ")}</span>}
+      </span>
+      {/* A failure inside a closed fold has to be visible from outside it, or the
+          fold hides the one row that explains what happened next. */}
+      {failed > 0 && (
+        <span className="shrink-0 text-err">
+          {failed} failed
+        </span>
+      )}
+      {ms >= SLOW_TOOL_MS && <span className="shrink-0 text-fg-dim">{took(ms)}</span>}
+    </button>
+  )
+}
+
 function ToolRow({ line }: { line: ToolLine }) {
   const running = line.ok === null
   const mark = running ? (
@@ -694,11 +871,18 @@ function ToolRow({ line }: { line: ToolLine }) {
         className={`flex min-w-0 items-baseline gap-2 rounded px-1 py-0.5 hover:bg-hover ${detailed ? "cursor-pointer" : ""}`}
       >
         {mark}
-        <span className="shrink-0 text-syn-func">{line.name}</span>
+        {/* 11px, matching the argument beside it rather than inheriting the
+            container's 12px. Two sizes on one row read as two separate things,
+            and the louder half was the tool NAME — the least informative token
+            on the line. Mono also carries more weight than sans at the same
+            nominal size, so a 12px `Bash` shouted over the 13px sentence
+            explaining what it found; the derivation has to sit under the prose,
+            not over it. */}
+        <span className="shrink-0 text-[11px] text-syn-func">{line.name}</span>
         {/* min-w-0 is what makes `truncate` real: a flex child defaults to
             min-width:auto and refuses to shrink below its content, so without it
             the row grows to fit the command and drags the whole pane sideways. */}
-        <span className="min-w-0 truncate text-syn-string">
+        <span className="min-w-0 truncate text-[11px] text-syn-string">
           {describeInput(line.name, line.input)}
         </span>
         {/* The same counter a running check gets, for the same reason: without it
@@ -1086,13 +1270,16 @@ function VerifyRow({ line }: { line: VerifyLine }) {
   const [override, setOverride] = useState<boolean | null>(null)
   const open = override ?? line.ok === false
   const seconds = line.ms === null ? "" : took(line.ms)
+  // The row is 11px, matching a tool row: a check and a call sit next to each
+  // other in a commit, and one of the two rendering larger reads as a difference
+  // in kind rather than in typography.
   return (
     <div>
       <div
         // Through the same guard every collapsible row uses, so dragging a
         // selection across a check's output does not fold it away mid-drag.
         onClick={() => toggleUnlessSelecting((flip) => setOverride(flip(open)))}
-        className="flex min-w-0 cursor-pointer items-baseline gap-2 rounded px-1 py-0.5 hover:bg-hover"
+        className="flex min-w-0 cursor-pointer items-baseline gap-2 rounded px-1 py-0.5 text-[11px] hover:bg-hover"
       >
         {/* A spinner while it runs, the same marker a tool call and a commit
             step in flight use, so "this one is happening now" reads the same
@@ -1174,10 +1361,11 @@ function renderLine(
   onPermission?: (requestId: string, allowed: boolean) => void,
 ): ReactNode {
   if (line.kind === "tool") return <ToolRow key={line.key} line={line} />
+  if (line.kind === "steps") return <StepsRow key={line.key} line={line} />
   if (line.kind === "push-landed") return <PushLandedRow key={line.key} line={line} />
   if (line.kind === "commit-step")
     return (
-      <p key={line.key} className="flex min-w-0 items-baseline gap-2 px-1">
+      <p key={line.key} className="flex min-w-0 items-baseline gap-2 px-1 text-[11px]">
         {line.done ? <Check className={`${MARK} text-ok`} /> : <Spinner />}
         <span className="min-w-0 text-fg-muted">{line.label}</span>
       </p>
@@ -1197,7 +1385,7 @@ function renderLine(
     return (
       // Dimmed whole, including the command, so it reads as a row that is not
       // going to happen rather than one still waiting its turn.
-      <p key={line.key} className="flex min-w-0 items-baseline gap-2 px-1 text-fg-dim">
+      <p key={line.key} className="flex min-w-0 items-baseline gap-2 px-1 text-[11px] text-fg-dim">
         <Minus className={MARK} />
         <span className="min-w-0 truncate">{line.command}</span>
         <span className="shrink-0">skipped · {line.reason}</span>
@@ -1319,7 +1507,13 @@ export function Transcript({
   /** Anything that belongs after the last line: the commit message being written. */
   children?: ReactNode
 }) {
-  const lines = useMemo(() => toLines(events, live), [events, live])
+  // Folded BEFORE the tail is taken, so `tail` counts the rows that will be
+  // drawn. Slicing first would cut the unfolded list and then collapse what
+  // survived, and a column asking for 60 lines would get however many a fold
+  // happened to leave — the number would mean something different on every turn.
+  // `live` is the turn being typed right now, so its presence is what says the
+  // trailing calls are still the progress indicator rather than history.
+  const lines = useMemo(() => foldSteps(toLines(events, live), !!live), [events, live])
   const shown = tail !== undefined && lines.length > tail ? lines.slice(-tail) : lines
   /**
    * The transcript's own element, held as state rather than in a ref: it is not

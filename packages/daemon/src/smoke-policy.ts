@@ -25,6 +25,7 @@ import {
   SUMMARY_FENCE,
   chatModeFromSdk,
   currentActivity,
+  foldRows,
   formatLocation,
   parseLocation,
   parseTurnSummary,
@@ -732,6 +733,122 @@ console.log("\nwhat a turn is doing right now")
     "a run with no events yet has no line",
     currentActivity([]) === null,
     "the caller decides what an unstarted turn says — `Sending` is a different statement",
+  )
+}
+
+console.log("\nfolding the derivation, not the answer")
+{
+  // The card was removed for compressing LOSSILY — a fixed-size, model-written
+  // summary that carried least exactly where the turn held most. A fold is the
+  // opposite trade and only stays that way if it can be shown to drop nothing,
+  // which is what these assert. None of it is visible to `tsc`: a fold that
+  // loses a row type-checks and renders, it just shows you less than happened.
+  const tool = (name: string) => ({ kind: "tool", name })
+  const text = (t: string) => ({ kind: "text", text: t })
+
+  const flat = (rows: ReturnType<typeof foldRows>) =>
+    rows.flatMap((r) => (r.folded ? r.group.rows : [r.row]))
+
+  const think = (t: string) => ({ kind: "thinking", text: t })
+
+  // The shape a real turn has, and the one the first version got wrong: prose
+  // BETWEEN the calls, not only at the end. Folding by "consecutive tool calls"
+  // broke on every one of these paragraphs and produced a dozen small folds with
+  // narration between them — more rows than it removed.
+  const turn = [
+    think("planning"),
+    tool("Grep"),
+    text("Confirmed — the loader never reads it. Let me build and verify what that leaves behind."),
+    tool("Bash"),
+    think("reading the output"),
+    tool("Edit"),
+    text("Now the assertions, since the flush-on-thinking one is what made it look absent."),
+    tool("Bash"),
+    text("The approach now rides at whatever you picked on the DRIVE panel. Two follow-on fixes."),
+    { kind: "outcome" },
+  ]
+  const one = foldRows(turn, false)
+  check(
+    "a whole turn folds to ONE row plus its answer",
+    one.filter((r) => r.folded).length === 1,
+    `${one.filter((r) => r.folded).length} folds — a fold per burst is the transcript with extra clicks in it`,
+  )
+  check(
+    "and the answer is the last thing the turn said",
+    one.some(
+      (r) => !r.folded && "text" in r.row && r.row.text.startsWith("The approach now rides"),
+    ),
+    "position marks the answer, not length — a mid-turn paragraph is derivation however long it is",
+  )
+  check(
+    "mid-turn prose is folded away with the calls",
+    !one.some((r) => !r.folded && "text" in r.row && r.row.text.startsWith("Confirmed —")),
+    "this is the one the length rule got wrong: long AND narration is the common case",
+  )
+  check(
+    "what follows the answer stays out of the fold",
+    one.at(-1)?.folded === false,
+    "the outcome line is structural — folding it would hide how the turn ended",
+  )
+
+  // The property that makes every other one safe.
+  check(
+    "nothing is lost, whatever the shape",
+    flat(foldRows(turn, false)).length === turn.length,
+    `${flat(foldRows(turn, false)).length} of ${turn.length} — the fold hides rows, it never removes them`,
+  )
+  check(
+    "and they stay in order",
+    JSON.stringify(flat(foldRows(turn, false))) === JSON.stringify(turn),
+    "a reordered transcript reads as the agent having done things in an order it did not",
+  )
+
+  // Thinking was once neither `tool` nor `text` and so FLUSHED the run, chopping
+  // a turn of sixteen calls into fragments that could not reach the threshold.
+  // Nothing folded at all, which reads as the feature being absent rather than
+  // as a bug in it.
+  const across = foldRows([tool("Grep"), think("a"), tool("Bash"), think("b"), text("done")], false)
+  check(
+    "thinking does not break a run",
+    across.filter((r) => r.folded).length === 1,
+    "an unrecognised kind flushes, and a fragment cannot reach the threshold",
+  )
+  check(
+    "a turn that only thinks still folds",
+    foldRows([think("a"), think("b"), think("c"), text("done")], false).some((r) => r.folded),
+    "counting calls alone leaves pages of reasoning as the one thing that never collapses",
+  )
+
+  const single = foldRows([tool("Read"), text("done")], false)
+  check(
+    "a lone step is left alone",
+    single.every((r) => !r.folded),
+    "a fold the same height as the row it replaces has traded readability for a click",
+  )
+
+  // A turn with no prose at all — it happens when a turn is cut short. There is
+  // no answer to keep out, and folding everything would leave a row saying only
+  // that something happened.
+  const silent = foldRows([tool("Grep"), tool("Bash"), { kind: "outcome" }], false)
+  check(
+    "a turn that never answered is left readable",
+    silent.every((r) => !r.folded),
+    "with no closing prose there is nothing the fold could be hiding the derivation BEHIND",
+  )
+
+  check(
+    "a LIVE turn does not fold",
+    foldRows([tool("Grep"), think("a"), tool("Bash"), text("working on it")], true).every(
+      (r) => !r.folded,
+    ),
+    "those rows are the progress indicator — collapsing them blanks the screen while somebody watches",
+  )
+  check(
+    "but the same turn folds once it is over",
+    foldRows([tool("Grep"), think("a"), tool("Bash"), text("working on it")], false).some(
+      (r) => r.folded,
+    ),
+    "otherwise history would never collapse either",
   )
 }
 
