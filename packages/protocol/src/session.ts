@@ -121,6 +121,11 @@ export type EffortLevel = (typeof EFFORT_LEVELS)[number]
  */
 export const CHAT_MODELS = [
   {
+    id: "claude-fable-5",
+    label: "Fable 5",
+    hint: "Deepest on a problem that has to be worked out. Billed against its own pool, so it does not eat the plan the others share",
+  },
+  {
     id: "claude-opus-5",
     label: "Opus 5",
     hint: "The most capable, and the slowest. What aide sends when nothing is chosen",
