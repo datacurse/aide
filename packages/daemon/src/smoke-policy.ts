@@ -862,6 +862,20 @@ console.log("\nwhat a project's gates refuse")
     watching.start === held("a chat"),
     "the daemon refuses a fresh turn under any holder, ours included",
   )
+
+  // An auto-commit landing is a holder that blocks almost nothing: the daemon
+  // QUEUES a send behind it and starts the turn when it releases, so a lock
+  // drawn for it would refuse something the daemon accepts — a block reading
+  // one object while the button reads another, in the polite direction.
+  // Committing was automated precisely so nobody waits on it.
+  const committing = projectGates({ holder: { ...holder, held: true }, held })
+  check("a commit landing does not stop a send", committing.send === null)
+  check("nor a new chat", committing.start === null)
+  check(
+    "but it does hold the push",
+    committing.push === held("a chat"),
+    "pushing while a commit lands sends a branch whose tip is about to move",
+  )
 }
 
 console.log("\nthe message an auto-commit writes")

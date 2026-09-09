@@ -42,6 +42,16 @@
 export interface GateHolder {
   runId: string
   title: string
+  /**
+   * The daemon's own hold — an auto-commit landing — rather than a
+   * conversation's turn. A held run blocks nothing a human types: the daemon
+   * QUEUES a send behind it and starts the turn when the commit releases, so a
+   * padlock here would guard a door that is not locked. Committing was
+   * automated precisely so nobody has to care that it is happening; a UI that
+   * stops you while it does re-invents the wait it removed. Push is the one
+   * exception — see below.
+   */
+  held?: boolean
 }
 
 export interface ProjectGates {
@@ -96,14 +106,20 @@ export function projectGates(opts: {
 }): ProjectGates {
   const { holder, held } = opts
 
-  const heldBySomethingElse = (mine: string | null) =>
-    holder && holder.runId !== mine ? held(holder.title) : null
+  // An auto-commit landing does not block a chat or a send: the daemon queues
+  // the turn behind it and starts it when the commit lets go, so a lock drawn
+  // here would refuse something the daemon accepts — the exact
+  // block-reads-one-object-button-reads-another wedge this file exists to
+  // prevent, in the polite direction.
+  const blocking = holder && !holder.held ? holder : null
 
-  // Any holder at all blocks a NEW chat, including an auto-commit still
-  // landing: the daemon refuses a fresh turn under any holder, so exempting one
-  // would offer a button the daemon then turns away.
+  const heldBySomethingElse = (mine: string | null) =>
+    blocking && blocking.runId !== mine ? held(blocking.title) : null
+
   return {
-    start: holder ? held(holder.title) : null,
+    start: blocking ? held(blocking.title) : null,
+    // The one gate a commit DOES hold: pushing while it lands sends a branch
+    // whose tip is about to move.
     push: holder ? held(holder.title) : null,
     send: heldBySomethingElse(opts.openRunId ?? null),
   }

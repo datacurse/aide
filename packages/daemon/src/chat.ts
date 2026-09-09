@@ -93,9 +93,13 @@ export const promptFingerprint = (doc: ProjectDoc): string =>
  * that needs reconciling on boot, and a daemon killed mid-run would leave a
  * repository that looks permanently held by a process that no longer exists.
  *
- * It REFUSES rather than queueing. A queued turn would start against a tree the
- * previous run had just rewritten and nobody had reviewed yet — which is the
- * staleness this whole design exists to remove, reintroduced one level up.
+ * It REFUSES rather than queueing — with one exception. A turn queued behind
+ * another CHAT turn would start against a tree that run had just rewritten and
+ * nobody had reviewed yet, which is the staleness this whole design exists to
+ * remove, reintroduced one level up. A turn queued behind a HELD run — an
+ * auto-commit landing — starts against the tree the human already had, because
+ * a commit only writes history; so `send` queues behind those, and nobody
+ * waits on a step that was automated precisely so it never needs watching.
  *
  * Also still one turn per session, because two concurrent turns appending to one
  * transcript would interleave into nonsense. That check comes first, so the
@@ -146,6 +150,16 @@ export interface ChatTurn {
    * else the lane publishes.
    */
   blocked: boolean
+  /**
+   * The daemon's own hold — an auto-commit — rather than a conversation's turn.
+   *
+   * The distinction exists because the two deserve opposite treatment at the
+   * lock: a chat turn refuses the next send (a queued turn would start against
+   * a tree an unreviewed run just rewrote), while a commit only ever writes
+   * history, so a send that arrives under one is QUEUED and starts the moment
+   * it releases. Committing was automated precisely so nobody waits on it.
+   */
+  held: boolean
 }
 
 /**
@@ -435,7 +449,44 @@ export class ChatLane implements LiveChats {
       startedAt: t.startedAt,
       text: t.text,
       blocked: t.pending.size > 0,
+      held: t.held,
     }))
+  }
+
+  /**
+   * Turns waiting for a held run to let go of its project.
+   *
+   * Only a commit is ever awaited: `send` still refuses a CHAT holder outright
+   * (the staleness argument at the top of this file), and a held run's release
+   * is the one boundary a queued turn starts from. Resolvers rather than a
+   * polling loop, so the queued turn begins on the same tick the record goes.
+   */
+  readonly #releaseWaiters = new Map<string, Array<() => void>>()
+
+  #released(runId: string): Promise<void> {
+    // Already gone — resolved now, or a send that raced the release would wait
+    // on a run nothing will ever delete again.
+    if (!this.#turns.has(runId)) return Promise.resolve()
+    return new Promise((resolve) => {
+      const waiting = this.#releaseWaiters.get(runId) ?? []
+      waiting.push(resolve)
+      this.#releaseWaiters.set(runId, waiting)
+    })
+  }
+
+  /**
+   * Delete a record — which is what releases its project — and wake whatever
+   * queued behind it. Every deletion goes through here so a new exit path
+   * cannot strand a queued turn; the wake is a no-op when nothing waits.
+   */
+  #drop(runId: string): boolean {
+    const dropped = this.#turns.delete(runId)
+    const waiting = this.#releaseWaiters.get(runId)
+    if (waiting) {
+      this.#releaseWaiters.delete(runId)
+      for (const wake of waiting) wake()
+    }
+    return dropped
   }
 
   /**
@@ -510,11 +561,21 @@ export class ChatLane implements LiveChats {
     // The narrower check first, so the common mistake — pressing send twice on
     // one conversation — gets the message that describes it rather than the
     // lock's, which would be true but confusing about a chat you are looking at.
-    if (opts.sessionId && this.turnForSession(opts.sessionId)) {
+    // Only a CHAT turn counts: the commit attributed to this conversation is
+    // not this conversation's turn, and a send under it queues like any other.
+    if (opts.sessionId && this.turns().some((t) => t.sessionId === opts.sessionId && !t.held)) {
       throw new Error("this conversation already has a turn in flight")
     }
-    const holder = this.holderFor(project.id)
-    if (holder) throw new Error(lockRefusal(holder))
+    const chatHolder = this.turns().find((t) => t.projectId === project.id && !t.held)
+    if (chatHolder) throw new Error(lockRefusal(chatHolder))
+    // Whatever still holds the project can only be a HELD run — an auto-commit
+    // landing. It refuses nothing: the record below is registered now and IS
+    // the lock (a second send arriving during the wait finds it and gets the
+    // refusal above), and the turn begins the moment the commit lets go. The
+    // refuse-don't-queue rule at the top of this file is about a tree an
+    // unreviewed run just rewrote; a commit only writes history, so the tree a
+    // queued turn starts on is the tree the human already had.
+    const queuedBehind = this.holderFor(project.id)?.runId ?? null
 
     const runId = randomUUID()
 
@@ -539,29 +600,88 @@ export class ChatLane implements LiveChats {
       nested: null,
       headline: null,
       sourceIdAtStart: null,
+      held: false,
     }
     this.#turns.set(runId, record)
 
-    try {
-      // The human's own words go in first, before the SDK is even contacted, so
-      // a turn that fails to spawn still shows what it was answering. The pasted
-      // screenshots go in with them: a message that is half a sentence and a
-      // picture reads as half a sentence without them, and the session file that
-      // will hold the other copy does not exist yet at this point in the turn.
-      const images = opts.attachments.map((a) => ({ mediaType: a.mediaType, data: a.data }))
-      this.log.append(runId, {
-        type: "user.message",
-        text: opts.text,
-        // Omitted rather than empty, so a turn with no screenshots logs the same
-        // line it always did.
-        ...(images.length ? { images } : {}),
-        // Written only when thinking was OFF, for the same reason: every log in
-        // `~/.aide/runs` predates the toggle, and a turn that says nothing about
-        // thinking is a turn that thought. This is the only record of it — the
-        // profile is where the toggle gets judged, and it reads this line.
-        ...(opts.thinking ? {} : { thinking: false }),
-      })
+    // The human's own words go in first, before the SDK is even contacted —
+    // and before any queueing — so a turn that fails to spawn, or is still
+    // waiting for a commit to let go, already shows what it was answering. The
+    // pasted screenshots go in with them: a message that is half a sentence
+    // and a picture reads as half a sentence without them, and the session
+    // file that will hold the other copy does not exist yet at this point.
+    const images = opts.attachments.map((a) => ({ mediaType: a.mediaType, data: a.data }))
+    this.log.append(runId, {
+      type: "user.message",
+      text: opts.text,
+      // Omitted rather than empty, so a turn with no screenshots logs the same
+      // line it always did.
+      ...(images.length ? { images } : {}),
+      // Written only when thinking was OFF, for the same reason: every log in
+      // `~/.aide/runs` predates the toggle, and a turn that says nothing about
+      // thinking is a turn that thought. This is the only record of it — the
+      // profile is where the toggle gets judged, and it reads this line.
+      ...(opts.thinking ? {} : { thinking: false }),
+    })
 
+    if (queuedBehind) {
+      // Detached rather than awaited: a commit takes a minute on this project
+      // and minutes when its one repair attempt runs, and an HTTP response
+      // held open that long dies to whatever timeout fires first — leaving
+      // the browser restoring a draft the daemon was still going to send,
+      // which is one message become two. The caller gets the run id now and
+      // watches it the way it watches any run.
+      void this.#released(queuedBehind)
+        .then(() => {
+          // Evicted while it waited — a shutdown, or an error path took the
+          // record. Nothing to start, and nothing left to clean.
+          if (this.#turns.get(runId) !== record) return
+          // Stopped while it waited: the same terminal event `#coldStart`
+          // writes for a turn interrupted between admission and the fork.
+          if (record.interrupted) {
+            this.log.append(runId, {
+              type: "run.finished",
+              subtype: "cancelled_before_start",
+              status: "cancelled",
+              totalCostUsd: 0,
+              modelUsage: {},
+              numTurns: 0,
+              durationMs: Date.now() - record.startedAt,
+              permissionDenials: [],
+            })
+            this.#drop(runId)
+            return
+          }
+          return this.#begin(record, opts)
+        })
+        .catch((err) => {
+          this.log.append(runId, {
+            type: "run.error",
+            message: err instanceof Error ? err.message : String(err),
+          })
+          this.#drop(runId)
+        })
+      return runId
+    }
+
+    // Awaited, so a refusal on this path — an unreachable host, a checkpoint
+    // that could not be taken — still surfaces as the send's own error.
+    await this.#begin(record, opts)
+    return runId
+  }
+
+  /**
+   * Everything between a turn's admission and its worker: the sweep, the
+   * checkpoint, the fork. Split from `send` so a turn queued behind a commit
+   * runs the IDENTICAL path when its wait ends — a second copy of this
+   * sequence is how the checkpoint's ordering constraint would get broken
+   * exactly once. Cleans up its own record on failure, because on the queued
+   * path there is no caller left holding one.
+   */
+  async #begin(record: TurnRecord, opts: SendOptions): Promise<void> {
+    const { project } = opts
+    const { runId } = record
+    try {
       // The persisted red-gate markers, before the sweep decides anything from
       // them. Instant after the first send; on the very first this is what stops
       // a freshly restarted daemon sweeping a tree the board says a failed gate
@@ -641,7 +761,7 @@ export class ChatLane implements LiveChats {
       const warm = this.#reusable(opts, promptFingerprint(doc))
       if (warm) {
         this.#followUp(warm, record, opts)
-        return runId
+        return
       }
 
       void this.#coldStart(record, opts, doc).catch((err) => {
@@ -649,14 +769,13 @@ export class ChatLane implements LiveChats {
           type: "run.error",
           message: err instanceof Error ? err.message : String(err),
         })
-        this.#turns.delete(runId)
+        this.#drop(runId)
       })
-      return runId
     } catch (err) {
       // Nothing has a worker yet, so nothing else will ever clear this record —
       // and a record left behind holds the project's lock against a turn that is
       // never going to finish.
-      this.#turns.delete(runId)
+      this.#drop(runId)
       throw err
     }
   }
@@ -734,6 +853,7 @@ export class ChatLane implements LiveChats {
       // A commit stages and writes history; it cannot edit the daemon's source,
       // so there is nothing for the end of it to compare against.
       sourceIdAtStart: null,
+      held: true,
     }
     this.#turns.set(runId, record)
 
@@ -793,7 +913,9 @@ export class ChatLane implements LiveChats {
         // Deleting the record is what releases the project. There is no snapshot
         // to wait for here — the tree after a commit is the tree the commit
         // made, and the conversation's checkpoint still points where it did.
-        this.#turns.delete(runId)
+        // Through `#drop`, which is what starts a turn that queued behind this
+        // commit while it landed.
+        this.#drop(runId)
         this.#watchers.delete(runId)
       }
     }
@@ -1079,7 +1201,7 @@ export class ChatLane implements LiveChats {
         durationMs: Date.now() - record.startedAt,
         permissionDenials: [],
       })
-      this.#turns.delete(runId)
+      this.#drop(runId)
       return
     }
 
@@ -1309,7 +1431,7 @@ export class ChatLane implements LiveChats {
     }
 
     const release = () => {
-      this.#turns.delete(runId)
+      this.#drop(runId)
       this.#watchers.delete(runId)
       // The turn just wrote to the conversation store, and for a REMOTE project
       // that store is read over ssh and cached. Dropped here rather than left to
@@ -1441,7 +1563,7 @@ export class ChatLane implements LiveChats {
       this.#settleNested(turn, { errors: [reason] })
       return
     }
-    if (turn && this.#turns.delete(turn.runId)) {
+    if (turn && this.#drop(turn.runId)) {
       this.log.append(turn.runId, { type: "run.error", message: reason })
       this.#watchers.delete(turn.runId)
     }
@@ -1506,6 +1628,11 @@ export class ChatLane implements LiveChats {
     }
     this.#workers.clear()
     this.#turns.clear()
+    // Anything queued behind a held run is woken into a cleared map — its
+    // continuation sees its record gone and does nothing — rather than left
+    // holding a promise that would keep the process from exiting cleanly.
+    for (const waiting of this.#releaseWaiters.values()) for (const wake of waiting) wake()
+    this.#releaseWaiters.clear()
   }
 }
 

@@ -345,6 +345,8 @@ export interface LiveTurn {
   text: string
   /** A tool call is waiting on a human. The only thing that is stopped ON you. */
   blocked: boolean
+  /** The daemon's own hold — an auto-commit — not a conversation's turn. */
+  held: boolean
 }
 
 /**

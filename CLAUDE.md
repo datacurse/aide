@@ -98,7 +98,7 @@ Decisions already taken, which are not gaps to fill:
   static import is hoisted and its output would print above `repo: <path>` — the
   run would still be correct and would read as though the sections had been
   shuffled. When changing any of this, the check that matters is that the
-  assertion count does not fall: `pnpm smoke` prints 719 `ok` lines as of
+  assertion count does not fall: `pnpm smoke` prints 722 `ok` lines as of
   2026-09-09, and a refactor that quietly drops some is the failure this number
   exists to catch.
   It fell once on purpose — the card view was removed and took ~30 of its own
@@ -683,6 +683,22 @@ Decisions already taken, which are not gaps to fill:
   /api/projects/:id/commit?force=true`, reachable as `pnpm commit-force
   <project>` — which lands a red tree with a `WIP:` subject; `pnpm smoke` pins
   that no web source can name it.
+- **A send queues behind a commit, and only behind a commit.** The lock refuses
+  rather than queueing — a turn queued behind another CHAT turn would start on
+  a tree an unreviewed run just rewrote — but a HELD run (`ChatTurn.held`, the
+  auto-commit) only writes history, so `send` admits the turn immediately and
+  starts it when the commit releases (`#released`/`#drop` in chat.ts). The
+  queued record IS the lock from the moment it is admitted, which is what
+  refuses a second send without a second mechanism; the commit stays the
+  visible holder until it lands. The web half is `GateHolder.held` in
+  `projectGates`: a commit blocks neither the composer nor a new chat — only
+  PUSH, because pushing while a commit lands sends a branch whose tip is about
+  to move. There is deliberately no way to be made to wait on a commit and no
+  interface that locks for one: committing was automated precisely so nobody
+  has to care that it is happening. `send` returns the queued run id without
+  awaiting the wait — a commit can outlast an HTTP timeout, and a browser that
+  restores its draft over a turn the daemon still runs turns one message into
+  two.
 - **A failed check gets one automatic fix, and one only.** The commit hands the
   failure to the conversation it is attributed to, waits for the turn, re-reads
   the tree and checks again; a second failure stops and asks. That turn runs

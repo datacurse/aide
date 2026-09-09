@@ -577,7 +577,7 @@ console.log("\ndone, and undone")
   const running = (sessionId: string, blocked = false): LiveChats => ({
     turnForSession: (s) =>
       s === sessionId
-        ? { runId: "run-live", projectId: project.id, sessionId, startedAt: 0, text: "", blocked }
+        ? { runId: "run-live", projectId: project.id, sessionId, startedAt: 0, text: "", blocked, held: false }
         : null,
     holderFor: () => null,
   })
@@ -1015,6 +1015,78 @@ console.log("\ncommitting with no conversation to attribute it to")
     "and the project is free again",
     lane.holderFor(project.id) === null,
     "a sessionless record has no conversation to be found and cleared through",
+  )
+}
+
+// ---------------------------------------------------------------------------
+console.log("\na send during a commit queues instead of refusing")
+// The lock refuses rather than queueing — except behind a HELD run. A commit
+// only writes history, so a turn queued behind one starts against the tree the
+// human already had; refusing it made every send wait out a step that was
+// automated precisely so nobody has to care it is happening. The queued record
+// is admitted immediately and IS the lock, which is what keeps "one agent has
+// the repo" true without a second mechanism.
+{
+  let unblock = () => {}
+  const gate = new Promise<void>((resolve) => {
+    unblock = resolve
+  })
+  const held = lane.hold({
+    project,
+    sessionId: null,
+    text: "committing what is uncommitted",
+    model: "helper-model",
+    work: async () => {
+      await gate
+      return { costUsd: 0, modelUsage: {} }
+    },
+  })
+
+  const queued = await say(null, "typed while the commit landed")
+  check(
+    "the send is admitted while the commit holds the project",
+    lane.turns().some((t) => t.runId === queued),
+    "refusing here is the wait the queue exists to remove",
+  )
+  check(
+    "its message is in the log before the turn starts",
+    log.read(queued)[0]?.type === "user.message",
+    "the transcript should show what was asked even while it waits",
+  )
+  check(
+    "the commit stays the visible holder while it lands",
+    lane.holderFor(project.id)?.runId === held,
+    "a column that re-pointed at the queued turn would move for no visible reason",
+  )
+  check(
+    "and the queued turn has not started",
+    log.read(queued).every((e) => e.type === "user.message"),
+    "starting under the commit is the race the lock exists to stop",
+  )
+
+  let refusal = ""
+  try {
+    await say(null, "a third thing, same moment")
+  } catch (err) {
+    refusal = err instanceof Error ? err.message : String(err)
+  }
+  check(
+    "a second send is refused BY the queued turn",
+    refusal.includes("has the repo"),
+    refusal || "it was admitted — two turns queued on one project",
+  )
+
+  unblock()
+  await settled(lane)
+  const terminal = log.read(queued).at(-1)
+  check(
+    "the queued turn ran once the commit released",
+    terminal?.type === "run.finished" && terminal.status === "success",
+    terminal?.type ?? "(no events)",
+  )
+  check(
+    "and the commit's own log still ended once",
+    log.read(held).filter((e) => e.type === "run.finished" || e.type === "run.error").length === 1,
   )
 }
 

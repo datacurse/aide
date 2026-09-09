@@ -326,6 +326,7 @@ app.get("/api/projects", async () => {
             title: firstLine(holder.text),
             startedAt: holder.startedAt,
             blocked: holder.blocked,
+            held: holder.held,
           }
         : null,
     }

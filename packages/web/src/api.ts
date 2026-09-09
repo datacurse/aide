@@ -84,6 +84,14 @@ export interface LockHolder {
   startedAt: number
   /** A tool call is waiting on a human. The one thing that is stopped ON you. */
   blocked: boolean
+  /**
+   * The daemon's own hold — an auto-commit landing — not a conversation's
+   * turn. It locks nothing here: the daemon queues a send behind it, so the
+   * only gate that reads it is push. Optional-read (`?.held`) in gates via
+   * GateHolder, so a daemon older than this field just means every holder
+   * blocks, which was yesterday's behaviour.
+   */
+  held: boolean
 }
 
 export type ProjectView = Project & { holder: LockHolder | null }
