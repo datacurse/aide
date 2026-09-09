@@ -98,7 +98,7 @@ Decisions already taken, which are not gaps to fill:
   static import is hoisted and its output would print above `repo: <path>` — the
   run would still be correct and would read as though the sections had been
   shuffled. When changing any of this, the check that matters is that the
-  assertion count does not fall: `pnpm smoke` prints 705 `ok` lines as of
+  assertion count does not fall: `pnpm smoke` prints 718 `ok` lines as of
   2026-09-09, and a refactor that quietly drops some is the failure this number
   exists to catch.
   It fell once on purpose — the card view was removed and took ~30 of its own
@@ -663,15 +663,22 @@ Decisions already taken, which are not gaps to fill:
   about to send, and the SDK will name that one for free. That exemption is the
   whole cost control — without it this is a model call per composing pause.
 - **A commit takes the working tree, and starts itself.** There is no commit
-  route and no commit button: `startCommit` in server.ts runs off
-  `ChatLane.onProjectIdle`, once per finished chat turn, and commits only after
-  the project's checks pass. A session id on it is attribution only, and the
-  subject comes from the turn's own summary headline (`turnCommitMessage`) with
-  the helper model as fallback. Narrowing what it stages back to one chat's
-  paths re-opens the wedge in the brief. The dirty-tree block on starting a new
-  chat went with the button — a refusal whose release was removed would be the
-  wedge built on purpose — so a chat may now start over uncommitted work, which
-  the next turn's auto-commit sweeps up.
+  button: `startCommit` in server.ts runs off `ChatLane.onProjectIdle`, once per
+  finished chat turn, and commits only after the project's checks pass. A
+  session id on it is attribution only, and the subject comes from the turn's
+  own summary headline (`turnCommitMessage`) with the helper model as fallback.
+  Narrowing what it stages back to one chat's paths re-opens the wedge in the
+  brief. The dirty-tree block on starting a new chat went with the button — a
+  refusal whose release was removed would be the wedge built on purpose — and
+  what replaced it is the PRE-TURN SWEEP: edits a human made between turns are
+  committed as `manual edits` (no trailer, no gate — they are already true)
+  when the next turn starts, so a turn's auto-commit contains only that turn's
+  work. The one exception is a red gate's leftover, which the sweep skips (see
+  `#redGates` in chat.ts) so the failing tree stays the conversation's to fix.
+  The one route left is the API-only escape hatch — `POST
+  /api/projects/:id/commit?force=true`, reachable as `pnpm commit-force
+  <project>` — which lands a red tree with a `WIP:` subject; `pnpm smoke` pins
+  that no web source can name it.
 - **A failed check gets one automatic fix, and one only.** The commit hands the
   failure to the conversation it is attributed to, waits for the turn, re-reads
   the tree and checks again; a second failure stops and asks. That turn runs

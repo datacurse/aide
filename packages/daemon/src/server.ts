@@ -45,7 +45,12 @@ import {
 import { pickFolder } from "./picker.js"
 import { listRemoteDirectories, listSshHosts } from "./ssh.js"
 import { conversationProfile } from "./profile.js"
-import { commitWorkingTree, conversationBaseline, turnCommitMessage } from "./review.js"
+import {
+  commitWorkingTree,
+  conversationBaseline,
+  turnCommitMessage,
+  VerifyFailed,
+} from "./review.js"
 import * as repo from "./repo.js"
 import { BOOT_SOURCE_ID, currentSourceId, isStale } from "./source.js"
 import { getConversation, listConversations } from "./sessions.js"
@@ -755,18 +760,69 @@ async function startCommit(opts: {
         emit: run.emit,
         delta: run.delta,
         stopped: run.stopped,
-      }),
+      }).then(
+        (spent) => {
+          // A landed commit means the tree's dirt (if any is left) is nobody's
+          // leftover — the next turn's pre-sweep may treat it as manual edits.
+          chat.clearRedGate(project.id)
+          return spent
+        },
+        (err: unknown) => {
+          // A refused gate leaves the tree dirty ON PURPOSE, as the failure the
+          // conversation was handed. Marking it is what stops the next turn's
+          // pre-sweep committing that tree as "manual edits" — see `#redGates`
+          // in chat.ts.
+          if (err instanceof VerifyFailed) chat.noteRedGate(project.id)
+          throw err
+        },
+      ),
   })
 }
+
+/**
+ * The escape hatch: force a commit over a red gate, API only.
+ *
+ * A gate that fails twice leaves the tree dirty on purpose, and with no commit
+ * button there is no UI way past it — which is right as the default (fix the
+ * code) and a trap as an absolute (a pre-existing failure, a check that cannot
+ * pass on this machine). So the route exists and the button does not: reachable
+ * by `pnpm commit-force <project>` or curl, never drawn, and refused without
+ * the explicit `?force=true` so nothing can wander into it by posting to a
+ * remembered URL. The subject gets a `WIP:` prefix when a check actually
+ * failed — see `commitWorkingTree` — so the red state is visible in `git log`.
+ *
+ * The checks still RUN (force means "land it anyway", not "don't tell me");
+ * what is skipped is the refusal and the repair attempt.
+ */
+app.post(
+  "/api/projects/:id/commit",
+  withProject(async (project, req, reply) => {
+    if ((req.query as { force?: unknown } | null)?.force !== "true") {
+      return reply.code(400).send({
+        message:
+          "commits are automatic — aide commits each turn's work itself. This route is " +
+          "the force-only escape hatch and requires ?force=true.",
+      })
+    }
+    const body = (req.body ?? {}) as { sessionId?: unknown }
+    const sessionId = typeof body.sessionId === "string" && body.sessionId ? body.sessionId : null
+    try {
+      const runId = await startCommit({ project, sessionId, force: true, push: false })
+      return { runId }
+    } catch (err) {
+      return reply.code(409).send({ message: err instanceof Error ? err.message : String(err) })
+    }
+  }),
+)
 
 /**
  * Commit each turn's work as the turn finishes. Not a setting — the only path.
  *
  * Registered on the lane rather than polled, and it runs AFTER the turn has let
  * go of the checkout — see `onProjectIdle`, which is only called for a chat turn
- * ending, so a commit cannot trigger another one. There is no route and no
- * button: the commit endpoint was removed with the opt-in flag, and the human's
- * one remaining git control is push.
+ * ending, so a commit cannot trigger another one. There is no button, and the
+ * only route is the force-only escape hatch above; the human's one remaining
+ * git control is push.
  *
  * Everything it skips is deliberate. It never pushes: sending work off the
  * machine is the one irreversible step, and it stays a press. It never forces: a

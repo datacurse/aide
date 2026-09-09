@@ -2498,10 +2498,23 @@ console.log("\nsquash and push")
   await save("one.txt", "first turn's work")
   await save("two.txt", "second turn's work")
   await save("three.txt", "third turn's work")
-  // An uncommitted file rides through the squash untouched: `reset --soft`
-  // never rewrites the working tree, and a squash that swallowed the human's
-  // half-typed edit would be this feature disqualifying itself.
+
+  // A dirty tree refuses outright. The files would survive — the squash never
+  // touches the working tree — but a rewrite under uncommitted work is where
+  // "what happened to my changes" starts, and auto-commit makes dirty-at-push
+  // the exceptional case rather than the normal one.
   await writeFile(join(work, "wip.txt"), "not yet\n", "utf8")
+  const dirty = await squashAndPush(work).then(
+    () => null,
+    (err: unknown) => (err instanceof Error ? err.message : String(err)),
+  )
+  check("a dirty tree refuses the squash", dirty !== null, String(dirty).slice(0, 60))
+  check("and says why", String(dirty).includes("uncommitted"), String(dirty).slice(0, 60))
+  check(
+    "and nothing was pushed by the refusal",
+    (await git(origin, ["log", "--pretty=%s", "main"])).trim() === "the base",
+  )
+  await rm(join(work, "wip.txt"))
 
   const out = await squashAndPush(work)
   check("three commits fold into one push", out.squashed === 3, String(out.squashed))
@@ -2529,11 +2542,6 @@ console.log("\nsquash and push")
     "squashing must not cut the link from history to the transcripts",
   )
   check(
-    "the working tree's own edit is untouched",
-    (await git(work, ["status", "--porcelain", "--", "wip.txt"])).trim().startsWith("??"),
-    "reset --soft moves history, never files",
-  )
-  check(
     "the files themselves all landed",
     (await git(origin, ["ls-tree", "--name-only", "main"])).includes("three.txt"),
   )
@@ -2545,6 +2553,111 @@ console.log("\nsquash and push")
   check(
     "and its commit arrives as itself",
     (await git(origin, ["log", "-1", "--pretty=%s", "main"])).trim() === "fourth turn's work",
+  )
+
+  // The swap is a compare-and-swap, and this is the case it exists for: a
+  // commit landing between the fold being built and the branch being moved.
+  // `update-ref <ref> <new> <old>` refuses because the branch no longer points
+  // at <old> — so the concurrent commit survives, the stale fold is an
+  // unreferenced object, and NOTHING was pushed. The in-place `reset --soft`
+  // this replaced would have silently discarded the concurrent commit.
+  await save("five.txt", "fifth turn's work")
+  await save("six.txt", "sixth turn's work")
+  const raced = await squashAndPush(work, {
+    beforeSwap: async () => {
+      await save("seven.txt", "a commit that lands mid-squash")
+    },
+  }).then(
+    () => null,
+    (err: unknown) => (err instanceof Error ? err.message : String(err)),
+  )
+  check("a concurrent commit fails the swap", raced !== null, String(raced).slice(0, 70))
+  check(
+    "and the concurrent commit survives at HEAD",
+    (await git(work, ["log", "-1", "--pretty=%s"])).trim() === "a commit that lands mid-squash",
+  )
+  check(
+    "with the folded turns still behind it",
+    (await git(work, ["log", "--pretty=%s"])).includes("fifth turn's work"),
+    "a failed swap must strand the fold, never the history",
+  )
+  check(
+    "and nothing reached the remote",
+    (await git(origin, ["log", "-1", "--pretty=%s", "main"])).trim() === "fourth turn's work",
+  )
+  // The retry, over the same branch, now folds all three.
+  const retried = await squashAndPush(work)
+  check("the retry folds what is there now", retried.squashed === 3, String(retried.squashed))
+  check(
+    "and lands it",
+    (await git(origin, ["log", "-1", "--pretty=%s", "main"])).trim() === "fifth turn's work",
+  )
+
+  await rm(pen, { recursive: true, force: true })
+}
+
+console.log("\nthe force escape hatch")
+{
+  // The one way past a red gate, API-only and never drawn: the same commit path
+  // with the refusal overridden and the subject marked. Driven directly at
+  // `commitWorkingTree` — the route is a thin wrapper — with `message` supplied
+  // so no model is called, and a check that genuinely fails, because a stubbed
+  // gate would prove the stub.
+  const { commitWorkingTree, VerifyFailed } = await import("./review.js")
+  const pen = await mkdtemp(join(tmpdir(), "aide-force-"))
+  await run("git", ["init", "-b", "main", pen], { windowsHide: true })
+  await git(pen, ["config", "user.email", "smoke@example.com"])
+  await git(pen, ["config", "user.name", "smoke"])
+  await writeFile(join(pen, "base.txt"), "base\n", "utf8")
+  await git(pen, ["add", "-A"])
+  await git(pen, ["commit", "-m", "base"])
+  await writeFile(join(pen, "red.txt"), "work the gate refuses\n", "utf8")
+
+  const drive = (force: boolean, verify: string) =>
+    commitWorkingTree({
+      project: { id: "p-force", name: "force", root: pen, addedAt: "" },
+      sessionId: null,
+      request: "land it anyway",
+      message: { subject: "land it anyway", body: "" },
+      verify: async () => [{ command: verify, unless: [] }],
+      force,
+      push: false,
+      hasUpstream: false,
+      repair: null,
+      emit: () => {},
+      delta: () => {},
+      stopped: () => false,
+    })
+
+  const refused = await drive(false, "git definitely-not-a-subcommand").then(
+    () => null,
+    (err: unknown) => err,
+  )
+  check(
+    "a red tree without force still throws VerifyFailed",
+    refused instanceof VerifyFailed,
+    String(refused),
+  )
+  check(
+    "and nothing landed",
+    (await git(pen, ["log", "--pretty=%s"])).trim() === "base",
+  )
+
+  await drive(true, "git definitely-not-a-subcommand")
+  check(
+    "force lands the same tree with the red state in the subject",
+    (await git(pen, ["log", "-1", "--pretty=%s"])).trim() === "WIP: land it anyway",
+    (await git(pen, ["log", "-1", "--pretty=%s"])).trim(),
+  )
+
+  // Force over a GREEN gate is an ordinary commit — WIP: on a tree whose
+  // checks passed would cry wolf in every log listing.
+  await writeFile(join(pen, "green.txt"), "fine\n", "utf8")
+  await drive(true, "git --version")
+  check(
+    "force over a passing gate is not marked WIP",
+    (await git(pen, ["log", "-1", "--pretty=%s"])).trim() === "land it anyway",
+    (await git(pen, ["log", "-1", "--pretty=%s"])).trim(),
   )
 
   await rm(pen, { recursive: true, force: true })

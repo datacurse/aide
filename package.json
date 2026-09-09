@@ -9,6 +9,7 @@
     "probe": "pnpm --filter @aide/daemon probe",
     "smoke": "pnpm --filter @aide/daemon smoke",
     "smoke:queue": "pnpm --filter @aide/daemon smoke:queue",
+    "commit-force": "node scripts/aide-commit-force.mjs",
     "daemon": "pnpm --filter @aide/daemon start",
     "web": "pnpm --filter @aide/web dev",
     "typecheck": "pnpm -r run typecheck",

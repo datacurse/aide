@@ -28,9 +28,10 @@ import { runsDir } from "@aide/protocol/node"
 /**
  * How far into a run log to look for `run.started` before giving up.
  *
- * It is line 2 or 3 — `user.message`, `checkpoint.taken`, then the SDK's init.
- * The bound is not an optimisation, it is a refusal to read a whole log looking
- * for an event that a turn which died before it spawned is never going to have.
+ * It is line 2 to 4 — a pre-turn sweep's `commit.landed` when the tree was
+ * dirty, `user.message`, `checkpoint.taken`, then the SDK's init. The bound is
+ * not an optimisation, it is a refusal to read a whole log looking for an event
+ * that a turn which died before it spawned is never going to have.
  */
 const HEADER_LINES = 8
 

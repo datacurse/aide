@@ -356,27 +356,48 @@ export function squashMessage(
  *
  * The push button's second option, for a branch that accumulated one
  * auto-commit per turn: land it upstream as one change instead of a dozen
- * steps. No force and no rewrite of anything published — `reset --soft
- * @{upstream}` only moves commits that have never left this machine, and the
- * result is a fast-forward for the remote exactly as the original stack was.
+ * steps. No force and no rewrite of anything published — only commits that
+ * have never left this machine are folded, and the result is a fast-forward
+ * for the remote exactly as the original stack was.
+ *
+ * The fold is built OFF TO THE SIDE and only then swapped in. `commit-tree`
+ * writes the squashed commit — HEAD's own tree, parented on the upstream —
+ * without touching HEAD, the index or the working files, and `update-ref` with
+ * the old value as its third argument is a compare-and-swap: if anything moved
+ * the branch in between, the swap fails and NOTHING has changed. The previous
+ * version did `reset --soft` in place, which had a window where the branch was
+ * rewound and the squash commit did not exist yet; a hook refusing the commit
+ * in that window needed an ORIG_HEAD rollback, and a crash in it lost the
+ * branch position outright. Nothing here needs rolling back because nothing is
+ * ever half-done.
+ *
+ * A dirty working tree is refused outright. The tree's files would survive a
+ * squash untouched, but a squash under uncommitted work is exactly where "what
+ * happened to my changes" confusion starts — and with auto-commit sweeping the
+ * tree every turn, dirty-at-push is the exceptional case, not the normal one.
  *
  * With one commit ahead there is nothing to fold, and with none this is a plain
  * push; both fall through rather than refusing, because the button says "push"
  * first and "squash" second.
- *
- * If the squash commit itself fails — a pre-commit hook, most likely — the
- * branch is put back where it was (`ORIG_HEAD`, which the reset just wrote)
- * before the error is rethrown. Without that a refused hook would leave the
- * history rewound and the work sitting staged, which reads as commits having
- * vanished.
  */
 export async function squashAndPush(
   root: RepoRef,
+  /** Test seam: runs between building the squash commit and the ref swap. */
+  hooks?: { beforeSwap?: () => Promise<void> },
 ): Promise<{ branch: string; pushed: number; squashed: number }> {
+  const branch = await currentBranch(root)
+  if (!branch || branch === "HEAD") {
+    throw new Error("HEAD is detached — check out a branch before squashing")
+  }
+  if ((await git(root, ["status", "--porcelain"])).trim()) {
+    throw new Error(
+      "the working tree has uncommitted changes — a squash rewrites the branch, so it " +
+        "waits until the next turn's auto-commit has swept them",
+    )
+  }
+
   const range = "@{upstream}..HEAD"
-  const subjects = (
-    await git(root, ["log", "--reverse", "--pretty=%s", range])
-  )
+  const subjects = (await git(root, ["log", "--reverse", "--pretty=%s", range]))
     .split("\n")
     .map((s) => s.trim())
     .filter(Boolean)
@@ -393,16 +414,59 @@ export async function squashAndPush(
     ),
   ]
 
-  await git(root, ["reset", "--soft", "@{upstream}"])
-  try {
+  // HEAD's tree by name, not `write-tree` from the index: the porcelain check
+  // above makes the two identical, and naming HEAD's removes the index from the
+  // dependency list entirely.
+  const oldHead = (await git(root, ["rev-parse", "HEAD"])).trim()
+  const upstream = (await git(root, ["rev-parse", "@{upstream}"])).trim()
+  const tree = (await git(root, ["rev-parse", "HEAD^{tree}"])).trim()
+  const squashed = (
     await withMessageFile(root, squashMessage(subjects, sessionIds), (file) =>
-      git(root, ["commit", "-F", file, "--cleanup=whitespace"]),
+      git(root, ["commit-tree", tree, "-p", upstream, "-F", file]),
     )
-  } catch (err) {
-    await git(root, ["reset", "--soft", "ORIG_HEAD"]).catch(() => {})
-    throw err
-  }
+  ).trim()
+
+  await hooks?.beforeSwap?.()
+
+  // The swap. `<old>` as the third argument means "only if the branch still
+  // points where I read it" — a commit that landed concurrently fails this
+  // rather than being silently discarded, and the squash commit it strands is
+  // an unreferenced object git will collect.
+  await git(root, ["update-ref", `refs/heads/${branch}`, squashed, oldHead])
+
   return { ...(await pushBranch(root, true)), squashed: subjects.length }
+}
+
+/**
+ * Commit the human's own edits, before a turn begins — the pre-turn sweep.
+ *
+ * A turn's auto-commit takes the whole working tree, so edits made in an editor
+ * between turns would land inside the next turn's commit, attributed to work
+ * that never made them. Sweeping them into a commit of their own first keeps
+ * the attribution exact: the turn's commit contains the turn's work.
+ *
+ * Deliberately NOT gated on the project's checks and carrying no session
+ * trailer. The gate exists to stop a model landing broken code; these edits are
+ * the human's, already on disk and already true, and refusing to record them
+ * would only smear them into the next commit anyway. The subject is fixed and
+ * the body is the file list, because there is no turn to lend a headline and
+ * nothing here is worth a model call.
+ *
+ * Null when the tree is clean, which is the common case and costs one
+ * `git status`.
+ */
+export async function sweepManualEdits(
+  root: RepoRef,
+): Promise<{ sha: string; paths: string[] } | null> {
+  if (!(await git(root, ["status", "--porcelain"])).trim()) return null
+  // The same reading a commit takes — scratch index, renames and untracked
+  // handled — so the sweep and the rail can never disagree about what "dirty"
+  // means.
+  const changes = await treeChanges(root)
+  if (changes.paths.length === 0) return null
+  const message = ["manual edits", "", ...changes.paths.map((p) => `  ${p}`)].join("\n")
+  const sha = await commitRun(root, changes.paths, `${message}\n`)
+  return { sha, paths: [...changes.paths] }
 }
 
 const exists = (path: string) => access(path).then(() => true, () => false)

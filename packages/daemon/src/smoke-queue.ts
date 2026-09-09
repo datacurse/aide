@@ -1216,5 +1216,77 @@ console.log("\ncommitting without being asked each time")
   lane.onProjectIdle = null
 }
 
+console.log("\nthe pre-turn sweep")
+{
+  // Edits made in an editor between turns get a commit of their own before the
+  // turn starts, so the turn's auto-commit contains only the turn's work — the
+  // attribution the whole one-commit-per-turn design is for. The exception is a
+  // RED GATE's leftover: that dirt is a failing tree the conversation was
+  // handed, and committing it as "manual edits" would launder it into history
+  // under the wrong name.
+  // This file's `git` answers `{stdout}`, unlike smoke.ts's string-returning
+  // one — hence the local wrapper.
+  const gitOut = async (args: string[]) => (await git(root, args)).stdout
+  const manualEdits = async () =>
+    (await gitOut(["log", "--pretty=%s"]))
+      .split("\n")
+      .filter((s) => s.trim() === "manual edits").length
+  // Relative, not absolute: every send above this section swept too — the stub
+  // worker dirties the tree each turn, which is exactly the between-turns dirt
+  // the sweep exists for — so the baseline is whatever the run has accumulated.
+  const already = await manualEdits()
+
+  await writeFile(join(root, "hand-edit.txt"), "typed in an editor\n", "utf8")
+  const sweptRun = await say(null, "a turn after hand edits")
+  await settled(lane)
+
+  check("a hand-dirtied tree gets its own commit", (await manualEdits()) === already + 1)
+  check(
+    "and the hand edit is in it, not in the turn's tree",
+    (await gitOut(["log", "--diff-filter=A", "--pretty=%s", "--", "hand-edit.txt"])).trim() ===
+      "manual edits",
+    "the file's adding commit must be the sweep's",
+  )
+  check(
+    "with no session trailer — no conversation made these",
+    !(await gitOut(["log", "-1", "--grep=manual edits", "--pretty=%B"])).includes("Aide-Session"),
+  )
+  check(
+    "and the file list as its body",
+    (await gitOut(["log", "-1", "--grep=manual edits", "--pretty=%B"])).includes("hand-edit.txt"),
+  )
+  check(
+    "the sweep announces itself in the turn's own log",
+    log
+      .read(sweptRun)
+      .some((e) => e.type === "commit.landed" && e.subject === "manual edits"),
+    "a commit nothing on screen explains reads as history moving by itself",
+  )
+
+  // The red-gate case: the dirt is the failure the conversation was handed, and
+  // the next turn INHERITS it — exactly yesterday's behaviour — rather than
+  // having it committed out from under the repair.
+  lane.noteRedGate(project.id)
+  await writeFile(join(root, "red-left.txt"), "what the failed gate left\n", "utf8")
+  await say(null, "a turn over a red gate's leftovers")
+  await settled(lane)
+  check("a red gate's leftover is NOT swept", (await manualEdits()) === already + 1)
+  check(
+    "and stays in the tree for the turn to inherit",
+    (await gitOut(["status", "--porcelain", "--", "red-left.txt"])).trim().startsWith("??"),
+  )
+
+  // A landed commit clears the marker — server.ts wires that around the commit
+  // path — and the sweep resumes for whatever is dirty after it.
+  lane.clearRedGate(project.id)
+  await say(null, "a turn after the gate cleared")
+  await settled(lane)
+  check("clearing the marker lets the sweep resume", (await manualEdits()) === already + 2)
+  check(
+    "and the leftover is finally recorded",
+    (await gitOut(["status", "--porcelain", "--", "red-left.txt"])).trim() === "",
+  )
+}
+
 console.log(`\n${failures === 0 ? "all checks passed" : `${failures} FAILED`}`)
 process.exit(failures === 0 ? 0 : 1)

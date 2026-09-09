@@ -21,6 +21,7 @@ import {
   takeTurnCheckpoint,
   type TurnCheckpoint,
 } from "./checkpoint.js"
+import { sweepManualEdits } from "./changes.js"
 import { CONFIG } from "./config.js"
 import type { EventLog } from "./eventlog.js"
 import { git, gitOr, refRoot, repoOf, type RepoRef } from "./git.js"
@@ -362,6 +363,33 @@ export class ChatLane implements LiveChats {
       ) => void)
     | null = null
 
+  /**
+   * Projects whose last auto-commit was refused by their own checks.
+   *
+   * Read by the pre-turn sweep in `send`: a dirty tree here is a RED GATE's
+   * leftover, not the human's editing, and sweeping it into a commit labelled
+   * "manual edits" would launder a failing tree into history under the wrong
+   * name. Skipping the sweep lets the next turn inherit the dirt — exactly the
+   * repair loop the gate's failure handed to the conversation.
+   *
+   * Written by the commit path (server.ts wires `noteRedGate`/`clearRedGate`
+   * around `commitWorkingTree`), because the lane runs held work without
+   * knowing what it is. A daemon restart clears it, and that reads as "manual
+   * edits" only until the next turn's gate goes red again — wrong label once,
+   * never wrong contents.
+   */
+  readonly #redGates = new Set<string>()
+
+  /** The commit path saw this project's checks refuse. See `#redGates`. */
+  noteRedGate(projectId: string): void {
+    this.#redGates.add(projectId)
+  }
+
+  /** A commit landed, so the tree's dirt is nobody's leftover any more. */
+  clearRedGate(projectId: string): void {
+    this.#redGates.delete(projectId)
+  }
+
   #idleMs: number
   #closeGraceMs: number
 
@@ -494,6 +522,34 @@ export class ChatLane implements LiveChats {
     this.#turns.set(runId, record)
 
     try {
+      // The pre-turn sweep, under the lock this turn just took (moving it above
+      // the registration would put an await between the holder check and the
+      // claim, which is the race the synchronous registration exists to close).
+      // Edits made in an editor between turns get a commit of their own —
+      // subject "manual edits", no trailer, no gate — so the auto-commit after
+      // THIS turn contains only this turn's work. Skipped when the dirt is a
+      // red gate's leftover (see `#redGates`): that tree is the failure the
+      // conversation was handed, and this turn inherits it exactly as before.
+      // A sweep that cannot run must not refuse the turn — the tree simply
+      // stays dirty, which is yesterday's behaviour, and the log says why.
+      if (!this.#redGates.has(project.id)) {
+        try {
+          const swept = await sweepManualEdits(repoOf(project))
+          if (swept) {
+            this.log.append(runId, {
+              type: "commit.landed",
+              sha: swept.sha,
+              paths: swept.paths,
+              subject: "manual edits",
+            })
+          }
+        } catch (err) {
+          console.error(
+            `[aide] pre-turn sweep failed for ${project.name}: ${err instanceof Error ? err.message : err}`,
+          )
+        }
+      }
+
       // Together, because they are independent and this is the path a human is
       // waiting on. The fingerprint is read AFTER admission like everything else
       // that can suspend — the lock above is taken synchronously and nothing may

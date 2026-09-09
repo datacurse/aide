@@ -312,10 +312,13 @@ export async function commitWorkingTree(
   // decided from the same list the commit will stage. Reading the tree a second
   // time to answer it would let the two disagree.
   let repaired = false
+  /** A check failed and `force` landed it anyway — the subject says so. */
+  let overridden = false
   for (;;) {
     const failed = await verifyTree(opts, changes.paths)
     if (!failed) break
     if (opts.force) {
+      overridden = true
       emit({
         type: "commit.step",
         label: `committing anyway — \`${failed.command}\` failed and you asked for it`,
@@ -411,6 +414,12 @@ export async function commitWorkingTree(
     }
   }
   add(spent, message)
+
+  // A forced commit over a failing check wears it in the subject: `WIP:` is
+  // what makes the red state visible in `git log` without opening anything.
+  // Only when a check actually failed — force over a green tree is an ordinary
+  // commit and marking it would cry wolf.
+  if (overridden) message = { ...message, text: `WIP: ${message.text}` }
 
   emit({
     type: "commit.drafted",

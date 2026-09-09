@@ -18,7 +18,7 @@
  * browser bundle and leaves a blank white page.
  */
 import { existsSync } from "node:fs"
-import { readFile } from "node:fs/promises"
+import { readFile, readdir } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import {
@@ -1519,6 +1519,30 @@ console.log("\nthe models a turn can be sent to")
     "and an unknown one shows itself",
     chatModelLabel("claude-3-opus-20240229") === "claude-3-opus-20240229",
     "a retired model must read as its id, not as a blank",
+  )
+}
+
+console.log("\nthe force endpoint stays out of the UI")
+{
+  // The commit route exists again — force-only, the escape hatch past a red
+  // gate — and the design is that the UI NEVER learns it: the default stays
+  // "fix the code", and a button would make landing broken work one press
+  // cheaper than fixing it. A route the web package cannot name is a promise a
+  // grep can keep, so this is that grep, pinned. `commitProject` is the old
+  // api.ts wrapper's name, checked so it cannot quietly come back either.
+  const webSrc = fileURLToPath(new URL("../../web/src/", import.meta.url))
+  const files = (await readdir(webSrc, { recursive: true })).filter((f) =>
+    /\.(ts|tsx)$/.test(String(f)),
+  )
+  const offenders: string[] = []
+  for (const file of files) {
+    const body = await readFile(join(webSrc, String(file)), "utf8")
+    if (/\/commit\b|commitProject|force=true/.test(body)) offenders.push(String(file))
+  }
+  check(
+    "no web source names the commit endpoint",
+    offenders.length === 0,
+    offenders.join("; ") || `${files.length} files checked`,
   )
 }
 
