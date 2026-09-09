@@ -68,11 +68,27 @@ console.log("\nbash policy")
   check("denies pnpm  dev with padding", !verdict("pnpm   dev").allow, "whitespace is collapsed")
   check("denies pnpm probe", !verdict("pnpm probe").allow, "it spends money")
   check("denies npx", !verdict("npx cowsay").allow)
-  check("denies a pipe", !verdict("pnpm ls | head").allow)
-  check("denies chaining", !verdict("cd packages && pnpm test").allow)
+  // Compounds are judged segment by segment now — the dedicated section below
+  // covers the shapes — so a pipe into a pager and a redirect into scratch
+  // space pass, while every segment still has to clear the same lists.
+  check(
+    "allows a pipe into a pager",
+    verdict("pnpm ls | head").allow,
+    "head is filtering pnpm's output there, not reading a file",
+  )
+  check("denies chaining through cd", !verdict("cd packages && pnpm test").allow)
   check("denies substitution", !verdict("pnpm $(echo dev)").allow, "the payload hides in the arg")
   check("denies backticks", !verdict("pnpm `echo dev`").allow)
-  check("denies redirection", !verdict("pnpm ls > /tmp/x").allow)
+  check(
+    "allows a redirect into scratch space",
+    verdict("pnpm ls > /tmp/x").allow,
+    "/tmp is outside the tree under review",
+  )
+  check(
+    "denies a redirect into the tree",
+    !verdict("pnpm ls > out.txt").allow,
+    "a relative target lands in the checkout",
+  )
   check("denies a newline", !verdict("pnpm ls\nrm -rf /").allow)
   check("denies a non-string", !verdict(undefined).allow)
   check("denial says what to do instead", verdict("cd x && pnpm t").reason.includes("--filter"))
@@ -99,6 +115,21 @@ console.log("\nreading files through a shell")
   check("denies awk", !verdict("awk 'NR>10' file.ts").allow)
   check("denies find", !verdict("find . -name '*.ts'").allow)
 
+  // The reader variants CLI 2.1.258/2.1.259 turned up chasing the same gap:
+  // every one is one of the commands above wearing another name, and a list
+  // that omits them is a rule with a spelling that gets through.
+  check("denies tac", !verdict("tac log.txt").allow)
+  check("denies egrep", !verdict("egrep -rn TODO src").allow)
+  check("denies fgrep", !verdict("fgrep TODO src/x.ts").allow)
+  check("denies nl", !verdict("nl -ba src/x.ts").allow)
+  check("denies bat", !verdict("bat src/x.ts").allow)
+  check("denies batcat", !verdict("batcat src/x.ts").allow)
+  check("denies less", !verdict("less src/x.ts").allow)
+  check("denies more", !verdict("more src/x.ts").allow)
+  check("tac is told to use Read", verdict("tac x.ts").reason.includes("Read"))
+  check("egrep is told to use Grep", verdict("egrep x src").reason.includes("Grep"))
+  check("bat is told to use Read", verdict("bat x.ts").reason.includes("Read"))
+
   // Refused even when the run's own allowlist names them. The allowlist says
   // which commands this run may reach for; this rule says the shell is the wrong
   // way to reach for these at all, and an allowlist written before the rule
@@ -124,18 +155,24 @@ console.log("\nreading files through a shell")
   // become unrunnable for spelling reasons.
   check("catalog is not cat", verdict("pnpm catalog").allow, "prefix must end at a word")
   check("a path containing grep is not grep", verdict("pnpm run grepper").allow)
+  check("lessc is not less", checkBashCommand("lessc style.less", null, []).allow)
+  check("nl ends at a word too", checkBashCommand("nlx run x", null, []).allow)
 
-  // Only at the START. `git log | head` is paging a git call rather than reading
-  // a file, and a rule matching anywhere in the string would refuse it for the
-  // word `head`. That command is refused here anyway — a pipe is a shell
-  // metacharacter and loses to the blunter rule above it — so what is checkable
-  // is the reason: it must be the pipe that stops it, not the pager, or the
-  // refusal sends the agent to Read for a command that has no file in it.
+  // A piped file-tool command with no file argument is a PAGER over another
+  // command's output, which is the one thing only a shell can do — refusing it
+  // sent the agent to Read for a command that has no file in it. The same
+  // command aimed at a file stays refused; the dedicated section below walks
+  // the shapes.
   const paged = checkBashCommand("git log --oneline | head -20", null, [])
   check(
-    "a pager after a real command is refused for its pipe, not for being a read",
-    !paged.allow && paged.reason.includes("shell operators") && !paged.reason.includes("Read"),
+    "a pager after a real command is allowed",
+    paged.allow,
     paged.reason.slice(0, 60),
+  )
+  check(
+    "but a piped read with a file argument is still a read",
+    !checkBashCommand("pnpm test | tail -f log.txt", null, []).allow,
+    "tail with a file is reading the file, wherever it sits in the chain",
   )
 
   // `ls` stays runnable. Glob answers a different question — paths matching a
@@ -165,9 +202,11 @@ console.log("\nthe gate and its widening name the same commands")
   // This is the assertion that catches the two lists drifting apart, which is
   // the only way this can fail — and it would fail silently, looking exactly
   // like a rule that works.
-  const { FILE_TOOL_COMMANDS } = await import("./policy.js")
+  const { FILE_TOOL_COMMANDS, SHELL_WRITE_COMMANDS, HUMAN_ONLY_COMMANDS: humanOnly } =
+    await import("./policy.js")
   const { fastBashSettings } = await import("./agent.js")
-  const denied = fastBashSettings(["pnpm dev"]).permissions?.deny ?? []
+  const configDeny = ["pnpm dev"]
+  const denied = fastBashSettings(configDeny).permissions?.deny ?? []
 
   for (const { prefix } of FILE_TOOL_COMMANDS) {
     check(
@@ -176,10 +215,290 @@ console.log("\nthe gate and its widening name the same commands")
       "otherwise Bash(*) resolves it before the policy is consulted",
     )
   }
+  for (const { prefix } of SHELL_WRITE_COMMANDS) {
+    check(
+      `the Auto layer denies ${prefix} as a shell write`,
+      denied.includes(`Bash(${prefix})`) && denied.includes(`Bash(${prefix} *)`),
+      "a write rule enforced on Plan and decorative on Auto is the same drift",
+    )
+  }
   check(
     "and still denies what it always did",
     denied.includes("Bash(pnpm dev)") && denied.includes("Bash(git commit)"),
     "the file-tool prefixes are an addition, not a replacement",
+  )
+
+  // The other direction: every prefix the Auto layer denies must come from one
+  // of the named lists. This is what fails when someone hand-adds a rule to
+  // `fastBashSettings` without putting it where `checkBashCommand` can see it —
+  // which would enforce it on Auto and leave Plan-approved runs free of it,
+  // the same one-sided gate the loop above catches the mirror image of.
+  const known = new Set([
+    ...configDeny,
+    ...humanOnly,
+    ...FILE_TOOL_COMMANDS.map((f) => f.prefix),
+    ...SHELL_WRITE_COMMANDS.map((f) => f.prefix),
+  ])
+  const strays = denied
+    .map((rule) => /^Bash\((.*?)\s?\*?\)$/.exec(rule)?.[1]?.trim() ?? rule)
+    .filter((prefix) => !known.has(prefix))
+  check(
+    "every denied prefix traces back to a named list",
+    strays.length === 0,
+    strays.join("; ") || `${denied.length} rules checked`,
+  )
+}
+
+console.log("\ncompound commands, segment by segment")
+{
+  // The settings layer matches leading words; the callback sees the full
+  // string, and for a long time answered it with a blanket metacharacter
+  // refusal — which refused `git log | head` for its pipe and taught nothing
+  // about `cd x && cat y`. Now it splits on |, ;, && and ||, and judges each
+  // segment by the same lists, with one carve-out: a file-tool command FED BY A
+  // PIPE with no file argument is paging another command's output, which only a
+  // shell can do. The carve-out is deliberately narrow — matching paths inside
+  // option values is the over-reach upstream shipped and reverted in 2.1.260 —
+  // so `tail -n 50` is never read as a file access on the value 50.
+  const open = (cmd: string) => checkBashCommand(cmd, null, [])
+  const listed = (cmd: string) => checkBashCommand(cmd, ["pnpm", "npm", "git log"], [])
+
+  // The shapes that must be caught, each named after the tool that does the job.
+  check("cd X && cat Y is refused for the cat", open("cd src && cat index.ts").reason.includes("Read"))
+  check("cat Y | head is refused for the cat", open("cat notes.md | head -5").reason.includes("Read"))
+  check("a < redirect is a read", !open("wc -l < src/app.ts").allow)
+  check("and says so", open("wc -l < src/app.ts").reason.includes("Read"))
+  check("$(cat …) is refused naming Read", open("echo $(cat .env)").reason.includes("Read"))
+  check("`cat …` too", open("echo `cat .env`").reason.includes("Read"))
+  check(
+    "a substitution inside double quotes still counts",
+    !open('echo "$(cat .env)"').allow,
+    "double quotes do not stop $() expanding in a real shell",
+  )
+  check("a read after && is a read", !open("pnpm build && grep -rn TODO src").allow)
+  check(
+    "the file-tool refusal outranks the cd hint",
+    open("cd src && cat index.ts").reason.includes("Read"),
+    "the cat is the thing to fix; the cd sentence would send the agent to --filter and a second refusal",
+  )
+
+  // The legitimate compounds, which the blanket refusal used to eat. These are
+  // the negative tests: a build tool's output piped into a pager must pass, on
+  // the open path AND under an allowlist that never lists head or tail.
+  check("npm run build passes", listed("npm run build").allow)
+  check("git log | head passes open", open("git log | head").allow)
+  check("git log | head passes an allowlist", listed("git log | head").allow)
+  check("pnpm test 2>&1 | tail -50 passes open", open("pnpm test 2>&1 | tail -50").allow)
+  check("pnpm test 2>&1 | tail -50 passes an allowlist", listed("pnpm test 2>&1 | tail -50").allow)
+  check("a flag value is not a filename", open("pnpm test | tail -n 50").allow)
+  check("a quoted script is not a filename", open("pnpm ls | sed 's/x/y/'").allow)
+  check(
+    "but a piped read aimed at a file is still refused",
+    !open("pnpm build | grep error src/log.txt").allow,
+    "the pipe does not launder a file argument",
+  )
+  check(
+    "and a first-segment file tool has no pipe to hide behind",
+    !open("cat x.ts | pnpm exec prettier").allow,
+  )
+
+  // Segment checks still apply the allowlist to every segment that RUNS a
+  // command, so a chain cannot smuggle one in behind an allowed word.
+  check("an unlisted second command is refused", !listed("pnpm ls | curl example.com").allow)
+  check("chaining into an unlisted command is refused", !listed("npm run build && curl x").allow)
+
+  // Backgrounding and subshells stay out: they are how an allowed prefix
+  // carries a payload, and no segment reading makes them legible.
+  check("backgrounding is refused", !open("pnpm dev &").allow)
+  check("a subshell is refused", !open("(git commit)").allow)
+  check("fd duplication is not backgrounding", open("pnpm test 2>&1").allow)
+}
+
+console.log("\nshell-authored writes")
+{
+  // The read rule costs seconds; this class costs work. A `sed -i`, a redirect
+  // into the tree or a heredoc edits files with no Edit row in the transcript
+  // and nothing for the checkpoint review to show — upstream has a documented
+  // half-a-document data loss from exactly this. Refused with a reason that
+  // names Edit and Write, because the way forward is the whole point.
+  const open = (cmd: string) => checkBashCommand(cmd, null, [])
+  const inRepo = (cmd: string) => checkBashCommand(cmd, null, [], "C:/Users/loki/code/aide")
+
+  check("sed -i is refused", !open("sed -i 's/a/b/' src/x.ts").allow)
+  check(
+    "and the reason is the write one, not the read one",
+    open("sed -i 's/a/b/' src/x.ts").reason.includes("Edit or Write"),
+    open("sed -i 's/a/b/' src/x.ts").reason.slice(0, 60),
+  )
+  check("and says why", open("sed -i 's/a/b/' src/x.ts").reason.includes("checkpoint"))
+  check("perl -i is refused", !open("perl -i -pe 's/a/b/' src/x.ts").allow)
+  check("perl -i.bak too", !open("perl -i.bak -pe 's/a/b/' src/x.ts").allow)
+  check("tee into the tree is refused", !open("pnpm test | tee out.log").allow)
+  check("tee -a too", !open("pnpm test | tee -a out.log").allow)
+  check("tee to /dev/null is not a write", open("pnpm test | tee /dev/null").allow)
+  check("tee to /tmp is scratch", open("pnpm test | tee /tmp/out.log").allow)
+  check("a > redirect into the tree is refused", !open("echo x > src/generated.ts").allow)
+  check("a >> append too", !open("echo x >> notes.md").allow)
+  check("a heredoc is refused", !open("cat > x.ts << EOF").allow)
+  check(
+    "and gets the write reason, because writing is what heredocs are for here",
+    open("cat > x.ts << EOF").reason.includes("Edit or Write"),
+  )
+  check(
+    "python -c that opens a file to write is refused",
+    !open("python -c \"open('x.ts','w').write('data')\"").allow,
+  )
+  check(
+    "node -e with writeFileSync is refused",
+    !open("node -e \"require('fs').writeFileSync('x.ts','data')\"").allow,
+  )
+  check(
+    "python -c that only reads is not a write",
+    open("python -c \"print(open('x.ts').read())\"").allow,
+    "only the named write shapes are refused — this is not a python parser",
+  )
+  check("plain node scripts still run", open("node scripts/one-off.mjs").allow)
+
+  // The conservative side, which is most of the design: scratch space and
+  // anything outside the tree is none of the review's business.
+  check("> /dev/null passes", open("pnpm test > /dev/null").allow)
+  check("2> /dev/null passes", open("pnpm test 2> /dev/null").allow)
+  check("> /tmp passes", open("pnpm build > /tmp/build.log").allow)
+  check("> %TEMP% passes", open("pnpm build > %TEMP%\\build.log").allow)
+  check("> $TMPDIR passes", open("pnpm build > $TMPDIR/build.log").allow)
+  check("> ../outside passes", open("pnpm build > ../scratch.log").allow)
+  check(
+    "an absolute path outside the project passes when cwd is known",
+    inRepo("pnpm build > D:/logs/build.log").allow,
+  )
+  check(
+    "an absolute path INSIDE the project does not",
+    !inRepo("pnpm build > C:/Users/loki/code/aide/out.log").allow,
+    "an absolute spelling of the tree is still the tree",
+  )
+  check(
+    "without a cwd an absolute path is allowed",
+    open("pnpm build > /somewhere/build.log").allow,
+    "refusing what cannot be judged is the over-match; the daemon always passes cwd",
+  )
+}
+
+console.log("\nthe run environment opts out of thrifty_sonic")
+{
+  const { CONFIG } = await import("./config.js")
+  const { queryEnv } = await import("./agent.js")
+
+  // The literal string, so a future edit to runEnv cannot silently re-enrol
+  // every run in the CLI's bash-first experiment. "0" and not a truthy check:
+  // the variable is read by the CLI as a string, and this is the one value the
+  // investigation verified disables the injection.
+  check(
+    'runEnv carries CLAUDE_CODE_THRIFTY_SONIC: "0"',
+    CONFIG.runEnv["CLAUDE_CODE_THRIFTY_SONIC"] === "0",
+    String(CONFIG.runEnv["CLAUDE_CODE_THRIFTY_SONIC"]),
+  )
+
+  // The SDK's env option REPLACES the subprocess environment, so what reaches
+  // query() must be process.env with the overrides ON TOP — losing the spread
+  // loses PATH and the OAuth credentials, and letting process.env win would let
+  // the host machine re-enrol the runs.
+  const had = Object.prototype.hasOwnProperty.call(process.env, "CLAUDE_CODE_THRIFTY_SONIC")
+  const before = process.env["CLAUDE_CODE_THRIFTY_SONIC"]
+  process.env["CLAUDE_CODE_THRIFTY_SONIC"] = "1"
+  const env = queryEnv(CONFIG.runEnv)
+  check(
+    "the override wins over a host that sets the variable itself",
+    env["CLAUDE_CODE_THRIFTY_SONIC"] === "0",
+    String(env["CLAUDE_CODE_THRIFTY_SONIC"]),
+  )
+  check(
+    "and the rest of the environment survives the merge",
+    typeof env["PATH"] === "string" || typeof env["Path"] === "string",
+    "options.env replaces, so a lost spread reads as an auth failure",
+  )
+  if (had) process.env["CLAUDE_CODE_THRIFTY_SONIC"] = before
+  else delete process.env["CLAUDE_CODE_THRIFTY_SONIC"]
+}
+
+console.log("\ndenied Bash calls are counted where the reasons are")
+{
+  // The settings layer's denial reaches the model with NO message —
+  // SDKPermissionDenial has no reason field — so the callback's sentence is the
+  // only corrective there is, and this tally is how a run's log says whether it
+  // landed. More than RETRY_LOOP_DENIALS denials of one prefix in a turn is an
+  // agent hunting for a spelling that gets through: the `git commit` story,
+  // watched live, was exactly four.
+  const { DenialTally, RETRY_LOOP_DENIALS } = await import("./policy.js")
+  const tally = new DenialTally()
+
+  check("starts at zero", tally.total === 0)
+  const first3 = [
+    tally.record("cat a.ts"),
+    tally.record("cat b.ts"),
+    tally.record("cat c.ts"),
+  ]
+  check(
+    `${RETRY_LOOP_DENIALS} denials of one prefix are not yet a loop`,
+    first3.every((warned) => !warned),
+    "warning early cries wolf; the threshold is the observed hunting length",
+  )
+  check("the fourth is the signal", tally.record("cat d.ts") === true)
+  check("and it fires once, not per denial after", tally.record("cat e.ts") === false)
+  check("a different prefix counts separately", tally.record("grep x src") === false)
+  check("the total counts everything", tally.total === 6, String(tally.total))
+  tally.reset()
+  check("a new turn starts clean", tally.total === 0 && tally.record("cat x") === false)
+
+  // Every refusal reaching the model has to be actionable — name the way
+  // forward, phrased as the next call. The generic allowlist refusal used to
+  // say only "not in this run's allowlist", which names nothing.
+  const { notAllowedReason } = await import("./agent.js")
+  const reason = notAllowedReason("WebSearch", ["Read", "Glob", "Grep"])
+  check("a tool refusal names the tool", reason.includes("WebSearch"))
+  check("and the tools to use instead", reason.includes("Read") && reason.includes("Grep"))
+  check(
+    "and the way out when none of them fit",
+    reason.includes("end the turn"),
+    "a refusal with no exit is a retry loop",
+  )
+}
+
+console.log("\na run says what mode it ran under")
+{
+  // run.started carried no permission mode, which made "was that turn Auto or
+  // Plan" unanswerable from the logs — the exact analysis the deny-list
+  // investigation needed and could not do. The SDK's init message is preferred
+  // when it names one (that is the RESOLVED mode); the context's value covers
+  // an SDK that does not.
+  const { normalizeSdkMessage } = await import("./agent.js")
+  const ctx = {
+    projectId: "p1",
+    cwd: "C:/x",
+    fallbackModel: "claude-opus-5",
+    permissionMode: "auto",
+  }
+  const init = (extra: Record<string, unknown>) =>
+    normalizeSdkMessage({ type: "system", subtype: "init", session_id: "s1", ...extra }, ctx)[0]
+
+  const resolved = init({ permissionMode: "plan" })
+  check(
+    "the SDK's own answer wins",
+    resolved?.type === "run.started" && resolved.permissionMode === "plan",
+    JSON.stringify(resolved),
+  )
+  const fallback = init({})
+  check(
+    "the query's mode fills in when the SDK is silent",
+    fallback?.type === "run.started" && fallback.permissionMode === "auto",
+  )
+  const bare = normalizeSdkMessage(
+    { type: "system", subtype: "init", session_id: "s1" },
+    { projectId: "p1", cwd: "C:/x", fallbackModel: "m" },
+  )[0]
+  check(
+    "and a replayed session with neither stays silent",
+    bare?.type === "run.started" && bare.permissionMode === undefined,
+    "inventing a mode for an old log would be a lie the analysis then trusts",
   )
 }
 
@@ -216,10 +535,20 @@ console.log("\ncarrying out an approved plan")
   )
   check("allows git push with a remote and branch", verdict("git push origin main").allow)
   check("git status is not git commit", verdict("git status").allow, "prefix must end at a word")
-  // The blunt half of the rule survives the allowlist going away, and it has to:
-  // an unattended run is exactly where `pnpm ls; git push` must not resolve to
-  // an allowed leading word.
-  check("denies chaining past a denied command", !verdict("pnpm ls; git push").allow)
+  // Chaining is judged per segment, and the deny list holds in EVERY segment —
+  // an unattended run is exactly where `pnpm ls; git commit` must not resolve
+  // to its first, innocent word.
+  check("denies chaining into a denied command", !verdict("pnpm ls; pnpm dev").allow)
+  check(
+    "denies chaining into git commit, with the human-only reason",
+    verdict("pnpm ls; git commit -m x").reason.includes("presses commit"),
+    verdict("pnpm ls; git commit -m x").reason.slice(0, 55),
+  )
+  check(
+    "an env prefix does not dodge the deny list",
+    !verdict("GIT_AUTHOR_NAME=x git commit -m x").allow,
+    "the CLI's own parser walks VAR=value prefixes; so does this one now",
+  )
   check("denies substitution", !verdict("echo $(git push)").allow)
   check("an empty command is still nothing", !verdict("   ").allow)
 

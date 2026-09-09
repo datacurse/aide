@@ -187,6 +187,16 @@ export const CONFIG = {
    *
    * `GIT_TERMINAL_PROMPT=0` turns "git wants credentials" from a run that hangs
    * until its budget runs out into an error the agent can read.
+   *
+   * `CLAUDE_CODE_THRIFTY_SONIC=0` opts every run out of the CLI's undocumented
+   * `thrifty_sonic` experiment (in the binary since v2.1.221), which injects
+   * "do your work through the Bash tool" advice into auto-mode turns — the exact
+   * opposite of the file-tool rule `policy.ts` enforces, and the measured cause
+   * of runs reaching for `cat` and `grep` against their own system prompt. The
+   * variable is undocumented and could stop working in any release, so it is a
+   * cost saving, not the enforcement: the deny list in `fastBashSettings` and
+   * `checkBashCommand` stays the real rule. `pnpm smoke` pins the literal "0"
+   * so an edit here cannot silently re-enrol every run.
    */
   runEnv: {
     CI: "true",
@@ -194,5 +204,6 @@ export const CONFIG = {
     FORCE_COLOR: "0",
     GIT_PAGER: "cat",
     GIT_TERMINAL_PROMPT: "0",
+    CLAUDE_CODE_THRIFTY_SONIC: "0",
   } as Record<string, string>,
 } as const

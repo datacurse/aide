@@ -38,11 +38,14 @@ export type ToWorker =
  */
 export type FromWorker =
   /**
-   * `protocol` is present only from a REMOTE agent, which is deployed
-   * separately and can therefore be a different version. A forked worker is
-   * this same checkout by construction, so it has nothing to declare.
+   * `protocol` and `build` are present only from a REMOTE agent, which is
+   * deployed separately and can therefore be a different version. A forked
+   * worker is this same checkout by construction, so it has nothing to declare.
+   * `protocol` gates the connection — wrong message shapes are refused —
+   * while `build` (the deploy stamp; see `buildHash` in deploy.ts) only warns:
+   * same shapes, older code, which is degraded rather than broken.
    */
-  | { type: "ready"; protocol?: number }
+  | { type: "ready"; protocol?: number; build?: string }
   | { type: "event"; runId: string; body: RunEventBody }
   /** Ephemeral live output; never written to the event log. */
   | { type: "delta"; runId: string; body: RunDelta }

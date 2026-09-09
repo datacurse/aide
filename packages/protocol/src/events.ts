@@ -165,6 +165,14 @@ export type RunEventBody =
       model: string
       cwd: string
       sessionId: string | null
+      /**
+       * The resolved SDK permission mode the session opened under — "auto",
+       * "plan", "dontAsk". Absent on logs from before it was recorded, which
+       * is why the Auto-vs-Plan question could not be answered from them.
+       * Recorded once per session start; a mid-conversation mode switch is a
+       * control request and does not re-emit this event.
+       */
+      permissionMode?: string
     }
   /**
    * What the human said.
@@ -394,6 +402,14 @@ export type RunEventBody =
       numTurns: number
       durationMs: number
       permissionDenials: Array<{ tool: string; reason: string }>
+      /**
+       * Bash calls aide's own gate refused this turn, counted at the deny.
+       * The SDK's `permissionDenials` above is the fact with no reason — its
+       * shape has no field for one — so this is the number that says whether
+       * the refusals landed or the turn spent itself retrying. Absent when
+       * nothing was denied, and on every log from before it existed.
+       */
+      bashDenials?: number
       /**
        * Why it failed, in the SDK's own words.
        *

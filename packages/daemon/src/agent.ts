@@ -23,7 +23,14 @@ import {
   type RunEventBody,
   type RunStatus,
 } from "@aide/protocol"
-import { FILE_TOOL_COMMANDS, HUMAN_ONLY_COMMANDS, checkBashCommand } from "./policy.js"
+import {
+  DenialTally,
+  FILE_TOOL_COMMANDS,
+  HUMAN_ONLY_COMMANDS,
+  RETRY_LOOP_DENIALS,
+  SHELL_WRITE_COMMANDS,
+  checkBashCommand,
+} from "./policy.js"
 
 export interface RunAgentOptions {
   runId: string
@@ -298,19 +305,55 @@ export function fastBashSettings(deniedBash: readonly string[]): Settings {
   // is left — so they are one rule wearing two spellings, and the bare form is
   // the exact match. Emitting both costs nothing and survives whichever spelling
   // a later release retires.
-  // The file-tool prefixes ride in this list too, and leaving them out is the
-  // mistake that makes the rule look enforced while doing nothing. `Bash(*)` is
-  // resolved in this layer, BEFORE `canUseTool` — so on Auto, which is the mode
-  // most turns run in, a `grep` refused by `checkBashCommand` never reaches it.
-  // The gate and its widening have to name the same commands or the gate is
-  // decoration. `pnpm smoke` pins that they do.
+  // The file-tool and shell-write prefixes ride in this list too, and leaving
+  // them out is the mistake that makes the rule look enforced while doing
+  // nothing. `Bash(*)` is resolved in this layer, BEFORE `canUseTool` — so on
+  // Auto, which is the mode most turns run in, a `grep` refused by
+  // `checkBashCommand` never reaches it. The gate and its widening have to name
+  // the same commands or the gate is decoration. `pnpm smoke` pins that they
+  // do, in both directions. (Only the PREFIX-shaped rules can ride here: the
+  // redirect and heredoc checks in `checkBashCommand` have no settings-layer
+  // spelling, so on Auto those remain the system prompt's ask rather than a
+  // gate — see `SHELL_WRITE_COMMANDS`.)
   const deny = [
     ...deniedBash,
     ...HUMAN_ONLY_COMMANDS,
     ...FILE_TOOL_COMMANDS.map((f) => f.prefix),
+    ...SHELL_WRITE_COMMANDS.map((f) => f.prefix),
   ].flatMap((prefix) => [`Bash(${prefix})`, `Bash(${prefix} *)`])
   return { permissions: { allow: ["Bash(*)"], deny } }
 }
+
+/**
+ * The environment a run's CLI subprocess gets: the daemon's own, with aide's
+ * overrides laid on top.
+ *
+ * A function with a smoke test rather than an inline spread, because the SDK's
+ * `env` option REPLACES the subprocess environment instead of merging into it —
+ * without the spread the run loses PATH and its OAuth credentials and fails in
+ * a way that reads as an auth problem — and because the overrides now include
+ * `CLAUDE_CODE_THRIFTY_SONIC=0` (see config.ts), which a host that sets the
+ * variable itself must not be able to shadow back on. Overrides win over
+ * `process.env`, always; `pnpm smoke` pins both properties.
+ */
+export const queryEnv = (overrides: Record<string, string>): Record<string, string> =>
+  ({ ...process.env, ...overrides }) as Record<string, string>
+
+/**
+ * The refusal for a tool that is simply not available to this run.
+ *
+ * The settings layer's denials reach the model with NO reason at all —
+ * `SDKPermissionDenial` has no field to carry one — so this callback is the
+ * only channel through which a denied model ever reads a sentence. That makes
+ * every reason here the corrective, not a courtesy: it has to name what to use
+ * instead and be phrased as the next call, or the model retries spellings. See
+ * `DenialTally` for the counter that says when that is happening anyway.
+ */
+export const notAllowedReason = (name: string, allowedTools: readonly string[]): string =>
+  `aide does not allow ${name} in this run. Do the work with the tools that are ` +
+  `available (${allowedTools.join(", ")}, and Bash for what genuinely needs a shell) — ` +
+  "or, if none of them can do it, say what you need in your reply and end the turn; " +
+  "the human answers in the next message."
 
 const SHADOW_WARNING_CODE = "CLAUDE_SDK_CAN_USE_TOOL_SHADOWED"
 
@@ -485,6 +528,12 @@ export interface NormalizeContext {
   cwd: string
   /** Used when the message does not name a model of its own. */
   fallbackModel: string
+  /**
+   * The SDK permission mode the query was opened with, for `run.started` when
+   * the init message does not name one itself. Absent for replayed sessions,
+   * where the stored init is the only honest source.
+   */
+  permissionMode?: string
 }
 
 /**
@@ -521,6 +570,10 @@ export function normalizeSdkMessage(
   const type = m["type"]
 
   if (type === "system" && m["subtype"] === "init") {
+    // Prefer what the SDK says it resolved over what was asked for — the two
+    // differ exactly when a diagnosis needs to know. Absent on old logs.
+    const mode =
+      typeof m["permissionMode"] === "string" ? m["permissionMode"] : ctx.permissionMode
     return [
       {
         type: "run.started",
@@ -528,6 +581,7 @@ export function normalizeSdkMessage(
         model: String(m["model"] ?? ctx.fallbackModel),
         cwd: ctx.cwd,
         sessionId: (m["session_id"] as string) ?? null,
+        ...(mode ? { permissionMode: mode } : {}),
       },
     ]
   }
@@ -812,8 +866,35 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
   // canUseTool runs on a separate async path from this generator, so denials land
   // in a buffer that gets flushed between SDK messages. They are rare, and a few
   // ms of reordering does not matter: the authoritative record is the
-  // permission_denials array on the result message.
+  // permission_denials array on the result message — for the FACT of a denial.
+  // For the reason, this buffer is authoritative: the SDK's array has no field
+  // for one, which is why every denial here goes through `denyTool` and is
+  // tallied. See `DenialTally`.
   const pending: RunEventBody[] = []
+  /** Denied Bash calls this turn; reset when a turn's result is charged. */
+  const tally = new DenialTally()
+  /** Every deny in this callback funnels through here, so none can skip the log or the count. */
+  const denyTool = (
+    name: string,
+    input: unknown,
+    reason: string,
+  ): { behavior: "deny"; message: string } => {
+    pending.push({ type: "tool.denied", name, input, reason })
+    if (name === "Bash") {
+      const command = (input as { command?: unknown })?.command
+      if (tally.record(command)) {
+        // The retry-loop signal: the same prefix denied more than
+        // RETRY_LOOP_DENIALS times in one turn means the refusal text is not
+        // landing — which is worth a line in the daemon's log, because from the
+        // transcript it just looks like a slow turn.
+        console.error(
+          `[aide] run ${opts.runId}: the same Bash prefix has been denied ${RETRY_LOOP_DENIALS + 1} times this turn ` +
+            `(${typeof command === "string" ? command.slice(0, 80) : "?"}) — the refusal is not landing`,
+        )
+      }
+    }
+    return { behavior: "deny", message: reason }
+  }
   // query() throws AFTER yielding an error result, so without this the same
   // failure gets logged twice: once as the real outcome, once as a bare error.
   let finished = false
@@ -959,9 +1040,18 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
           // This belongs in the system prompt rather than in a project's
           // CLAUDE.md because the cost is the harness and the platform, not the
           // project — every run aide drives pays it. It is worth saying out loud
-          // because the SDK's own auto mode says the OPPOSITE: it asks for cat,
-          // grep and sed in place of the file tools, which is fair advice where
-          // a shell is cheap and expensive advice on Windows, where it is not.
+          // because the CLI injects the OPPOSITE into auto-mode turns: a "do
+          // your work through the Bash tool" block asking for cat, grep and sed
+          // in place of the file tools. That block is an undocumented
+          // experiment, flag name `thrifty_sonic`, in the binary since v2.1.221
+          // and absent from every changelog; it reverses the announced
+          // v2.1.21/v2.1.31 preference for Read/Edit. CONFIG.runEnv now sets
+          // CLAUDE_CODE_THRIFTY_SONIC=0, which turns the injection off at
+          // source — but that variable is equally undocumented and could stop
+          // working in any release, so the deny list in `fastBashSettings` and
+          // `checkBashCommand` remains the real rule and this sentence remains
+          // in the prompt. A counter-instruction here alone has been measured
+          // (782 shell reads against 31 Grep calls) to lose to the injection.
           [
             "Use Read, Grep, Glob, Edit and Write for anything to do with files — reading",
             "them, searching them, changing them. Keep Bash for what genuinely needs a",
@@ -1099,11 +1189,10 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
       // behaves the same on anyone's machine. Measured: the host's global config
       // is only ~700 tokens, so this is for reproducibility, not for savings.
       settingSources: ["project"],
-      // Options.env REPLACES the environment rather than merging into it, so the
-      // spread is load-bearing: without it the run loses PATH and the OAuth
-      // credentials it authenticates with, and fails in a way that looks like an
-      // auth problem rather than a config one.
-      env: { ...process.env, ...opts.env },
+      // Options.env REPLACES the environment rather than merging into it — see
+      // `queryEnv`, which exists so `pnpm smoke` can pin that the overrides
+      // (CLAUDE_CODE_THRIFTY_SONIC=0 among them) survive the merge.
+      env: queryEnv(opts.env),
       canUseTool: async (name, toolInput) => {
         // Refused in EVERY mode, and before the branch below, because that
         // branch is what turns an unresolved call into a blocking question —
@@ -1111,13 +1200,7 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
         // `QUESTION_TOOL`: it holds the lock waiting for a click that a turn
         // nobody typed will never get.
         if (name === QUESTION_TOOL) {
-          pending.push({
-            type: "tool.denied",
-            name,
-            input: toolInput,
-            reason: QUESTION_REFUSAL,
-          })
-          return { behavior: "deny", message: QUESTION_REFUSAL }
+          return denyTool(name, toolInput, QUESTION_REFUSAL)
         }
 
         // A chat, which is to say a run with a human somewhere near it. That buys
@@ -1158,17 +1241,18 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
             // a refusal an agent can act on beats a rule engine we cannot read.
             const verdict =
               name === "Bash"
-                ? checkBashCommand((toolInput as { command?: unknown })?.command, null, [
-                    ...opts.deniedBash,
-                    ...HUMAN_ONLY_COMMANDS,
-                  ])
+                ? checkBashCommand(
+                    (toolInput as { command?: unknown })?.command,
+                    null,
+                    [...opts.deniedBash, ...HUMAN_ONLY_COMMANDS],
+                    opts.cwd,
+                  )
                 : { allow: true, reason: "" }
             if (verdict.allow) return { behavior: "allow", updatedInput: toolInput }
             // Logged, because nobody watched this one happen. A run that is
             // carrying out a plan unattended must still leave the refusal in the
             // transcript, or the reader is left with a gap where a tool call was.
-            pending.push({ type: "tool.denied", name, input: toolInput, reason: verdict.reason })
-            return { behavior: "deny", message: verdict.reason }
+            return denyTool(name, toolInput, verdict.reason)
           }
 
           // Allowed WITHOUT asking, which is the opposite of how it reads.
@@ -1213,10 +1297,12 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
           // Plan's answer is `ExitPlanMode`; Auto reaching here wanted something
           // outside both allowlists, which is aide's refusal to make and not a
           // question. Either way the turn ends and the human replies to a
-          // transcript rather than to a modal.
-          const reason = turnMode === "plan" ? PLAN_REFUSAL : "not in this run's allowlist"
-          pending.push({ type: "tool.denied", name, input: toolInput, reason })
-          return { behavior: "deny", message: reason }
+          // transcript rather than to a modal — and either way the sentence has
+          // to be one the model can act on, because this callback is the ONLY
+          // channel that ever shows a denial reason to the model.
+          const reason =
+            turnMode === "plan" ? PLAN_REFUSAL : notAllowedReason(name, opts.allowedTools)
+          return denyTool(name, toolInput, reason)
         }
 
         // A task run refuses. Bash gets a real decision from aide's own policy;
@@ -1229,13 +1315,13 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
                 (toolInput as { command?: unknown })?.command,
                 opts.allowedBash,
                 opts.deniedBash,
+                opts.cwd,
               )
-            : { allow: false, reason: "not in this run's allowlist" }
+            : { allow: false, reason: notAllowedReason(name, opts.allowedTools) }
 
         if (verdict.allow) return { behavior: "allow", updatedInput: toolInput }
 
-        pending.push({ type: "tool.denied", name, input: toolInput, reason: verdict.reason })
-        return { behavior: "deny", message: verdict.reason }
+        return denyTool(name, toolInput, verdict.reason)
       },
     },
   })
@@ -1304,10 +1390,23 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
         projectId: opts.projectId,
         cwd: opts.cwd,
         fallbackModel: opts.model,
+        permissionMode: opts.chatMode ? CHAT_TO_SDK_MODE[opts.chatMode] : "dontAsk",
       })) {
         if (event.type === "run.finished") {
           finished = true
           if (opts.followUps) chargeThisTurn(event)
+          // aide's own count of refused Bash calls, because the SDK's
+          // permission_denials cannot say why and the settings layer's denials
+          // reach the model with no message at all. The larger of the two
+          // sources, not the tally alone: on Auto the settings layer resolves
+          // Bash BEFORE canUseTool, so its denials never reach the tally and
+          // only the SDK's array records them — while the tally is the only
+          // count on the paths where reasons exist. Absent when nothing was
+          // denied, like every optional field on this event.
+          const sdkBashDenials = event.permissionDenials.filter((d) => d.tool === "Bash").length
+          const denials = Math.max(sdkBashDenials, tally.total)
+          if (denials > 0) event.bashDenials = denials
+          tally.reset()
           // A context reading belongs to the turn it was sampled in; carried
           // over, it would be emitted again ahead of the next turn's result.
           lastUsage = null

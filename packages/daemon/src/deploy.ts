@@ -31,6 +31,7 @@
  * the SDK.
  */
 import { execFile, spawn } from "node:child_process"
+import { createHash } from "node:crypto"
 import { readFile } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -99,6 +100,33 @@ export const filesToShip = async (): Promise<Array<[string, string]>> => [
       [join(PROTOCOL_SRC, name), `node_modules/@aide/protocol/${name}`] as [string, string],
   ),
 ]
+
+/**
+ * A fingerprint of everything a deploy ships, from this checkout's bytes.
+ *
+ * Written to `<REMOTE_DIR>/build-hash` at the end of a deploy and reported by
+ * the agent on `ready`; the daemon computes the same function over its own
+ * files at connect time and warns on a mismatch. `AGENT_PROTOCOL` cannot do
+ * this job — it only moves when the MESSAGE SHAPES change, so an agent
+ * deployed months ago speaks the current protocol perfectly while enforcing
+ * last quarter's policy. That is not hypothetical: the file-tool deny list was
+ * live locally and decorative on `tg` for weeks, because nothing said the
+ * remote agent predated it.
+ *
+ * Hashed over the local bytes rather than recomputed on the far side, so the
+ * stamp answers "what was deployed", byte-for-byte, with no dependence on how
+ * scp treated the files.
+ */
+export async function buildHash(): Promise<string> {
+  const hash = createHash("sha256")
+  for (const [local, remote] of await filesToShip()) {
+    hash.update(remote)
+    hash.update("\0")
+    hash.update(await readFile(local))
+    hash.update("\0")
+  }
+  return hash.digest("hex").slice(0, 12)
+}
 
 /**
  * The far side's `package.json`.
@@ -256,7 +284,12 @@ async function main(): Promise<void> {
   }
   await write("node_modules/@aide/protocol/package.json", PROTOCOL_PACKAGE_JSON)
 
-  console.log(`\ndeployed to ${alias}:${REMOTE_DIR}`)
+  // Last, so a deploy that died mid-copy leaves the OLD stamp (or none) and the
+  // daemon's connect-time check reports the machine stale rather than current.
+  const hash = await buildHash()
+  await write("build-hash", `${hash}\n`)
+
+  console.log(`\ndeployed to ${alias}:${REMOTE_DIR} (build ${hash})`)
 }
 
 // Only when RUN, never when imported. `pnpm smoke` imports this module for

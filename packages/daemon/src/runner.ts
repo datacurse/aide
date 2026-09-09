@@ -25,8 +25,16 @@
 import type { ChildProcess } from "node:child_process"
 import { fork, spawn } from "node:child_process"
 import { AGENT_PROTOCOL } from "@aide/protocol"
+import { buildHash } from "./deploy.js"
 import { killTree, relayWorkerOutput } from "./proc.js"
 import type { FromWorker, ToWorker } from "./worker/main.js"
+
+/**
+ * What a deploy from THIS checkout would stamp, memoized: the answer only
+ * changes when the daemon's own files do, and the daemon restarts on that.
+ */
+let localBuild: Promise<string> | null = null
+const daemonBuildHash = (): Promise<string> => (localBuild ??= buildHash())
 
 export interface Runner {
   /**
@@ -215,6 +223,27 @@ export class SshRunner implements Runner {
           this.kill()
           return
         }
+        // Same protocol, possibly older code. A WARNING and never a refusal:
+        // the messages parse fine either way, and what skew costs is policy —
+        // a deny list extended here is decorative over there until the next
+        // deploy, which is exactly what happened on `tg` and exactly what this
+        // line exists to say out loud. Async because the daemon's own hash is
+        // a file read; a warning landing a beat after `ready` is still before
+        // anyone reads the log.
+        const host = this.#host
+        void daemonBuildHash()
+          .then((mine) => {
+            const stale = msg.build ? msg.build !== mine : true
+            if (!stale) return
+            process.stderr.write(
+              `[aide] ${host} runs aide-agent build ${msg.build ?? "(unstamped, pre-dates the stamp)"}, ` +
+                `this daemon's sources are build ${mine} — its policy may be out of date. ` +
+                `Run \`pnpm deploy-agent ${host}\` to update it.\n`,
+            )
+          })
+          .catch(() => {
+            /* a hash that cannot be computed must not fail a connection */
+          })
       }
       fn(msg)
     }

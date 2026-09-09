@@ -19,6 +19,7 @@
  * stderr is free-form and is relayed to the daemon's own stderr, which is where
  * a remote run's diagnostics show up.
  */
+import { readFileSync } from "node:fs"
 import { AGENT_PROTOCOL } from "@aide/protocol"
 import { createAgentLoop } from "./loop.js"
 import type { FromWorker, ToWorker } from "./main.js"
@@ -159,8 +160,23 @@ if (!QUERY_MODE) {
   // touching the repository. An older daemon ignores the extra field; an older
   // agent omits it, and the daemon reads that as "v0" and says so.
   //
+  // `build` is the deploy stamp beside this file's installation —
+  // `<agent dir>/build-hash`, written by `deploy-agent` from the daemon's own
+  // bytes (see `buildHash` in deploy.ts). The protocol number only moves when
+  // the message shapes change, so it cannot say "this agent predates the
+  // current policy"; the stamp can, and the daemon WARNS on a mismatch rather
+  // than refusing, because same-protocol skew is degraded, not broken. Absent
+  // when the deploy predates the stamp, or when this file runs from the
+  // daemon's own checkout, where no stamp exists.
+  //
   // Skipped in a query mode, and that is not tidiness: stdout there is ONE JSON
   // document, so a `ready` line in front of it makes the whole answer
   // unparseable.
-  write({ type: "ready", protocol: AGENT_PROTOCOL })
+  let build: string | undefined
+  try {
+    build = readFileSync(new URL("../../build-hash", import.meta.url), "utf8").trim() || undefined
+  } catch {
+    /* no stamp — an old deploy, or the daemon's own checkout */
+  }
+  write({ type: "ready", protocol: AGENT_PROTOCOL, ...(build ? { build } : {}) })
 }
