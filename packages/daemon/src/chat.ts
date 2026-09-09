@@ -13,12 +13,15 @@ import type {
 } from "@aide/protocol"
 import { sshConfigPath } from "@aide/protocol/node"
 import type { FollowUpTurn, RunAgentOptions } from "./agent.js"
+import { readRedGates, writeRedGate, dropRedGate } from "./board.js"
 import {
   adoptCheckpoint,
+  captureWorkingTree,
   readCheckpoint,
   restoreCommand,
   takeCheckpoint,
   takeTurnCheckpoint,
+  type Checkpoint,
   type TurnCheckpoint,
 } from "./checkpoint.js"
 import { sweepManualEdits } from "./changes.js"
@@ -374,20 +377,33 @@ export class ChatLane implements LiveChats {
    *
    * Written by the commit path (server.ts wires `noteRedGate`/`clearRedGate`
    * around `commitWorkingTree`), because the lane runs held work without
-   * knowing what it is. A daemon restart clears it, and that reads as "manual
-   * edits" only until the next turn's gate goes red again — wrong label once,
-   * never wrong contents.
+   * knowing what it is. This set is the hot path; `board.json` holds the copy
+   * a restart reads back (`#redGatesLoaded`), because a marker that lived only
+   * in memory meant one restart could sweep a failing tree into history as
+   * "manual edits".
    */
   readonly #redGates = new Set<string>()
 
+  /**
+   * The persisted markers being read back, awaited by `send` before its sweep
+   * decision. A promise rather than a fire-and-forget so the first send after
+   * boot cannot race the read and sweep a tree the file says is a red gate's.
+   * Resolved once, and never rejects — an unreadable board is an empty set.
+   */
+  readonly #redGatesLoaded: Promise<void>
+
   /** The commit path saw this project's checks refuse. See `#redGates`. */
-  noteRedGate(projectId: string): void {
+  noteRedGate(projectId: string, runId: string): Promise<void> {
     this.#redGates.add(projectId)
+    // The set above is the answer `send` acts on, so a failed write degrades to
+    // exactly the old in-memory behaviour rather than to a sweep.
+    return writeRedGate(projectId, runId).catch(() => {})
   }
 
   /** A commit landed, so the tree's dirt is nobody's leftover any more. */
-  clearRedGate(projectId: string): void {
+  clearRedGate(projectId: string): Promise<void> {
     this.#redGates.delete(projectId)
+    return dropRedGate(projectId).catch(() => {})
   }
 
   #idleMs: number
@@ -404,6 +420,11 @@ export class ChatLane implements LiveChats {
   ) {
     this.#idleMs = opts.idleMs ?? CONFIG.chatIdleMs
     this.#closeGraceMs = opts.closeGraceMs ?? CONFIG.chatCloseGraceMs
+    this.#redGatesLoaded = readRedGates()
+      .then((gates) => {
+        for (const projectId of Object.keys(gates)) this.#redGates.add(projectId)
+      })
+      .catch(() => {})
   }
 
   turns(): ChatTurn[] {
@@ -522,6 +543,53 @@ export class ChatLane implements LiveChats {
     this.#turns.set(runId, record)
 
     try {
+      // The human's own words go in first, before the SDK is even contacted, so
+      // a turn that fails to spawn still shows what it was answering. The pasted
+      // screenshots go in with them: a message that is half a sentence and a
+      // picture reads as half a sentence without them, and the session file that
+      // will hold the other copy does not exist yet at this point in the turn.
+      const images = opts.attachments.map((a) => ({ mediaType: a.mediaType, data: a.data }))
+      this.log.append(runId, {
+        type: "user.message",
+        text: opts.text,
+        // Omitted rather than empty, so a turn with no screenshots logs the same
+        // line it always did.
+        ...(images.length ? { images } : {}),
+        // Written only when thinking was OFF, for the same reason: every log in
+        // `~/.aide/runs` predates the toggle, and a turn that says nothing about
+        // thinking is a turn that thought. This is the only record of it — the
+        // profile is where the toggle gets judged, and it reads this line.
+        ...(opts.thinking ? {} : { thinking: false }),
+      })
+
+      // The persisted red-gate markers, before the sweep decides anything from
+      // them. Instant after the first send; on the very first this is what stops
+      // a freshly restarted daemon sweeping a tree the board says a failed gate
+      // left. See `#redGatesLoaded`.
+      await this.#redGatesLoaded
+
+      const root = repoOf(project)
+
+      // A conversation's FIRST send needs a checkpoint, and the checkpoint's own
+      // tree capture doubles as the sweep's dirty test: the captured tree
+      // includes untracked files, so it differs from HEAD's exactly when the
+      // tree is dirty. One walk answers both questions — on a remote project a
+      // walk is ssh connections, and this used to be a `git status` AND a
+      // capture. A follow-up has its checkpoint already and skips the capture;
+      // its sweep falls back to the one status call it always made.
+      const existing = opts.sessionId ? await readCheckpoint(root, opts.sessionId) : null
+      let captured: string | null = null
+      let knownDirty: boolean | undefined
+      if (!existing) {
+        captured = await captureWorkingTree(root)
+        const headTree = await gitOr<string | null>(null, async () =>
+          (await git(root, ["rev-parse", "HEAD^{tree}"])).trim(),
+        )
+        // No HEAD (a repo before its first commit) reads as dirty when anything
+        // is in the tree, which is right: the sweep's commit is then the first.
+        knownDirty = captured !== headTree
+      }
+
       // The pre-turn sweep, under the lock this turn just took (moving it above
       // the registration would put an await between the holder check and the
       // claim, which is the race the synchronous registration exists to close).
@@ -534,7 +602,7 @@ export class ChatLane implements LiveChats {
       // stays dirty, which is yesterday's behaviour, and the log says why.
       if (!this.#redGates.has(project.id)) {
         try {
-          const swept = await sweepManualEdits(repoOf(project))
+          const swept = await sweepManualEdits(root, knownDirty)
           if (swept) {
             this.log.append(runId, {
               type: "commit.landed",
@@ -555,37 +623,20 @@ export class ChatLane implements LiveChats {
       // that can suspend — the lock above is taken synchronously and nothing may
       // run in front of it.
       const [doc, sourceIdAtStart] = await Promise.all([
-        readProjectDoc(repoOf(project)),
+        readProjectDoc(root),
         currentSourceId(),
       ])
       record.sourceIdAtStart = sourceIdAtStart
-
-      // The human's own words go in first, before the SDK is even contacted, so
-      // a turn that fails to spawn still shows what it was answering. The pasted
-      // screenshots go in with them: a message that is half a sentence and a
-      // picture reads as half a sentence without them, and the session file that
-      // will hold the other copy does not exist yet at this point in the turn.
-      const images = opts.attachments.map((a) => ({ mediaType: a.mediaType, data: a.data }))
-      this.log.append(runId, {
-        type: "user.message",
-        text: opts.text,
-        // Omitted rather than empty, so a turn with no screenshots logs the same
-        // line it always did.
-        ...(images.length ? { images } : {}),
-        // Written only when thinking was OFF, for the same reason: every log in
-        // `~/.aide/runs` predates the toggle, and a turn that says nothing about
-        // thinking is a turn that thought. This is the only record of it — the
-        // profile is where the toggle gets judged, and it reads this line.
-        ...(opts.thinking ? {} : { thinking: false }),
-      })
 
       // AWAITED, before anything can write. This is the one ordering constraint
       // in the file that is not negotiable: the snapshot has to be of the tree as
       // it was BEFORE the agent touched it, or it is a snapshot of the damage. It
       // throws rather than continuing, because a run with no checkpoint has no
       // undo and no diff baseline — exactly the two things that make working in
-      // the human's own checkout survivable.
-      await this.#checkpoint(project, opts.sessionId, runId)
+      // the human's own checkout survivable. The tree captured above is passed
+      // through so it is not walked a second time — still valid, because the
+      // sweep between there and here only ever COMMITS; it never touches files.
+      await this.#checkpoint(project, opts.sessionId, runId, { existing, captured })
 
       const warm = this.#reusable(opts, promptFingerprint(doc))
       if (warm) {
@@ -948,17 +999,31 @@ export class ChatLane implements LiveChats {
    * so the first turn checkpoints under its run id and the ref is handed over
    * once the session has a name. See `adoptCheckpoint`.
    */
-  async #checkpoint(project: Project, sessionId: string | null, runId: string): Promise<void> {
+  async #checkpoint(
+    project: Project,
+    sessionId: string | null,
+    runId: string,
+    /**
+     * What `send` already learned on the way here: whether this conversation
+     * has a checkpoint, and the tree it captured for the sweep's dirty test.
+     * Passed rather than re-read, or the one walk that capture buys would be
+     * spent twice — see `captureWorkingTree`.
+     */
+    prior: { existing: Checkpoint | null; captured: string | null },
+  ): Promise<void> {
     // `repoOf`, NOT `project.root`. The bare root is a valid `RepoRef` that
     // silently means "on this machine", so for a remote project every call below
     // ran Windows git against a Linux path — `fatal: cannot change to
     // '/root/code/…': No such file or directory`, after the turn had been
     // admitted and the lock taken.
     const root = repoOf(project)
-    const existing = sessionId ? await readCheckpoint(root, sessionId) : null
-    if (existing) return
+    if (prior.existing) return
 
-    const made = await takeCheckpoint(root, sessionId ?? runId)
+    const made = await takeCheckpoint(
+      root,
+      sessionId ?? runId,
+      prior.captured ? { tree: prior.captured } : undefined,
+    )
 
     // How much of the human's own work this is standing in front of. Counted
     // against the checkpoint's parent rather than HEAD so it stays right in a
@@ -1173,7 +1238,13 @@ export class ChatLane implements LiveChats {
           // break the invariant the rest of the daemon leans on — a run log ends
           // in exactly one terminal event, and `smoke-queue` reads the last
           // event to decide how a turn ended rather than searching for it.
-          const settled = this.#markTurn(worker, msg.runId)
+          // No boundary for a run whose record is already gone: that is a
+          // DUPLICATE terminal event — an interrupt racing a turn that had
+          // already finished — and the log below will drop the outcome copy
+          // anyway. Taking the boundary regardless spent a tree walk with
+          // nothing awaiting it, which surfaced as a stray `write-tree`
+          // wandering into whatever ran next.
+          const settled = (turn ? this.#markTurn(worker, msg.runId) : Promise.resolve())
             // The outcome is appended whatever the snapshot did. A turn that
             // succeeded must not be reported as one that never ended because a
             // git call for a convenience on top of it failed.

@@ -42,6 +42,16 @@ const send = (msg: FromWorker) => {
 
 let interrupted = false
 let session = false
+/**
+ * Whether the current turn has already reported its result.
+ *
+ * The real loop emits exactly one result per turn; an interrupt that lands on a
+ * session whose turn is over does nothing. Without this guard the stub answered
+ * `shutdown()`'s interrupt with a SECOND `run.finished` for a turn the daemon
+ * had already sealed — whose orphan turn-boundary walk then ran with nothing
+ * awaiting it, and landed in the middle of whatever the suite did next.
+ */
+let reported = false
 let runId = ""
 let cwd = ""
 /** What the job asked for, so a follow-up can restate it the way the SDK does. */
@@ -106,6 +116,7 @@ process.on("message", (raw: unknown) => {
     named = job.resume ?? stubSessionId()
     model = job.model
     turnsTaken = 1
+    reported = false
     work()
     // A chat session reports its id the way the SDK's init message does, or the
     // lane has nothing to key a warm session by and every follow-up cold-starts.
@@ -117,6 +128,7 @@ process.on("message", (raw: unknown) => {
     runId = msg.turn.runId
     turnsTaken += 1
     interrupted = false
+    reported = false
     // Applied before the turn is announced, the way the real loop applies its
     // control requests before the message goes in. A turn that carries no model
     // keeps the one the session is already on.
@@ -139,6 +151,8 @@ process.on("message", (raw: unknown) => {
 })
 
 function finish(): void {
+  if (reported) return
+  reported = true
   // The closing summary a real turn writes, minus the model. The lane snapshots
   // its `headline` for the auto-commit's subject, and a stub that never wrote
   // one would leave that path passing on "null means draft" alone.

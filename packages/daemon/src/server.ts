@@ -764,15 +764,15 @@ async function startCommit(opts: {
         (spent) => {
           // A landed commit means the tree's dirt (if any is left) is nobody's
           // leftover — the next turn's pre-sweep may treat it as manual edits.
-          chat.clearRedGate(project.id)
+          void chat.clearRedGate(project.id)
           return spent
         },
         (err: unknown) => {
           // A refused gate leaves the tree dirty ON PURPOSE, as the failure the
           // conversation was handed. Marking it is what stops the next turn's
           // pre-sweep committing that tree as "manual edits" — see `#redGates`
-          // in chat.ts.
-          if (err instanceof VerifyFailed) chat.noteRedGate(project.id)
+          // in chat.ts. The run id names the refusing commit in `board.json`.
+          if (err instanceof VerifyFailed) void chat.noteRedGate(project.id, run.runId)
           throw err
         },
       ),

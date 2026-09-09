@@ -64,6 +64,22 @@ export function checkpointRef(key: string): string {
 }
 
 /**
+ * The working tree as a tree object — the WALK half of a checkpoint, on its own.
+ *
+ * A scratch-index `add -A` and a `write-tree`, so the answer includes untracked
+ * files. That has a second use beyond snapshotting: comparing the result to
+ * `HEAD^{tree}` is a complete cleanliness test — modified, deleted and
+ * untracked files all make the two differ, ignored files are in neither — which
+ * is what lets a conversation's first send answer "is the tree dirty" and take
+ * its checkpoint from ONE walk instead of a `git status` plus a second walk.
+ * On a remote project a walk is ssh connections, so one instead of two is the
+ * difference this exists for.
+ */
+export async function captureWorkingTree(root: RepoRef): Promise<string> {
+  return withWorkingTreeIndex(root, async (gitTemp) => (await gitTemp(["write-tree"])).trim())
+}
+
+/**
  * Snapshot the working tree and record it under `key`.
  *
  * `-p HEAD` so the snapshot is diffable against the commit it came from, which
@@ -71,13 +87,20 @@ export function checkpointRef(key: string): string {
  * A repo with no commits yet has no HEAD to parent to, and that is a real state
  * — a project added to aide before its first commit — so it snapshots parentless
  * rather than refusing.
+ *
+ * `prior` is a tree the caller already captured, so the walk is not repeated —
+ * see `captureWorkingTree`. Valid across an intervening COMMIT (the pre-turn
+ * sweep lands one between the capture and this call), because a commit moves
+ * refs and never files: the parent is re-read here, the tree is not.
  */
-export async function takeCheckpoint(root: RepoRef, key: string): Promise<Checkpoint> {
+export async function takeCheckpoint(
+  root: RepoRef,
+  key: string,
+  prior?: { tree: string },
+): Promise<Checkpoint> {
   const ref = checkpointRef(key)
 
-  const tree = await withWorkingTreeIndex(root, async (gitTemp) =>
-    (await gitTemp(["write-tree"])).trim(),
-  )
+  const tree = prior?.tree ?? (await captureWorkingTree(root))
 
   const head = await gitOr<string | null>(null, async () =>
     (await git(root, ["rev-parse", "HEAD"])).trim(),
@@ -246,9 +269,7 @@ export async function takeTurnCheckpoint(
   // point with an odd history still restores.
   const previous = last ?? (await baselineOf(root, session))
 
-  const tree = await withWorkingTreeIndex(root, async (gitTemp) =>
-    (await gitTemp(["write-tree"])).trim(),
-  )
+  const tree = await captureWorkingTree(root)
 
   if (previous?.tree === tree) return null
 

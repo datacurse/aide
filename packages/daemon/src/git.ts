@@ -188,11 +188,25 @@ export async function gitBatch(
  * so without this a failed commit surfaces in the UI as "Command failed" and the
  * actual reason — no user.email, a pre-commit hook, a conflict — is thrown away.
  */
+/**
+ * Test seam: observe every `git()` invocation.
+ *
+ * `pnpm smoke:queue` uses it to count TREE WALKS on a send — the property "a
+ * clean-tree send walks the tree exactly once" is invisible to every other kind
+ * of assertion, because a second walk returns the same answer and only costs
+ * time (on a remote project, an ssh connection). A mutable field rather than a
+ * parameter because `git` has some fifty callers and this is for exactly one.
+ */
+export const gitSpy: { onCall: ((cwd: RepoRef, args: readonly string[]) => void) | null } = {
+  onCall: null,
+}
+
 export async function git(
   cwd: RepoRef,
   args: string[],
   env?: NodeJS.ProcessEnv,
 ): Promise<string> {
+  gitSpy.onCall?.(cwd, args)
   const [file, argv] = gitCommand(cwd, args, env)
   try {
     // A remote call carries its env on the command line, so `process.env` is

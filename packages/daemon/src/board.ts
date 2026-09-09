@@ -31,6 +31,17 @@ import { NO_TURNS, type LiveChats } from "./sessions.js"
 interface ProjectBoard {
   /** Session id to when it was ticked off. */
   done: Record<string, { at: number }>
+  /**
+   * This project's last auto-commit was refused by its own checks.
+   *
+   * Persisted so a daemon restart does not forget it: the pre-turn sweep reads
+   * this to tell a red gate's leftover from the human's own edits, and an
+   * in-memory-only marker meant one restart could sweep a failing tree into
+   * history as "manual edits" — wrong label, right contents, but a label in the
+   * permanent record. `runId` names the commit run whose gate refused, for
+   * whoever goes reading; `at` is when.
+   */
+  redGate?: { runId: string; at: string }
 }
 
 /** `{ "<projectId>": { done } }` */
@@ -42,7 +53,14 @@ const boardFor = (links: LinkFile, projectId: string): ProjectBoard => {
   // committing was opt-in. Ignored rather than migrated: committing is
   // unconditional now, so the key means nothing either way.
   const held = links[projectId] as (ProjectBoard & { verdicts?: unknown }) | undefined
-  if (held?.done && typeof held.done === "object") return { done: held.done }
+  // Tolerant like everything else in this file: a hand-edited or stale-shaped
+  // `redGate` reads as no marker, which fails toward one mislabelled sweep
+  // rather than toward a sweep that never runs again.
+  const redGate =
+    held?.redGate && typeof held.redGate === "object" && typeof held.redGate.runId === "string"
+      ? { redGate: { runId: held.redGate.runId, at: String(held.redGate.at ?? "") } }
+      : {}
+  if (held?.done && typeof held.done === "object") return { done: held.done, ...redGate }
   // Written by an older aide, which stored `{ verdict, at }` per session under
   // three vocabularies in turn. Any of them meant the human had settled it, so
   // they all read back as done rather than being dropped on the floor.
@@ -52,9 +70,9 @@ const boardFor = (links: LinkFile, projectId: string): ProjectBoard => {
     for (const [sessionId, v] of Object.entries(legacy as Record<string, { at?: unknown }>)) {
       done[sessionId] = { at: typeof v?.at === "number" ? v.at : 0 }
     }
-    return { done }
+    return { done, ...redGate }
   }
-  return { done: {} }
+  return { done: {}, ...redGate }
 }
 
 async function readLinks(): Promise<LinkFile> {
@@ -71,6 +89,40 @@ async function readLinks(): Promise<LinkFile> {
 async function writeLinks(links: LinkFile): Promise<void> {
   await mkdir(aideHome(), { recursive: true })
   await writeFile(boardPath(), `${JSON.stringify(links, null, 2)}\n`, "utf8")
+}
+
+// ---------------------------------------------------------------------------
+// The red-gate marker
+// ---------------------------------------------------------------------------
+
+/** Every project whose marker is set, projectId → the refusing run. */
+export async function readRedGates(): Promise<Record<string, string>> {
+  const links = await readLinks()
+  const out: Record<string, string> = {}
+  for (const projectId of Object.keys(links)) {
+    const gate = boardFor(links, projectId).redGate
+    if (gate) out[projectId] = gate.runId
+  }
+  return out
+}
+
+/** Persist the marker. `ChatLane` keeps the hot copy; this is the restart's. */
+export async function writeRedGate(projectId: string, runId: string): Promise<void> {
+  const links = await readLinks()
+  const board = boardFor(links, projectId)
+  board.redGate = { runId, at: new Date().toISOString() }
+  links[projectId] = board
+  await writeLinks(links)
+}
+
+/** Drop it — a commit landed, so the tree's dirt is nobody's leftover. */
+export async function dropRedGate(projectId: string): Promise<void> {
+  const links = await readLinks()
+  const board = boardFor(links, projectId)
+  if (!board.redGate) return
+  delete board.redGate
+  links[projectId] = board
+  await writeLinks(links)
 }
 
 // ---------------------------------------------------------------------------

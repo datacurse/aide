@@ -674,7 +674,11 @@ Decisions already taken, which are not gaps to fill:
   committed as `manual edits` (no trailer, no gate — they are already true)
   when the next turn starts, so a turn's auto-commit contains only that turn's
   work. The one exception is a red gate's leftover, which the sweep skips (see
-  `#redGates` in chat.ts) so the failing tree stays the conversation's to fix.
+  `#redGates` in chat.ts, persisted in `board.json` so a restart cannot forget
+  it) so the failing tree stays the conversation's to fix. A conversation's
+  first send answers "is the tree dirty" from the checkpoint's own tree capture
+  instead of a separate `git status` — one tree walk, not two, which on a
+  remote project is one ssh connection fewer (`captureWorkingTree`).
   The one route left is the API-only escape hatch — `POST
   /api/projects/:id/commit?force=true`, reachable as `pnpm commit-force
   <project>` — which lands a red tree with a `WIP:` subject; `pnpm smoke` pins

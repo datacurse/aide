@@ -452,13 +452,21 @@ export async function squashAndPush(
  * the body is the file list, because there is no turn to lend a headline and
  * nothing here is worth a model call.
  *
- * Null when the tree is clean, which is the common case and costs one
- * `git status`.
+ * Null when the tree is clean, which is the common case.
+ *
+ * `known` is the caller's own answer to "is the tree dirty", when it has one —
+ * a conversation's first send learns it from the checkpoint's tree capture, so
+ * paying a `git status` (an ssh connection, on a remote project) to re-ask
+ * would be the second walk that capture exists to remove. `false` returns
+ * immediately, `true` skips the status and goes straight to reading what is
+ * dirty, and absent falls back to asking git.
  */
 export async function sweepManualEdits(
   root: RepoRef,
+  known?: boolean,
 ): Promise<{ sha: string; paths: string[] } | null> {
-  if (!(await git(root, ["status", "--porcelain"])).trim()) return null
+  if (known === false) return null
+  if (known === undefined && !(await git(root, ["status", "--porcelain"])).trim()) return null
   // The same reading a commit takes — scratch index, renames and untracked
   // handled — so the sweep and the rail can never disagree about what "dirty"
   // means.

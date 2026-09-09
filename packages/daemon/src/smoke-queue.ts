@@ -14,7 +14,7 @@
  * agents admitted into it at once.
  */
 import { execFile } from "node:child_process"
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { fileURLToPath } from "node:url"
 import { join } from "node:path"
@@ -1266,7 +1266,7 @@ console.log("\nthe pre-turn sweep")
   // The red-gate case: the dirt is the failure the conversation was handed, and
   // the next turn INHERITS it — exactly yesterday's behaviour — rather than
   // having it committed out from under the repair.
-  lane.noteRedGate(project.id)
+  await lane.noteRedGate(project.id, "run-red-gate-test")
   await writeFile(join(root, "red-left.txt"), "what the failed gate left\n", "utf8")
   await say(null, "a turn over a red gate's leftovers")
   await settled(lane)
@@ -1278,7 +1278,7 @@ console.log("\nthe pre-turn sweep")
 
   // A landed commit clears the marker — server.ts wires that around the commit
   // path — and the sweep resumes for whatever is dirty after it.
-  lane.clearRedGate(project.id)
+  await lane.clearRedGate(project.id)
   await say(null, "a turn after the gate cleared")
   await settled(lane)
   check("clearing the marker lets the sweep resume", (await manualEdits()) === already + 2)
@@ -1286,6 +1286,130 @@ console.log("\nthe pre-turn sweep")
     "and the leftover is finally recorded",
     (await gitOut(["status", "--porcelain", "--", "red-left.txt"])).trim() === "",
   )
+}
+
+console.log("\nthe red-gate marker survives a restart")
+{
+  const gitOut = async (args: string[]) => (await git(root, args)).stdout
+  const manualEdits = async () =>
+    (await gitOut(["log", "--pretty=%s"]))
+      .split("\n")
+      .filter((s) => s.trim() === "manual edits").length
+  const { readRedGates } = await import("./board.js")
+  const { boardPath } = await import("@aide/protocol/node")
+
+  // The marker used to live only in the lane's memory, so a restart forgot it
+  // and the first send after boot could sweep a failing tree into history as
+  // "manual edits" — wrong label in the permanent record. It rides in
+  // board.json now, and a fresh lane (which is what a restart makes) reads it
+  // back before its first sweep decision.
+  await lane.noteRedGate(project.id, "run-that-refused")
+  const written = JSON.parse(await readFile(boardPath(), "utf8")) as Record<
+    string,
+    { redGate?: { runId?: string } }
+  >
+  check(
+    "noting the gate writes board.json",
+    written[project.id]?.redGate?.runId === "run-that-refused",
+    JSON.stringify(written[project.id]?.redGate),
+  )
+
+  const before = await manualEdits()
+  await writeFile(join(root, "restart-leftover.txt"), "left by the red gate\n", "utf8")
+  const restarted = new ChatLane(log, { idleMs: NEVER_IDLE })
+  await restarted.send({
+    project,
+    sessionId: null,
+    text: "a turn after a restart, over a red tree",
+    attachments: [],
+    mode: "auto",
+    effort: "medium",
+    thinking: true,
+  })
+  await settled(restarted)
+  check("a fresh lane still skips the sweep", (await manualEdits()) === before)
+  check(
+    "and the leftover is still the conversation's to fix",
+    (await gitOut(["status", "--porcelain", "--", "restart-leftover.txt"])).trim().startsWith("??"),
+  )
+  restarted.shutdown()
+
+  await lane.clearRedGate(project.id)
+  const cleared = JSON.parse(await readFile(boardPath(), "utf8")) as Record<
+    string,
+    { redGate?: unknown }
+  >
+  check("clearing removes the entry from the file", cleared[project.id]?.redGate === undefined)
+
+  // Hand-editable file, so a malformed marker must read as no marker — failing
+  // toward one mislabelled sweep rather than a sweep that never runs again.
+  const links = JSON.parse(await readFile(boardPath(), "utf8")) as Record<string, unknown>
+  links["p-stale"] = { done: {}, redGate: "yes" }
+  await writeFile(boardPath(), JSON.stringify(links), "utf8")
+  check(
+    "a malformed marker reads as no marker",
+    !("p-stale" in (await readRedGates())),
+    JSON.stringify(await readRedGates()),
+  )
+}
+
+console.log("\none walk per send")
+{
+  const { gitSpy, refRoot } = await import("./git.js")
+  const gitOut = async (args: string[]) => (await git(root, args)).stdout
+
+  // A tree walk is the expensive half of admission — on a remote project it is
+  // ssh connections — and the property that it happens exactly ONCE per send is
+  // invisible to every other assertion: a second walk returns the same answer
+  // and only costs time. So the spy counts. A first send used to pay the
+  // sweep's `git status` AND the checkpoint's capture; the capture now answers
+  // both questions.
+  await gitOut(["add", "-A"])
+  await gitOut(["commit", "-m", "tidy for the walk count"])
+
+  const walks: string[] = []
+  gitSpy.onCall = (cwd, args) => {
+    if (refRoot(cwd) !== root) return
+    const op = args.find((a) => a === "status" || a === "write-tree")
+    if (op) walks.push(op)
+  }
+  const firstSend = await say(null, "a clean first send")
+  gitSpy.onCall = null
+  check(
+    "a clean first send walks the tree exactly once",
+    walks.filter((w) => w === "write-tree").length === 1,
+    walks.join(","),
+  )
+  check("and never asks git status", !walks.includes("status"), walks.join(","))
+  await settled(lane)
+
+  // A follow-up has its checkpoint already, so there is no capture to fold
+  // into: it keeps the one `git status` it always paid, and walks nothing.
+  const started = log.read(firstSend).find((e) => e.type === "run.started")
+  const followSession = started?.type === "run.started" ? started.sessionId : null
+  check("the first send became a conversation", followSession !== null)
+  // Tidy only if the turn actually dirtied anything — a stub worker that
+  // rewrote byte-identical content leaves the tree clean, and committing
+  // nothing is an error, not a no-op.
+  if ((await gitOut(["status", "--porcelain"])).trim()) {
+    await gitOut(["add", "-A"])
+    await gitOut(["commit", "-m", "tidy again for the follow-up count"])
+  }
+
+  walks.length = 0
+  gitSpy.onCall = (cwd, args) => {
+    if (refRoot(cwd) !== root) return
+    const op = args.find((a) => a === "status" || a === "write-tree")
+    if (op) walks.push(op)
+  }
+  await say(followSession, "a clean follow-up")
+  gitSpy.onCall = null
+  check(
+    "a clean follow-up asks one status and captures nothing",
+    walks.filter((w) => w === "status").length === 1 && !walks.includes("write-tree"),
+    walks.join(","),
+  )
+  await settled(lane)
 }
 
 console.log(`\n${failures === 0 ? "all checks passed" : `${failures} FAILED`}`)
