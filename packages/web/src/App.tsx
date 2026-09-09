@@ -7,7 +7,6 @@ import { DaemonBar } from "./Daemon.js"
 import { Dashboard } from "./Dashboard.js"
 import { carryDraft, draftKey, openComposedChat, openNewChat } from "./drafts.js"
 import { SURVEY_PROMPT } from "./survey.js"
-import { WAVES_PROMPT } from "./waves.js"
 import { useAppLocation } from "./useAppLocation.js"
 import { useKeyed } from "./useKeyed.js"
 import { useRemembered } from "./useRemembered.js"
@@ -501,33 +500,6 @@ export function App() {
             title="Ask what this project's technical debt is, worst first — a plan, not a change. Runs as a chat you can steer."
           >
             survey
-          </Button>
-          {/*
-            The other composed turn, and the same shape as `survey` on purpose:
-            sends on the press, carries its own title, goes out at Plan. What
-            it asks for is different in kind — survey ranks what exists, this
-            slices what is next into waves of one-turn tasks whose prompts you
-            park as chats. See `waves.ts` for where the words come from.
-          */}
-          <Button
-            disabled={!project}
-            locked={projectHeld}
-            onClick={() => {
-              if (!project) return
-              const id = openComposedChat(project.id, {
-                text: WAVES_PROMPT,
-                title: "Wave plan",
-                // Plan, for survey's own reason: the prompt says not to write
-                // code yet, and sending that at a mode that acts is an
-                // instruction and its contradiction in one message.
-                mode: "plan",
-              })
-              navigate({ draftId: id })
-              setAutoSend(id)
-            }}
-            title="Plan the current milestone as waves of independent one-turn tasks, researched by parallel subagents. A plan, not a change."
-          >
-            waves
           </Button>
         </PaneHeader>
 

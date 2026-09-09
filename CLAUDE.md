@@ -755,10 +755,7 @@ Decisions already taken, which are not gaps to fill:
   permits. The spawn check sits ABOVE the plan-approved branch on purpose —
   that branch allows every non-Bash tool generically, so placed below it an
   approved plan could spawn background worktree agents with nobody judging the
-  input (which is what it silently permitted before this existed). The web half
-  is `waves` beside `survey`: a composed Plan chat, survey's shape exactly,
-  that researches with parallel subagents and slices the current milestone into
-  waves of independent one-turn tasks written as pasteable prompts. And
+  input (which is what it silently permitted before this existed). And
   `currentActivity` skips an open `Agent` call whenever anything else is open,
   because a spawn is a container — open for minutes by design — and counting it
   pins the working bar to a clock that never resets, the wedge signature, while
