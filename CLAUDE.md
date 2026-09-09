@@ -98,7 +98,7 @@ Decisions already taken, which are not gaps to fill:
   static import is hoisted and its output would print above `repo: <path>` — the
   run would still be correct and would read as though the sections had been
   shuffled. When changing any of this, the check that matters is that the
-  assertion count does not fall: `pnpm smoke` prints 718 `ok` lines as of
+  assertion count does not fall: `pnpm smoke` prints 719 `ok` lines as of
   2026-09-09, and a refactor that quietly drops some is the failure this number
   exists to catch.
   It fell once on purpose — the card view was removed and took ~30 of its own

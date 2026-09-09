@@ -855,7 +855,9 @@ function StepsRow({ line }: { line: StepsLine }) {
           className="flex w-full min-w-0 items-baseline gap-2 rounded px-1 py-0.5 text-left text-[11px] text-fg-dim hover:bg-hover hover:text-fg-muted"
         >
           <Minus className={MARK} />
-          <span className="shrink-0">hide {line.steps.length} steps</span>
+          <span className="shrink-0">
+            hide {line.steps.length > 0 ? `${line.steps.length} step${line.steps.length === 1 ? "" : "s"}` : "thinking"}
+          </span>
         </button>
         {/* The originals, in the order they happened — not a rendering of the
             summary. This is the whole claim that nothing is lost by folding, and
@@ -883,7 +885,7 @@ function StepsRow({ line }: { line: StepsLine }) {
           reporting "0 steps" over a page of hidden thinking. */}
       <span className="shrink-0 text-fg-muted">
         {line.steps.length > 0
-          ? `${line.steps.length} steps`
+          ? `${line.steps.length} step${line.steps.length === 1 ? "" : "s"}`
           : `thought ${line.thought > 1 ? `${line.thought}×` : ""}`.trim()}
       </span>
       <span className="min-w-0 truncate text-fg-dim">

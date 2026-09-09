@@ -1214,11 +1214,21 @@ console.log("\nfolding the derivation, not the answer")
     "counting calls alone leaves pages of reasoning as the one thing that never collapses",
   )
 
+  // Even a lone step folds. The threshold used to be two — a fold the same
+  // height as the row it replaces looked like readability traded for a click —
+  // but a run of one is what EVERY turn is while its opening block streams, so
+  // the block the rule promises to collapse was the one block always on screen,
+  // in full, until a second row arrived to tip it over the threshold.
   const single = foldRows([tool("Read"), text("done")], false)
   check(
-    "a lone step is left alone",
-    single.every((r) => !r.folded),
-    "a fold the same height as the row it replaces has traded readability for a click",
+    "even a lone step folds — the boundary is the rule, not the height",
+    single.some((r) => r.folded),
+    "a threshold makes the rule 'derivation folds, except when there was only one thing'",
+  )
+  check(
+    "a live turn's first block is folded from the start",
+    foldRows([asked("go"), think("streaming…")], true).some((r) => r.folded),
+    "the opening thinking block is a run of one — left loose, it streams in full and is swallowed mid-read",
   )
 
   // A turn with no prose at all — cut short, or interrupted. It still folds,

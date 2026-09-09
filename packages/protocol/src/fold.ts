@@ -14,11 +14,17 @@
  */
 
 /**
- * Below this many rows, folding costs more than it saves: the fold and the rows
- * it replaces are the same height, so you have traded readable lines for one
- * that has to be opened.
+ * A run folds from its FIRST row. There used to be a threshold of two, on the
+ * reasoning that a fold the same height as the row it replaces trades readable
+ * lines for a click — but the visible cost was the turn's OPENING block: a run
+ * of one is what every live turn is while its first thinking streams, so the
+ * block the rule promises to collapse was the one block always on screen, in
+ * full, until a second row arrived to tip it over the threshold and swallow it
+ * mid-read. The rule the reader can learn is "everything between the question
+ * and the answer is behind the fold, always", and a threshold makes it "…except
+ * when there was only one thing", which is indistinguishable from the fold
+ * being broken.
  */
-export const FOLD_FROM = 2
 
 /**
  * Rows that are the DERIVATION: everything the agent does on the way to an
@@ -146,11 +152,7 @@ export function foldRows<T extends FoldableRow>(rows: T[], live = true): Folded<
   const out: Folded<T>[] = []
 
   const flush = (run: T[], commit = false) => {
-    // A commit folds from the FIRST row, not from `FOLD_FROM`. Even a one-check
-    // commit is a distinct episode with a beginning and an end, and the point of
-    // collapsing it is to draw that boundary — a lone `committed a1b2c3d` left
-    // loose in the transcript is exactly the unmarked row this exists to stop.
-    if (run.length >= (commit ? 1 : FOLD_FROM)) {
+    if (run.length > 0) {
       out.push({
         folded: true,
         group: {
@@ -160,8 +162,6 @@ export function foldRows<T extends FoldableRow>(rows: T[], live = true): Folded<
           ...(commit ? { commit: true } : {}),
         },
       })
-    } else {
-      for (const r of run) out.push({ folded: false, row: r })
     }
   }
 
