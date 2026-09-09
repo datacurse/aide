@@ -1099,6 +1099,39 @@ console.log("\nwhat a turn is doing right now")
   ])
   check("a file path is shown as its basename", reading?.label === "Running Read events.ts", reading?.label)
 
+  // A subagent spawn is a container: open for its subagent's whole life BY
+  // DESIGN, so reporting it as the oldest open call pins the label to
+  // "Running Agent" with a clock that never resets — the exact wedge signature
+  // the line exists to draw — while the subagent's own calls, the real steps,
+  // churn invisibly underneath it.
+  const fanned = currentActivity([
+    ev({ type: "tool.start", toolUseId: "spawn", name: "Agent", input: { description: "survey daemon" }, parentToolUseId: null }, 1000),
+    ev({ type: "tool.start", toolUseId: "inner", name: "Grep", input: { pattern: "gates" }, parentToolUseId: "spawn" }, 2000),
+  ])
+  check(
+    "a subagent's own call outranks the spawn that opened it",
+    fanned?.label === "Running Grep gates" && fanned.since === 2000,
+    `${fanned?.label} @ ${fanned?.since} — the spawn is open for minutes by design`,
+  )
+  const spawnOnly = currentActivity([
+    ev({ type: "tool.start", toolUseId: "spawn", name: "Agent", input: { description: "survey daemon" }, parentToolUseId: null }, 1000),
+  ])
+  check(
+    "but a spawn with nothing running inside it is still the line",
+    spawnOnly?.label === "Running Agent" && spawnOnly.since === 1000,
+    `${spawnOnly?.label} — a thinking subagent is not a stalled turn`,
+  )
+  const innerDone = currentActivity([
+    ev({ type: "tool.start", toolUseId: "spawn", name: "Agent", input: {}, parentToolUseId: null }, 1000),
+    ev({ type: "tool.start", toolUseId: "inner", name: "Grep", input: { pattern: "x" }, parentToolUseId: "spawn" }, 2000),
+    ev({ type: "tool.end", toolUseId: "inner", ok: true, summary: "" }, 2500),
+  ])
+  check(
+    "a finished inner call hands the line back to the spawn",
+    innerDone?.label === "Running Agent",
+    innerDone?.label,
+  )
+
   // A check with no result yet is the same idea for a commit run.
   const checking = currentActivity([
     ev({ type: "verify.started", command: "pnpm typecheck" }, 1000),
@@ -1465,6 +1498,63 @@ console.log("\nnothing may stop for a human mid-turn")
     "the two refusals are not one sentence",
     PLAN_REFUSAL !== QUESTION_REFUSAL,
     "sharing a message is how the wrong reason reached the agent last time",
+  )
+}
+
+console.log("\na subagent spawn is judged, not trusted")
+{
+  const { AGENT_TOOL, AGENT_ISOLATION_REFUSAL, checkAgentSpawn } = await import("./agent.js")
+  const { CONFIG } = await import("./config.js")
+
+  // Allowed by canUseTool's own branch, never by a bare name on a list: a bare
+  // name approves the whole call before its input is judged, and this tool's
+  // input can ask for a worktree or a background run — the two things the
+  // judgement below exists to stop.
+  check(
+    "the spawn is not on the chat allowlist",
+    !CONFIG.chatAutoAllowTools.includes(AGENT_TOOL),
+    CONFIG.chatAutoAllowTools.join(","),
+  )
+  check(
+    "nor on the task allowlist — a task run stays narrow",
+    !CONFIG.allowedTools.includes(AGENT_TOOL),
+  )
+
+  // Isolation is refused, not stripped. Stripping would run the work in the
+  // real tree when the model asked for a copy — the Bash-rewrite trap: a
+  // correction the model does not see is one it cannot account for. And the
+  // reason a copy is refused at all is the brief's oldest lesson — a worktree's
+  // changes cannot appear in the dev server or in the commit that follows.
+  check("a worktree spawn is refused", !checkAgentSpawn({ prompt: "x", isolation: "worktree" }).allow)
+  check("a remote spawn is refused too", !checkAgentSpawn({ prompt: "x", isolation: "remote" }).allow)
+  check(
+    "and the refusal says where the work runs instead",
+    AGENT_ISOLATION_REFUSAL.includes("own checkout") &&
+      AGENT_ISOLATION_REFUSAL.includes("Drop the isolation"),
+    AGENT_ISOLATION_REFUSAL.slice(0, 60),
+  )
+
+  // Background is the SDK's DEFAULT — absent means background — so this one is
+  // a rewrite rather than a refusal: refusing would fire on the default
+  // spelling of every spawn, a round trip each. The rewrite changes scheduling,
+  // not meaning, and it must happen: a turn's end starts the commit gate, and a
+  // background agent outliving `run.finished` is still writing files while the
+  // gate reads the tree.
+  const plain = checkAgentSpawn({ description: "survey", prompt: "read the daemon" })
+  check("a plain spawn is allowed", plain.allow)
+  check(
+    "and forced synchronous even when it asked for nothing",
+    plain.allow && plain.input["run_in_background"] === false,
+    "absent means background, and a background agent outlives the turn the gate reads",
+  )
+  const bg = checkAgentSpawn({ prompt: "x", run_in_background: true })
+  check(
+    "an explicit background ask is overridden",
+    bg.allow && bg.input["run_in_background"] === false,
+  )
+  check(
+    "the rest of the input survives the rewrite",
+    plain.allow && plain.input["prompt"] === "read the daemon" && plain.input["description"] === "survey",
   )
 }
 

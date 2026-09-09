@@ -72,11 +72,18 @@ export function currentActivity(
 
   // A tool call with no matching tool.end is the thing currently running, and a
   // check with no matching result is the same idea for a commit.
-  const open = new Map<string, { label: string; at: number }>()
+  const open = new Map<string, { label: string; at: number; container: boolean }>()
   let openCheck: { label: string; at: number } | null = null
   for (const e of events) {
     if (e.type === "tool.start") {
-      open.set(e.toolUseId, { label: describeTarget(e.name, e.input), at: e.ts })
+      // An `Agent` call is a CONTAINER: it stays open for its subagent's whole
+      // life while the real steps — the subagent's own calls — open and close
+      // inside it. Marked here so the oldest-open rule below can look past it.
+      open.set(e.toolUseId, {
+        label: describeTarget(e.name, e.input),
+        at: e.ts,
+        container: e.name === "Agent",
+      })
     } else if (e.type === "tool.end") {
       open.delete(e.toolUseId)
     } else if (e.type === "verify.started") {
@@ -101,7 +108,14 @@ export function currentActivity(
   // and the one that has been running longest is the one the turn is waiting on
   // — reporting the newest resets the clock every time a batch goes out and
   // hides exactly the stall this is for.
-  const oldest = [...open.values()].sort((a, b) => a.at - b.at)[0]
+  //
+  // Except a container: a subagent spawn is open for minutes BY DESIGN, so
+  // counting it pins the line to "Running Agent" with a clock that never
+  // resets — the exact wedge signature — while the subagent's own calls, the
+  // real steps, churn invisibly. It is still the answer when nothing else is
+  // open, which is a subagent thinking rather than a turn stalled.
+  const calls = [...open.values()].sort((a, b) => a.at - b.at)
+  const oldest = calls.find((c) => !c.container) ?? calls[0]
   if (oldest) return { label: `Running ${oldest.label}`, since: oldest.at }
   if (openCheck) return { label: openCheck.label, since: openCheck.at }
 

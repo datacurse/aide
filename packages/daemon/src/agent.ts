@@ -248,6 +248,55 @@ export const QUESTION_REFUSAL = [
 ].join(" ")
 
 /**
+ * The tool that spawns a subagent, allowed in chats — with its input judged.
+ *
+ * Allowing the spawn delegates no permission, and that is what makes it safe:
+ * the call itself touches nothing, and every tool call the subagent then makes
+ * comes back through the same `canUseTool` below — `CanUseTool`'s options carry
+ * `agentID` for exactly that case — so the question-tool refusal, Plan's
+ * read-only rule and aide's own Bash policy all hold inside a subagent
+ * unchanged. Subagents inherit the parent's permission mode, so a Plan turn's
+ * researchers cannot edit and an Auto turn's workers act under the same rules
+ * as the turn that spawned them. This is the seam GSD-style fan-out comes in
+ * through: parallelism lives INSIDE the one run that holds the checkout, which
+ * is the only parallelism the brief permits.
+ */
+export const AGENT_TOOL = "Agent"
+
+export const AGENT_ISOLATION_REFUSAL = [
+  "aide runs subagents in the project's own checkout, never an isolated copy:",
+  "a worktree or remote agent's changes could not appear in the dev server or",
+  "in the commit that follows this turn. Drop the isolation option and spawn",
+  "the agent again — it works this tree, under this run's own rules.",
+].join(" ")
+
+/**
+ * Judge an `Agent` spawn's input. Two fields need a decision; everything else
+ * passes through untouched.
+ *
+ * `isolation` is REFUSED rather than silently stripped. Stripping it would run
+ * the work in the real tree when the model asked for a copy — the same trap as
+ * rewriting a Bash command: a correction the model does not see is one it
+ * cannot account for. A refusal costs one round trip and cannot lie.
+ *
+ * `run_in_background` is FORCED to false, and this one is a rewrite on
+ * purpose. Absent means background — the SDK's default — so refusing it would
+ * fire on the default spelling of every call, a round trip per spawn. And the
+ * rewrite changes scheduling, not meaning: the same work happens, the call
+ * just waits for it. It must, because a turn's end is what starts the commit
+ * gate — a background agent outliving `run.finished` would still be writing
+ * files while the gate reads the tree, and the commit would take half its
+ * work.
+ */
+export function checkAgentSpawn(
+  input: unknown,
+): { allow: true; input: Record<string, unknown> } | { allow: false; reason: string } {
+  const args = (input ?? {}) as Record<string, unknown>
+  if (args["isolation"] !== undefined) return { allow: false, reason: AGENT_ISOLATION_REFUSAL }
+  return { allow: true, input: { ...args, run_in_background: false } }
+}
+
+/**
  * What a Plan turn is told when it reaches for a tool it may not use yet.
  *
  * The same shape as `QUESTION_REFUSAL` and for the same reason: a refusal an
@@ -1064,6 +1113,25 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
             "several calls do not depend on each other, make them in one message instead",
             "of one per turn.",
           ].join(" "),
+          // Chat runs only: a task run does not carry the Claude Code toolset,
+          // so naming the Agent tool there invites calls that can only be
+          // refused. Said out loud because a tool the model is not told about
+          // is one it reaches for rarely and late — and because the two things
+          // aide enforces on a spawn (same checkout, synchronous) read as
+          // errors if the first the model hears of them is a refusal.
+          opts.chatMode
+            ? [
+                "You may fan work out with the Agent tool: parallel subagents, each in its",
+                "own context window, reporting back into this one. Use it when read-heavy",
+                "work splits — several subsystems to survey, independent questions to",
+                "research — and spawn the independent ones in one message so they run",
+                "together. Subagents work this same checkout under this run's own rules,",
+                "so do not point two of them at the same files. They run synchronously,",
+                "inside your turn: isolation options are refused, and every spawn waits",
+                "for its result, because the commit that follows your turn must not race",
+                "an agent still writing.",
+              ].join(" ")
+            : "",
           // The gate is invisible from inside a run, and what a run cannot see it
           // re-proves. See `verifyCommands` for the measurement: two thirds of all
           // shell time across eight conversations went on re-running checks that
@@ -1221,6 +1289,20 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
         // last reason to carry it, this test becomes `opts.chatMode` and the
         // option goes with it.
         if (opts.onPermission) {
+          // A chat may fan out. Decided here, above the mode branches, for two
+          // reasons: on Plan a subagent is a read-only researcher (it inherits
+          // plan mode and its edits are refused by this same callback), and the
+          // plan-approved branch below allows every non-Bash tool generically —
+          // so without this, an approved plan could already spawn agents with
+          // NOBODY judging the spawn's input, background and worktrees
+          // included. One path, one judgement. See `checkAgentSpawn`.
+          if (name === AGENT_TOOL) {
+            const spawn = checkAgentSpawn(toolInput)
+            return spawn.allow
+              ? { behavior: "allow", updatedInput: spawn.input }
+              : denyTool(name, toolInput, spawn.reason)
+          }
+
           // Everything after an approved plan runs unasked, which is the whole
           // point of Plan — the plan WAS the question. One approved plan in this
           // repository's own logs was followed by twelve Edits, seven Bash calls

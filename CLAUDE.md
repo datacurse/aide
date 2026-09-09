@@ -98,7 +98,7 @@ Decisions already taken, which are not gaps to fill:
   static import is hoisted and its output would print above `repo: <path>` — the
   run would still be correct and would read as though the sections had been
   shuffled. When changing any of this, the check that matters is that the
-  assertion count does not fall: `pnpm smoke` prints 722 `ok` lines as of
+  assertion count does not fall: `pnpm smoke` prints 734 `ok` lines as of
   2026-09-09, and a refactor that quietly drops some is the failure this number
   exists to catch.
   It fell once on purpose — the card view was removed and took ~30 of its own
@@ -735,6 +735,35 @@ Decisions already taken, which are not gaps to fill:
   `canUseTool` denies it anyway as the backstop, with a refusal that names the
   alternative — put the options in the reply and end the turn, and the human
   answers in the next message.
+- **Subagents are allowed in chats, and the spawn is judged rather than
+  trusted.** The `Agent` tool is allowed by `canUseTool`'s own branch, never by
+  a bare name on a list — a bare name approves a call before its input is
+  judged, and this input can ask for the two things aide must refuse.
+  `checkAgentSpawn` REFUSES `isolation` (a worktree or remote agent's changes
+  could not appear in the dev server or in the commit that follows the turn —
+  the brief's oldest lesson) and REWRITES `run_in_background` to false (absent
+  means background, the SDK's default, so a refusal would fire on the default
+  spelling of every spawn; and a background agent outliving `run.finished` is
+  still writing files while the commit gate reads the tree). The rewrite is not
+  the Bash-rewrite trap because it changes scheduling, not meaning. Allowing
+  the spawn delegates no permission: every call a subagent makes re-enters the
+  same `canUseTool` — the SDK's `CanUseTool` options carry `agentID` for
+  exactly that case — so the question-tool refusal, Plan's read-only rule and
+  the Bash policy hold inside a subagent unchanged; a Plan turn's researchers
+  cannot edit. This is where GSD-style fan-out lives: parallelism INSIDE the
+  one run that holds the checkout, which is the only parallelism the brief
+  permits. The spawn check sits ABOVE the plan-approved branch on purpose —
+  that branch allows every non-Bash tool generically, so placed below it an
+  approved plan could spawn background worktree agents with nobody judging the
+  input (which is what it silently permitted before this existed). The web half
+  is `waves` beside `survey`: a composed Plan chat, survey's shape exactly,
+  that researches with parallel subagents and slices the current milestone into
+  waves of independent one-turn tasks written as pasteable prompts. And
+  `currentActivity` skips an open `Agent` call whenever anything else is open,
+  because a spawn is a container — open for minutes by design — and counting it
+  pins the working bar to a clock that never resets, the wedge signature, while
+  the subagent's real steps churn invisibly. `pnpm smoke` pins the spawn
+  judgement, both allowlists not naming the tool, and the container rule.
 - **A tool row is drawn when the call opens, not when its event arrives.**
   `tool.start` is read off the COMPLETED assistant message, so a call the model
   announces two sentences into a reply reaches the log only once it has stopped
