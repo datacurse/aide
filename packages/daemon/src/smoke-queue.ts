@@ -1161,8 +1161,10 @@ console.log("\ncommitting without being asked each time")
 // lock is free, and never for the commit's own run.
 {
   const fired: Array<string | null> = []
-  lane.onProjectIdle = (_projectId, sessionId) => {
+  const lent: Array<{ text: string; headline: string | null }> = []
+  lane.onProjectIdle = (_projectId, sessionId, turn) => {
     fired.push(sessionId)
+    lent.push(turn)
   }
 
   await say(null, "a turn that changes something")
@@ -1172,6 +1174,20 @@ console.log("\ncommitting without being asked each time")
     "a finished chat turn announces the project is free",
     fired.length === 1,
     `${fired.length} — without this nothing downstream of a turn can act on it`,
+  )
+  // What the hook lends the auto-commit: the turn's own prompt, and the
+  // headline of its closing summary. These become the commit's body and subject
+  // with no model call — see `turnCommitMessage` — so a hook that dropped
+  // either would silently put every auto-commit back on the helper model.
+  check(
+    "and lends the turn's prompt for the commit body",
+    lent[0]?.text === "a turn that changes something",
+    String(lent[0]?.text),
+  )
+  check(
+    "and the turn's own headline for the subject",
+    lent[0]?.headline?.startsWith("stub headline") === true,
+    String(lent[0]?.headline),
   )
   check(
     "and the lock really is free by then",

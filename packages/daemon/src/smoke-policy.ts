@@ -540,8 +540,8 @@ console.log("\ncarrying out an approved plan")
   // to its first, innocent word.
   check("denies chaining into a denied command", !verdict("pnpm ls; pnpm dev").allow)
   check(
-    "denies chaining into git commit, with the human-only reason",
-    verdict("pnpm ls; git commit -m x").reason.includes("presses commit"),
+    "denies chaining into git commit, with the commit-rule reason",
+    verdict("pnpm ls; git commit -m x").reason.includes("never run from a turn"),
     verdict("pnpm ls; git commit -m x").reason.slice(0, 55),
   )
   check(
@@ -561,8 +561,8 @@ console.log("\ncarrying out an approved plan")
   // form that would pass. Asserting the boolean alone is what let that ship.
   const commitReason = verdict("git commit -m x").reason
   check(
-    "a human-only refusal says whose the commit is",
-    commitReason.includes("human") && commitReason.includes("presses commit"),
+    "the commit refusal says who commits instead, and when",
+    commitReason.includes("aide commits") && commitReason.includes("checks pass"),
     commitReason.slice(0, 55),
   )
   check(
@@ -833,70 +833,100 @@ console.log("\nwhat a project's gates refuse")
   const held = (title: string) => `"${title}" has it`
   const holder = { runId: "run-1", title: "a chat" }
 
-  const free = projectGates({ holder: null, uncommitted: 0, held })
-  check("a free, clean project refuses nothing", !free.start && !free.commit && !free.send)
+  // What is deliberately ABSENT is the old dirty-tree rule. Commits are
+  // automatic — once per turn, after the checks — and the commit button is
+  // gone, so a dirty tree blocking a new chat would be a refusal with no
+  // release: the wedge in the brief, built on purpose. The only gate left is
+  // the lock.
+  const free = projectGates({ holder: null, held })
+  check("a free project refuses nothing", !free.start && !free.push && !free.send)
 
-  const dirty = projectGates({ holder: null, uncommitted: 3, held })
-  check("uncommitted work stops a new chat", dirty.start?.includes("3 uncommitted files") === true, String(dirty.start))
+  const busy = projectGates({ holder, held })
+  check("a holder stops a new chat", busy.start === held("a chat"))
   check(
-    "but never the commit that would clear it",
-    dirty.commit === null,
-    "a commit button locked by the dirt it exists to remove is a gate with no release",
-  )
-
-  // The ORDER, which is the rule most easily lost: a held checkout is nearly
-  // always dirty too, and "commit that work" cannot be followed while a run has
-  // the repo, because the commit button is locked by the same holder.
-  const both = projectGates({ holder, uncommitted: 3, held })
-  check(
-    "a holder is named before the dirt it is also causing",
-    both.start === held("a chat"),
-    "naming the files first sends you to a button this same holder has locked",
-  )
-
-  // The commit's own run must not lock its own button. `committing` is derived
-  // from the lock the daemon publishes, so without this exemption the button
-  // reads as blocked by itself from the moment it is pressed.
-  const mine = projectGates({ holder, uncommitted: 3, commitRunId: "run-1", held })
-  check("the commit I started does not block my commit button", mine.commit === null)
-  check("nor my push", mine.push === null)
-  check(
-    "but it still blocks a NEW chat",
-    mine.start === held("a chat"),
-    "the daemon refuses a fresh turn under any holder, ours included",
+    "and a push",
+    busy.push === held("a chat"),
+    "pushing under a live run sends a branch whose tip is about to move",
   )
 
   // The composer's half. The turn on screen is the one you can interrupt; a run
   // anywhere else is the one you must wait for, and they are told apart by run
   // id rather than by session — a commit attributed to this conversation is not
   // this conversation's turn.
-  const watching = projectGates({ holder, uncommitted: 0, openRunId: "run-1", held })
+  const watching = projectGates({ holder, openRunId: "run-1", held })
   check("the turn I am watching does not lock its own box", watching.send === null)
-  const elsewhere = projectGates({ holder, uncommitted: 0, openRunId: "run-9", held })
+  const elsewhere = projectGates({ holder, openRunId: "run-9", held })
   check("a run somewhere else does", elsewhere.send === held("a chat"))
+  check(
+    "but even my own turn blocks a NEW chat",
+    watching.start === held("a chat"),
+    "the daemon refuses a fresh turn under any holder, ours included",
+  )
+}
 
-  // The tree stops only a chat that has NOT started, because the way out of it is
-  // to finish the chat that made it — and a chat whose own turn is in flight is
-  // exempt separately, since for its first seconds it has no session id while its
-  // own edits are already piling up.
+console.log("\nthe message an auto-commit writes")
+{
+  // A commit per turn needs a subject per turn, and the turn already wrote one:
+  // the `headline` of its closing summary block. Using it is what keeps an
+  // auto-commit free — no helper-model call, no ten-second wait — and honest,
+  // since the line was written by the thing that did the work. These pin the
+  // decision function; the fallback path (null → helper model drafts from the
+  // diff) is a model call the smoke repo cannot make, so what is pinned about
+  // it is that null MEANS "draft".
+  const { turnCommitMessage } = await import("./review.js")
+
+  const full = turnCommitMessage("wire the thrifty-sonic opt-out", "T2. Env var.\nDetails below.")
+  check("the headline becomes the subject", full?.subject === "wire the thrifty-sonic opt-out")
   check(
-    "uncommitted work does not stop a chat that has run",
-    projectGates({ holder: null, uncommitted: 3, started: true, held }).send === null,
-  )
-  check(
-    "nor one whose own turn is in flight",
-    projectGates({ holder: null, uncommitted: 3, busy: true, held }).send === null,
-    "a new chat has no session id for its first few seconds",
-  )
-  check(
-    "but it does stop an unstarted, idle one",
-    projectGates({ holder: null, uncommitted: 3, held }).send !== null,
+    "and the prompt's first line the body, verbatim",
+    full?.body === "T2. Env var.",
+    String(full?.body),
   )
 
+  // Git's conventional 72 columns, cut with an ellipsis rather than wrapped —
+  // a subject that wraps is two half-sentences in every log listing.
+  const long = turnCommitMessage("x".repeat(100), "p")
   check(
-    "one file is not pluralised",
-    projectGates({ holder: null, uncommitted: 1, held }).start?.includes("1 uncommitted file —") === true,
+    "a runaway headline is capped at 72",
+    (long?.subject.length ?? 0) <= 72,
+    String(long?.subject.length),
   )
+  check("and says it was cut", long?.subject.endsWith("…") === true)
+  const exact = turnCommitMessage("y".repeat(72), "p")
+  check("seventy-two exactly is not cut", exact?.subject === "y".repeat(72))
+
+  check("no headline means the helper model drafts", turnCommitMessage(null, "p") === null)
+  check("so does a blank one", turnCommitMessage("   ", "p") === null)
+  check("and an absent one", turnCommitMessage(undefined, "p") === null)
+  check("an empty prompt is an empty body, not a crash", turnCommitMessage("h", "")?.body === "")
+}
+
+console.log("\nthe message a squash writes")
+{
+  // Squashing is the push button's second spelling: fold the per-turn commits
+  // into one before they leave the machine. What must survive the fold is
+  // everything the auto-commits said — every subject in the body, every
+  // Aide-Session trailer — or squashing would cut the link from history back to
+  // the transcripts that explain it.
+  const { squashMessage } = await import("./changes.js")
+
+  const msg = squashMessage(
+    ["add the parser", "fix the parser's cap", "rename the cap"],
+    ["s-1", "s-2"],
+  )
+  check("the FIRST subject leads", msg.startsWith("add the parser\n"), msg.split("\n")[0])
+  check(
+    "every subject survives in the body",
+    msg.includes("- fix the parser's cap") && msg.includes("- rename the cap"),
+  )
+  check(
+    "and every conversation's trailer",
+    msg.includes("Aide-Session: s-1") && msg.includes("Aide-Session: s-2"),
+    "losing the trailers would orphan the transcripts the commits point at",
+  )
+  const long = squashMessage(["z".repeat(100)], [])
+  check("a runaway first subject is capped", (long.split("\n")[0]?.length ?? 0) <= 72)
+  check("no sessions is no trailer block", !squashMessage(["a"], []).includes("Aide-Session"))
 }
 
 console.log("\ncolumns the wall is not drawing")

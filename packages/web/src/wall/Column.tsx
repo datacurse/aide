@@ -153,7 +153,7 @@ export function WallColumn({
   const [runId, setRunId] = useState<string | null>(null)
   const [sent, setSent] = useState<Map<string, RunEvent>>(new Map())
   const [picking, setPicking] = useState(false)
-  const [committing, setCommitting] = useState(false)
+  const [pushing, setPushing] = useState(false)
   /** Bumped to refetch the chat list — a new chat has no id until it starts. */
   const [seq, setSeq] = useState(0)
 
@@ -454,10 +454,7 @@ export function WallColumn({
 
   const gates = projectGates({
     holder,
-    uncommitted,
     openRunId: runId,
-    started: open.sessionId !== null,
-    busy,
     held: heldBy,
   })
 
@@ -484,53 +481,20 @@ export function WallColumn({
   }
 
   /**
-   * This column's own commit, on this column's own tree.
-   *
-   * One per column and no "commit all" anywhere on the page. Reviewing four
-   * diffs is four acts; a button that collapsed them into one press would be the
-   * brief's two-gates-into-one-button, which is not a simplification but the
-   * removal of the review.
+   * This column's own push, on this column's own branch. Committing has no
+   * control anywhere — the daemon commits each turn's work itself — so push is
+   * the one git act a column offers, and there is deliberately no "push all"
+   * on the page: sending four projects' work is four decisions.
    */
-  /**
-   * Whether this project commits its own work as turns finish.
-   *
-   * Fetched once per column rather than polled: the daemon is the only writer
-   * and this browser is the only thing that changes it, so the optimistic set
-   * below is what the server is about to confirm rather than a guess.
-   */
-  const [autoCommit, setAutoCommit] = useState(false)
-  useEffect(() => {
-    let live = true
-    void api
-      .autoCommit(project.id)
-      .then((r) => live && setAutoCommit(r.enabled))
-      // Unreadable reads as OFF, which is the honest way round: it under-claims
-      // rather than implying work is being committed that is not. A daemon too
-      // old to know the route answers 404 and lands here.
-      .catch(() => live && setAutoCommit(false))
-    return () => {
-      live = false
-    }
-  }, [project.id])
-  const toggleAutoCommit = (on: boolean) => {
-    setAutoCommit(on)
-    void api.setAutoCommit(project.id, on).catch((err: unknown) => {
-      // Put it back, or the switch claims a setting the daemon does not have.
-      setAutoCommit(!on)
-      setError(err instanceof Error ? err.message : String(err))
-    })
-  }
-
-  const commit = async (push: boolean) => {
-    setCommitting(true)
+  const push = async (squash: boolean) => {
+    setPushing(true)
     setError(null)
     try {
-      const { runId: id } = await api.commitProject(project.id, open.sessionId, false, push)
-      setRunId(id)
+      await api.pushProject(project.id, squash)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
-      setCommitting(false)
+      setPushing(false)
     }
   }
 
@@ -788,11 +752,9 @@ export function WallColumn({
       <CommitFoot
         uncommitted={uncommitted}
         ahead={pending?.ahead ?? null}
-        blocked={gates.commit}
-        busy={committing || (runId !== null && !finished && holder?.runId === runId)}
-        onCommit={commit}
-        autoCommit={autoCommit}
-        onAutoCommit={toggleAutoCommit}
+        blocked={gates.push}
+        busy={pushing}
+        onPush={push}
       />
     </section>
   )
@@ -1047,103 +1009,80 @@ function ChatPicker({
 }
 
 /**
- * The project's own gate, at the foot of its own column.
+ * The project's git standing, at the foot of its own column.
  *
- * Everything the rail's top half says, in one line: what is left to commit, the
- * button that takes it, and the checkbox that chains a push. `and push` is read
- * at the moment of the press and stored nowhere — a habit rather than a setting,
- * which is the distinction the rail already draws.
+ * There is nothing to press about committing — the daemon commits each turn's
+ * work itself once its checks pass — so the foot reports the cycle (files
+ * waiting for the next turn's end, commits waiting to be sent) and offers the
+ * one act that is still a decision: push, plain or squashed.
  */
 function CommitFoot({
   uncommitted,
   ahead,
   blocked,
   busy,
-  onCommit,
-  autoCommit,
-  onAutoCommit,
+  onPush,
 }: {
   uncommitted: number
-  /** null means no upstream, which is `publish branch` rather than nothing to do. */
+  /** null means no upstream, which is `publish` rather than nothing to do. */
   ahead: number | null
   blocked: string | null
   busy: boolean
-  onCommit: (push: boolean) => void
-  /**
-   * This project commits each turn's work as it finishes.
-   *
-   * A setting rather than a habit — it persists and it acts on turns nobody is
-   * watching — so unlike `push` it is drawn even when there is nothing to
-   * commit. A switch that vanished on a clean tree could only be found by
-   * dirtying the repository first, which is the wrong way round for the control
-   * that decides whether the tree gets dirty at all.
-   */
-  autoCommit: boolean
-  onAutoCommit: (on: boolean) => void
+  onPush: (squash: boolean) => void
 }) {
-  const [push, setPush] = useState(false)
-  const auto = (
-    <label
-      className="flex shrink-0 cursor-pointer items-center gap-1 font-sans text-[10px] text-fg-dim hover:text-fg-muted"
-      title={
-        autoCommit
-          ? "Turns commit their own work as they finish. The checks still run and a failure still stops and asks — this skips the press, not the gate. It never pushes."
-          : "Commit each turn's work as it finishes, without being asked. The gate is unchanged: checks run, a failure stops and asks, and nothing is pushed."
-      }
+  const canPush = ahead === null || ahead > 0
+  const pushButton = (label: string, squash: boolean, title: string) => (
+    <button
+      type="button"
+      aria-disabled={blocked ? true : undefined}
+      onClick={blocked ? undefined : () => onPush(squash)}
+      disabled={blocked ? undefined : busy}
+      title={blocked ?? title}
+      className={`inline-flex shrink-0 items-center gap-1 rounded-sm px-2 py-0.5 font-sans text-[10px] transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+        blocked ? LOCKED : "bg-accent text-white hover:bg-accent-hover"
+      }`}
     >
-      <input
-        type="checkbox"
-        checked={autoCommit}
-        onChange={(e) => onAutoCommit(e.target.checked)}
-        className="size-3 accent-accent"
-      />
-      auto
-    </label>
+      {blocked && <Lock className="size-3 shrink-0" />}
+      {busy ? "pushing…" : label}
+    </button>
   )
-  if (uncommitted === 0) {
-    return (
-      <div className="flex h-8 shrink-0 items-center gap-2 border-t border-line bg-chrome px-3 font-sans text-[11px] text-fg-dim">
-        <Check className="size-3 text-ok" />
-        nothing to commit
-        <span className="ml-auto flex items-center gap-2">
-          {ahead !== null && ahead > 0 && <span>{ahead} to push</span>}
-          {auto}
-        </span>
-      </div>
-    )
-  }
   return (
-    <div className="flex h-8 shrink-0 items-center gap-2 border-t border-line bg-chrome px-3">
-      <GitCommit className="size-3 shrink-0 text-fg-dim" />
-      <span className="min-w-0 flex-1 truncate font-sans text-[11px] text-fg-muted">
-        {uncommitted} {uncommitted === 1 ? "file" : "files"}
-      </span>
-      {auto}
-      <label
-        className="flex shrink-0 items-center gap-1 font-sans text-[10px] text-fg-dim"
-        title="Push the branch after this commit lands"
-      >
-        <input
-          type="checkbox"
-          checked={push}
-          onChange={(e) => setPush(e.target.checked)}
-          className="size-3 accent-accent"
-        />
-        push
-      </label>
-      <button
-        type="button"
-        aria-disabled={blocked ? true : undefined}
-        onClick={blocked ? undefined : () => onCommit(push)}
-        disabled={blocked ? undefined : busy}
-        title={blocked ?? "Read the diff in the panes; this takes the whole tree"}
-        className={`inline-flex shrink-0 items-center gap-1 rounded-sm px-2 py-0.5 font-sans text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
-          blocked ? LOCKED : "bg-accent text-white hover:bg-accent-hover"
-        }`}
-      >
-        {blocked && <Lock className="size-3 shrink-0" />}
-        {busy ? "committing…" : "commit"}
-      </button>
+    <div className="flex h-8 shrink-0 items-center gap-2 border-t border-line bg-chrome px-3 font-sans text-[11px] text-fg-dim">
+      {uncommitted === 0 ? (
+        <>
+          <Check className="size-3 shrink-0 text-ok" />
+          <span className="min-w-0 flex-1 truncate">nothing uncommitted</span>
+        </>
+      ) : (
+        <>
+          <GitCommit className="size-3 shrink-0" />
+          {/* What WILL happen rather than what to do: the list clears itself
+              when the next turn ends and the checks pass. */}
+          <span
+            className="min-w-0 flex-1 truncate text-fg-muted"
+            title="Committed automatically when the next turn ends and the checks pass"
+          >
+            {uncommitted} {uncommitted === 1 ? "file" : "files"} to auto-commit
+          </span>
+        </>
+      )}
+      {canPush && (
+        <span className="ml-auto flex items-center gap-1.5">
+          {pushButton(
+            ahead === null ? "publish" : `push ${ahead}`,
+            false,
+            ahead === null
+              ? "Publish this branch — it has no upstream yet, so this sets one."
+              : `Send ${ahead} commit${ahead === 1 ? "" : "s"} upstream, as they are.`,
+          )}
+          {ahead !== null && ahead > 1 &&
+            pushButton(
+              "squash",
+              true,
+              `Fold these ${ahead} per-turn commits into one and push that. Every subject survives in its body; nothing is forced.`,
+            )}
+        </span>
+      )}
     </div>
   )
 }

@@ -122,6 +122,15 @@ export interface CommitWorkingTreeOptions {
   /** From `GitPending.ahead`: false means the branch has no upstream yet. */
   hasUpstream: boolean
   /**
+   * A message already written — the turn's own summary, via `turnCommitMessage`
+   * — or null to have the helper model draft one from the diff.
+   *
+   * Null is the fallback the design names, not a degraded path: a turn that
+   * wrote no summary block, and a commit with no turn behind it at all, both
+   * still get a message written from what was actually staged.
+   */
+  message?: { subject: string; body: string } | null
+  /**
    * One automatic attempt at whatever the checks refused, or null for none.
    *
    * Null is a real case rather than a degraded one: there is nothing to make the
@@ -194,6 +203,37 @@ function repairRequest(failed: CheckOutcome): string {
   ].join("\n")
 }
 
+/** Git's conventional subject width. Cut with an ellipsis, never wrapped. */
+const capSubject = (s: string): string =>
+  s.length > 72 ? `${s.slice(0, 71).trimEnd()}…` : s
+
+/**
+ * The commit message a turn already wrote, or null when it wrote none.
+ *
+ * Every turn is asked to end with a one-line `headline` in its summary block,
+ * and that line is a better commit subject than anything a second model call
+ * could write: it was written by the thing that did the work, moments after
+ * doing it, and it is already in the transcript for the reader to compare. So
+ * the auto-commit that follows a turn uses it directly — no drafting call, no
+ * ten-second wait — with the turn's own prompt (first line, verbatim) as the
+ * body, so the log answers "what was asked" as well as "what was done".
+ *
+ * Null when the turn wrote no block, which sends the caller to the helper-model
+ * drafter exactly as before. Exported for `pnpm smoke`: the cap and the
+ * null-means-draft decision are the two halves that fail silently.
+ */
+export function turnCommitMessage(
+  headline: string | null | undefined,
+  prompt: string,
+): { subject: string; body: string } | null {
+  const line = headline?.trim()
+  if (!line) return null
+  return {
+    subject: capSubject(line),
+    body: prompt.trim().split("\n")[0]?.trim() ?? "",
+  }
+}
+
 /**
  * A commit message for a commit whose message could not be written.
  *
@@ -213,7 +253,7 @@ function repairRequest(failed: CheckOutcome): string {
  */
 export function fallbackMessage(request: string, paths: string[]): string {
   const subject = request.trim().split("\n")[0]?.trim() || "uncommitted work"
-  const cut = subject.length > 72 ? `${subject.slice(0, 71).trimEnd()}…` : subject
+  const cut = capSubject(subject)
   return [
     cut,
     "",
@@ -325,44 +365,57 @@ export async function commitWorkingTree(
     }
   }
 
-  emit({ type: "commit.drafting", model: CONFIG.helperModel })
-  // The message is the one part of a commit that can fail for a reason that has
-  // nothing to do with the work — the same argument the push below is written
-  // around, and a sharper one, because this runs BEFORE the commit rather than
-  // after it. A throw here threw away a tree that had already passed its checks:
-  // the diff was read, the gate was run and paid for, and what the human got was
-  // `Reached maximum budget ($0.5)` and no commit, from a button whose entire job
-  // is to be the thing that clears the rail. A gate that can be wedged by its own
-  // cosmetics has no release.
-  //
-  // So a failed draft degrades to a written message rather than taking the commit
-  // with it. It is deliberately NOT silent — the label says the model did not
-  // write it and why — because a subject line nobody chose, appearing with no
-  // explanation, reads as aide having quietly stopped bothering.
   let message: Drafted
-  try {
-    message = await draftCommitMessage({
-      model: CONFIG.helperModel,
-      title: opts.request,
-      prompt: "",
-      diffStat: changes.stat,
-      diff: changes.diff,
-      recentSubjects: await recentSubjects(repoOf(project)),
-      // Streamed, so this step is watched rather than waited out.
-      onText: (text) => opts.delta({ kind: "text", text }),
-    })
-  } catch (err) {
-    const why = err instanceof Error ? err.message : String(err)
-    emit({ type: "commit.step", label: `the message could not be written — ${why}` })
-    // No spend to add: a call that threw is one whose accounting never arrived.
-    message = { text: fallbackMessage(opts.request, changes.paths), costUsd: 0, modelUsage: {} }
+  if (opts.message) {
+    // The turn already wrote its own account, so the commit spends nothing and
+    // waits for nothing — see `turnCommitMessage`. The `commit.drafted` event is
+    // still emitted, because the transcript's commit fold reads the message off
+    // it; `model` names the source rather than a model, and the renderer shows
+    // an unrecognised id as-is.
+    const body = opts.message.body.trim()
+    message = {
+      text: body ? `${opts.message.subject}\n\n${body}` : opts.message.subject,
+      costUsd: 0,
+      modelUsage: {},
+    }
+  } else {
+    emit({ type: "commit.drafting", model: CONFIG.helperModel })
+    // The message is the one part of a commit that can fail for a reason that has
+    // nothing to do with the work — the same argument the push below is written
+    // around, and a sharper one, because this runs BEFORE the commit rather than
+    // after it. A throw here threw away a tree that had already passed its checks:
+    // the diff was read, the gate was run and paid for, and what the human got was
+    // `Reached maximum budget ($0.5)` and no commit, from the one step that clears
+    // the rail. A gate that can be wedged by its own cosmetics has no release.
+    //
+    // So a failed draft degrades to a written message rather than taking the commit
+    // with it. It is deliberately NOT silent — the label says the model did not
+    // write it and why — because a subject line nobody chose, appearing with no
+    // explanation, reads as aide having quietly stopped bothering.
+    try {
+      message = await draftCommitMessage({
+        model: CONFIG.helperModel,
+        title: opts.request,
+        prompt: "",
+        diffStat: changes.stat,
+        diff: changes.diff,
+        recentSubjects: await recentSubjects(repoOf(project)),
+        // Streamed, so this step is watched rather than waited out.
+        onText: (text) => opts.delta({ kind: "text", text }),
+      })
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err)
+      emit({ type: "commit.step", label: `the message could not be written — ${why}` })
+      // No spend to add: a call that threw is one whose accounting never arrived.
+      message = { text: fallbackMessage(opts.request, changes.paths), costUsd: 0, modelUsage: {} }
+    }
   }
   add(spent, message)
 
   emit({
     type: "commit.drafted",
     message: message.text,
-    model: CONFIG.helperModel,
+    model: opts.message ? "turn-summary" : CONFIG.helperModel,
   })
 
   // Stop lands here or nowhere. Up to this line an interrupt costs the drafting
@@ -381,7 +434,12 @@ export async function commitWorkingTree(
     paths: changes.paths,
     message: message.text,
   })
-  emit({ type: "commit.landed", sha, paths: changes.paths })
+  emit({
+    type: "commit.landed",
+    sha,
+    paths: changes.paths,
+    subject: message.text.split("\n", 1)[0] ?? "",
+  })
 
   // After the commit and only if it happened, which is the whole meaning of the
   // checkbox: "and send it". A gate that refused never reaches this line, so

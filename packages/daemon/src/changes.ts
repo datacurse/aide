@@ -324,6 +324,87 @@ export async function pushBranch(
   return { branch, pushed: ahead }
 }
 
+/**
+ * The message a squash writes: the first auto-commit's subject on top, every
+ * subject underneath, and the conversations they came from as trailers.
+ *
+ * The FIRST subject and not the last, because with one-commit-per-turn the
+ * first is the turn that started the piece of work and the ones after it are
+ * fixes and follow-ups — the same reason a PR takes its title from the branch's
+ * opening commit. Every subject survives in the body, so nothing the
+ * auto-commits said is lost to the squash; the `Aide-Session` trailers are
+ * collected the same way, or squashing would cut the one link from history back
+ * to the transcripts that explain it.
+ *
+ * Pure and exported for `pnpm smoke`.
+ */
+export function squashMessage(
+  subjects: readonly string[],
+  sessionIds: readonly string[],
+): string {
+  const first = subjects[0]?.trim() || "squashed work"
+  const subject = first.length > 72 ? `${first.slice(0, 71).trimEnd()}…` : first
+  const body = subjects.map((s) => `- ${s}`).join("\n")
+  return appendTrailers(
+    `${subject}\n\n${body}`,
+    sessionIds.map((id) => ["Aide-Session", id] as [string, string]),
+  )
+}
+
+/**
+ * Fold everything ahead of the upstream into one commit, then push it.
+ *
+ * The push button's second option, for a branch that accumulated one
+ * auto-commit per turn: land it upstream as one change instead of a dozen
+ * steps. No force and no rewrite of anything published — `reset --soft
+ * @{upstream}` only moves commits that have never left this machine, and the
+ * result is a fast-forward for the remote exactly as the original stack was.
+ *
+ * With one commit ahead there is nothing to fold, and with none this is a plain
+ * push; both fall through rather than refusing, because the button says "push"
+ * first and "squash" second.
+ *
+ * If the squash commit itself fails — a pre-commit hook, most likely — the
+ * branch is put back where it was (`ORIG_HEAD`, which the reset just wrote)
+ * before the error is rethrown. Without that a refused hook would leave the
+ * history rewound and the work sitting staged, which reads as commits having
+ * vanished.
+ */
+export async function squashAndPush(
+  root: RepoRef,
+): Promise<{ branch: string; pushed: number; squashed: number }> {
+  const range = "@{upstream}..HEAD"
+  const subjects = (
+    await git(root, ["log", "--reverse", "--pretty=%s", range])
+  )
+    .split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean)
+  if (subjects.length < 2) {
+    return { ...(await pushBranch(root, true)), squashed: 0 }
+  }
+
+  const sessionIds = [
+    ...new Set(
+      (await git(root, ["log", "--pretty=%(trailers:key=Aide-Session,valueonly)", range]))
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean),
+    ),
+  ]
+
+  await git(root, ["reset", "--soft", "@{upstream}"])
+  try {
+    await withMessageFile(root, squashMessage(subjects, sessionIds), (file) =>
+      git(root, ["commit", "-F", file, "--cleanup=whitespace"]),
+    )
+  } catch (err) {
+    await git(root, ["reset", "--soft", "ORIG_HEAD"]).catch(() => {})
+    throw err
+  }
+  return { ...(await pushBranch(root, true)), squashed: subjects.length }
+}
+
 const exists = (path: string) => access(path).then(() => true, () => false)
 
 /**

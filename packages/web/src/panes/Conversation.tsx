@@ -72,7 +72,6 @@ export function ConversationPane({
   projectId,
   openSessionId,
   draftId,
-  uncommitted,
   holder,
   adoptRunId,
   autoSend,
@@ -91,20 +90,13 @@ export function ConversationPane({
    */
   draftId: string | null
   /**
-   * How many files are uncommitted in the project, which is exactly the scope a
-   * commit takes. Passed down rather than polled here: the git rail already asks
-   * on the app's beat, and two pollers would let the box and the rail disagree
-   * about whether a new chat is allowed.
-   */
-  uncommitted: number
-  /**
    * Who has the project's checkout right now, from the app's poll.
    *
    * The one fact about other chats this pane reads live, and it has to be: the
    * daemon refuses every send while anything holds the project, and what a run
-   * is about to write is not knowable from `uncommitted`, which can only report
-   * files that already exist. Without this the box stayed lit beside a turn in
-   * flight and answered a press with a red line.
+   * is about to write is not knowable from the rail's file list, which can only
+   * report files that already exist. Without this the box stayed lit beside a
+   * turn in flight and answered a press with a red line.
    */
   holder: LockHolder | null
   /**
@@ -749,18 +741,13 @@ export function ConversationPane({
           // hand every unstarted chat the same box.
           draftKey={draftKey(projectId, sessionId ?? draftId ?? "")}
           inheritedMode={summary?.lastMode ?? null}
-          // Two blocks, held back from different chats, and both are stated in
-          // `projectGates` rather than here — the wall's columns each carry a box
-          // of their own and must refuse on the same terms this one does. See
-          // that file for why the holder is compared by RUN ID and why a started
-          // or busy chat is exempt from the tree.
+          // Stated in `projectGates` rather than here — the wall's columns each
+          // carry a box of their own and must refuse on the same terms this one
+          // does. See that file for why the holder is compared by RUN ID.
           blocked={
             projectGates({
               holder,
-              uncommitted,
               openRunId: runId,
-              started: sessionId !== null,
-              busy,
               held: heldBy,
             }).send
           }

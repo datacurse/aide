@@ -78,16 +78,20 @@ export const HUMAN_ONLY_COMMANDS = ["git commit"]
  * denials before it gave up. A refusal that names the real reason ends that at
  * one, and a refusal an agent cannot act on is how a gate turns into a loop.
  *
- * It names what to do instead, because there IS something: leave the work
- * uncommitted, say so, and let the human press the button. That is not a
- * consolation prize — it is the product.
+ * The name `HUMAN_ONLY` is kept, but the committer is the DAEMON now, not a
+ * person: aide commits the working tree itself when a turn ends and the
+ * project's checks pass. What the rule protects is unchanged — that a commit
+ * happens exactly once per turn, at a known point, after the gate — and a run
+ * committing mid-turn would put half-finished work into history under nobody's
+ * message. The refusal says so, and says there is nothing to do instead,
+ * because that is what ends the hunt for a spelling that gets through.
  */
 const HUMAN_ONLY_REASON =
-  "`git commit` is the human's, not a run's: you leave the work uncommitted and a " +
-  "person reads the diff and presses commit in aide. That review is the whole product, " +
-  "so there is no form of this command that will be allowed — say what you changed and " +
-  "stop, rather than looking for one. (`git push` is allowed: it only ever moves commits " +
-  "a human already approved.)"
+  "`git commit` is never run from a turn: aide commits the working tree itself after " +
+  "your turn ends, once the project's checks pass. There is no form of this command " +
+  "that will be allowed and nothing you need to do instead — finish the work, say what " +
+  "you changed, and stop. (`git push` is allowed: it only ever moves commits that have " +
+  "already landed through that gate.)"
 
 /**
  * Reading a file, or searching for one, through a shell.

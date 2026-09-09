@@ -42,18 +42,23 @@ to review the work without leaving.
   worked against a repo that had not been true for hours — and its changes could
   never appear in the dev server, which made anything visual unreviewable.
   Parallelism is several projects, not several agents in one.
-- **A gate on the code, and a gate on the work.** You read the diff and commit
-  it; separately, you decide the work is done and the row closes. There is no
-  merge to be the second gate any more — recoverability comes from the
-  checkpoint instead. Collapsing the two into one button is not a
-  simplification, it is removing the review.
-- **The gate on the code is on the working tree, not on a chat.** What blocks the
-  next conversation and what the commit button takes must be one list. They were
-  once two — the block read the repository, the button read a conversation's
-  checkpoint — and a project dirtied by anything that was not a chat was then
-  refused every new conversation with no button in aide that would clear it. A
-  gate whose precondition and whose release read different objects can wedge, and
-  the only way out of that one was a terminal.
+- **The machine gates the code; the human gates the work, and the push.**
+  Committing is automatic: when a turn ends, aide runs the project's own checks
+  over the working tree and commits everything if they pass — one commit per
+  turn, made by the daemon, never by the model, with the turn's own summary
+  line as the subject. The review moved rather than vanished: the checks are
+  the gate on the code, the checkpoint is the recovery, and the transcript
+  beside the rail is where a commit explains itself. What stays human is the
+  verdict that the work is done, and the push — the one irreversible step —
+  which is the only git button left. There is deliberately no commit button at
+  all: a control for something that happens correctly by itself is a control
+  that teaches you to distrust it.
+- **A gate that loses its button loses its blocks.** The dirty-tree refusal on
+  starting a new chat went with the commit button, and had to: a refusal whose
+  release was removed is the wedge this brief has been bitten by twice, built
+  on purpose. An uncommitted tree is a moment in the cycle now — the next
+  turn's end sweeps it, editor edits included — not a state somebody must
+  clear.
 - **One automatic attempt, then a person.** A commit whose checks fail hands the
   failure to the conversation, lets it try once, and runs the checks again over
   what that left. A second failure stops and asks. The attempt is worth taking

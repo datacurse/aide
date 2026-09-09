@@ -199,50 +199,22 @@ export const api = {
   conversations: (projectId: string) =>
     call<ConversationRow[]>(`/api/projects/${projectId}/conversations`),
   /**
-   * Commit everything uncommitted in the project.
+   * Send the branch upstream. The one git button left — committing is the
+   * daemon's, automatic, once per turn after the checks pass.
    *
-   * The project's route, not a conversation's: what it takes is the working
-   * tree, which is what the rail shows and what the new-chat block reads.
-   * `sessionId` only attributes it — the commit's trailer, what the drafter is
-   * told the work was for, and which transcript the run appears in — so null is
-   * a normal press, made with no chat open over changes no chat made.
+   * Not a run: a couple of git calls, no model, nothing to attribute, so it
+   * answers with what it did rather than a run id to go and watch.
    *
-   * Answers with a run id, not a sha. The drafting is a model call on the diff
-   * and takes about as long as a short turn, so it goes on the event stream like
-   * one — what it wrote and what it took arrive in the transcript.
-   *
-   * `force` commits over a failed check. It is a second press, never a setting —
-   * see `CommitWorkingTreeOptions.force` for why that distinction is the point.
+   * `squash` folds every commit ahead of the upstream into one before sending —
+   * the per-turn auto-commits are the local record, and whether upstream wants
+   * the steps or the change is decided at the moment of the press. On a branch
+   * with no upstream it is quietly a plain publish.
    */
-  commitProject: (projectId: string, sessionId: string | null, force = false, push = false) =>
-    call<{ runId: string }>(`/api/projects/${projectId}/commit`, {
-      method: "POST",
-      body: JSON.stringify({ sessionId, force, push }),
-    }),
-  /**
-   * Whether this project commits its own work as turns finish, and the switch.
-   *
-   * Per project and machine-local — a habit of this checkout rather than a fact
-   * about the repository, so it lives beside the done-ticks and not in
-   * `.aide/project.md`.
-   */
-  autoCommit: (projectId: string) =>
-    call<{ enabled: boolean }>(`/api/projects/${projectId}/auto-commit`),
-  setAutoCommit: (projectId: string, enabled: boolean) =>
-    call<{ enabled: boolean }>(`/api/projects/${projectId}/auto-commit`, {
-      method: "POST",
-      body: JSON.stringify({ enabled }),
-    }),
-  /**
-   * Send the branch upstream, on its own.
-   *
-   * Not a run: one git call, no model, nothing to attribute, so it answers with
-   * what it did rather than a run id to go and watch.
-   */
-  pushProject: (projectId: string) =>
-    call<{ branch: string; pushed: number }>(`/api/projects/${projectId}/push`, {
-      method: "POST",
-    }),
+  pushProject: (projectId: string, squash = false) =>
+    call<{ branch: string; pushed: number; squashed?: number }>(
+      `/api/projects/${projectId}/push`,
+      { method: "POST", body: JSON.stringify({ squash }) },
+    ),
   /** Done. Nothing an agent runs can reach this. */
   closeChat: (projectId: string, sessionId: string) =>
     call<{ warning: string | null }>(

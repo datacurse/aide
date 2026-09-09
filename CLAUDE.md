@@ -98,8 +98,9 @@ Decisions already taken, which are not gaps to fill:
   static import is hoisted and its output would print above `repo: <path>` — the
   run would still be correct and would read as though the sections had been
   shuffled. When changing any of this, the check that matters is that the
-  assertion count does not fall: `pnpm smoke` prints 592 `ok` lines, and a
-  refactor that quietly drops some is the failure this number exists to catch.
+  assertion count does not fall: `pnpm smoke` prints 705 `ok` lines as of
+  2026-09-09, and a refactor that quietly drops some is the failure this number
+  exists to catch.
   It fell once on purpose — the card view was removed and took ~30 of its own
   assertions with it, leaving the ten that cover `currentActivity`, which
   outlived it.
@@ -415,21 +416,20 @@ Decisions already taken, which are not gaps to fill:
   with no record, and a send starts a chat from a row the list no longer draws.
   It clears rather than selecting a neighbour, because which chat to show next is
   a choice the human just made by deleting one.
-- **The four gates are one function, and lifting them was the prerequisite.**
-  `projectGates` in protocol answers why a project cannot take a chat, a commit, a
-  push or a send. Those lived inline in `App.tsx`, computed for the one open
-  project, which was fine while there was one; the wall needs them per project,
-  and recomputing them in the column would put two implementations of "is this
+- **The gates are one function, and they have shrunk to the lock.**
+  `projectGates` in protocol answers why a project cannot take a chat, a push or
+  a send. Those lived inline in `App.tsx`, computed for the one open project,
+  which was fine while there was one; the wall needs them per project, and
+  recomputing them in the column would put two implementations of "is this
   project blocked" in the codebase. That is the shape behind both wedges in the
   brief — a block reading one object while the button that releases it reads
   another — so it is one pure function both views call, asserted by `pnpm smoke`,
-  which a React component cannot be. Three details are the ones that break
-  silently: the holder is named BEFORE the uncommitted count, because "commit that
-  work" cannot be followed while a run holds the repo and the commit button is
-  locked by that same holder; the commit's own run is exempt from its own button
-  or it locks itself the instant it is pressed; and the composer compares the
-  holder by RUN ID, not by session, because a commit attributed to a conversation
-  is not that conversation's turn. `parseLocation` and `formatLocation` moved to
+  which a React component cannot be. The commit gate and the dirty-tree rules
+  are gone from it: commits are automatic, so an uncommitted tree is a moment in
+  the cycle rather than a state a human clears, and a rule blocking chats on it
+  would be a refusal with no release. What breaks silently is the surviving
+  detail: the composer compares the holder by RUN ID, not by session, because a
+  commit attributed to a conversation is not that conversation's turn. `parseLocation` and `formatLocation` moved to
   protocol for the same reason — they are pure but lived in a file that touches
   `window`, which put the one part of routing that fails silently out of smoke's
   reach. A broken round trip is not an error anywhere; it is a reload landing
@@ -662,11 +662,16 @@ Decisions already taken, which are not gaps to fill:
   chat you have OPEN is never named: a chat you are typing into is one you are
   about to send, and the SDK will name that one for free. That exemption is the
   whole cost control — without it this is a model call per composing pause.
-- **A commit takes the working tree, not a conversation's diff.** `POST
-  /api/projects/:id/commit`; a session id on it is attribution only. This is not
-  a shortcut around the review — it is what makes the rail's list, which blocks
-  the next chat, a list you can always clear. Narrowing it back to one chat's
-  paths re-opens the wedge in the brief.
+- **A commit takes the working tree, and starts itself.** There is no commit
+  route and no commit button: `startCommit` in server.ts runs off
+  `ChatLane.onProjectIdle`, once per finished chat turn, and commits only after
+  the project's checks pass. A session id on it is attribution only, and the
+  subject comes from the turn's own summary headline (`turnCommitMessage`) with
+  the helper model as fallback. Narrowing what it stages back to one chat's
+  paths re-opens the wedge in the brief. The dirty-tree block on starting a new
+  chat went with the button — a refusal whose release was removed would be the
+  wedge built on purpose — so a chat may now start over uncommitted work, which
+  the next turn's auto-commit sweeps up.
 - **A failed check gets one automatic fix, and one only.** The commit hands the
   failure to the conversation it is attributed to, waits for the turn, re-reads
   the tree and checks again; a second failure stops and asks. That turn runs
@@ -925,9 +930,12 @@ runs and 101.6 minutes — 67% of all the time those runs spent in a shell**, an
 its own, which is the guidance above being ignored; batching every wave as it
 stood would have recovered 26 minutes.
 
-One command per Bash *call* — no pipes into another command, no `&&`, no `$( )`.
-That is not one call per message: independent calls belong in the same message.
-Use `pnpm --filter @aide/daemon <script>` rather than
+Compound commands are judged segment by segment: pipes, `;`, `&&` and `||` are
+split and every segment must clear the same lists, so `pnpm test 2>&1 | tail -50`
+and `git log | head` are fine while `cd X && cat Y` is refused for the `cat`.
+Substitution (`$( )`, backticks), subshells and backgrounding stay refused
+outright — they let an allowed prefix carry a payload. Use
+`pnpm --filter @aide/daemon <script>` rather than
 `cd packages/daemon && pnpm <script>`.
 
 `cat`, `head`, `tail`, `sed`, `grep`, `awk`, `rg` and `find` are **refused** in a
@@ -976,45 +984,32 @@ aide snapshots the tree before each run (`refs/aide/checkpoints/<session>`), so 
 bad run is recoverable — but recovery is a human typing a restore command over
 their own work, which is not free. It is a safety net, not a licence.
 
-**Do not commit. Pushing is fine.** Your changes are reviewed as a diff and
-committed by a human from the UI, so `git commit` is in `HUMAN_ONLY_COMMANDS` and
-reaching for it is a sign something has been misunderstood — there is no
-invocation that gets through, so a denial is the answer rather than a puzzle.
-That refusal says so in its own words, separately from the `deniedBash` one,
-because for a while they shared a sentence: a denied agent was told the command
-"never exits, or spends money", read that as a runaway-command guard rather than
-a rule about the review, and tried four different forms — a heredoc, a message
-file, a plain invocation — before giving up.
+**Never run `git commit`. aide commits for you, automatically.** When your turn
+ends, the daemon runs the project's checks over the working tree and — if they
+pass — commits everything, using your closing summary's `headline` as the
+subject and your prompt's first line as the body (helper model drafts from the
+diff if you wrote no summary). One commit per turn, made by the daemon at a
+known point after the gate; a run committing mid-turn would put half-finished
+work into history, so `git commit` stays in `HUMAN_ONLY_COMMANDS` and there is
+no invocation that gets through. If the checks fail, the failure is handed to
+the conversation for one fix, then the tree simply stays dirty and the next
+turn's end tries again — do not fight this, and do not try to commit around it.
 
-**Commit and push are two buttons, and a checkbox chains them.** `commit` is the
-gate. `push` is its own press on the clean tree — because the common case for it
-is a commit that already happened: the box was not ticked, the push failed, or
-the work was committed before there was a remote. A button that could only push
-as part of committing could clear none of those. The checkbox ("and push") is
-read at the moment of the press and stored nowhere, so it is a habit rather than
-a setting — one that silently pushed months later would be a setting wearing a
-checkbox's clothes. A chained push runs INSIDE the commit's run, after
-`commit.landed`, and its failure does not undo the commit: a push can fail for
-reasons that have nothing to do with the work, and reporting a commit that landed
-as one that failed is worse than saying "committed, but the push failed". The
-button reads `ahead` off `GitPending`, which rides in that call's existing batch
-so it costs no extra round trip; `ahead: null` means no upstream and shows
-`publish branch`, which is why null is not collapsed to 0 — that would disable the
-button on the one branch that has never been pushed. Never `--force`: a push that
-needs it is a history rewrite, and the checkpoint refs are local so they cannot
-recover somebody else's clone.
+**Push is the one git button, and the only manual git act.** Committing has no
+button at all any more; sending work off the machine is the one irreversible
+step, so it stays a human press, with two spellings: push as-is, or
+squash-and-push, which folds the per-turn auto-commits into one (every subject
+survives in its body, every `Aide-Session` trailer rides along) before sending.
+Never `--force`: the squash only ever folds commits that have not been pushed,
+so the result is a fast-forward, and a push that needs force is a history
+rewrite that stays in a terminal.
 
-`git push` is deliberately NOT human-only, and the distinction is the point.
-Push is DOWNSTREAM of the gate: nothing is pushable until it has been committed,
-and committing is the human pressing the button, so a run that can push is only
-ever moving commits somebody has already read and approved. Blocking it
-protected no review that had not already happened — it stranded approved work on
-the machine that made it, which is exactly what it did to a remote project on
-`tg`, where a reviewed commit could not reach origin and the deploy ran from a
-local checkout that no longer matched it. A gate placed after the decision it
-guards is not a gate, it is a dead end. `pnpm smoke` asserts push is allowed on
-both paths, that commit is not, that the two refusal reasons differ, and that the
-commit refusal names push as the thing that IS allowed.
+`git push` is deliberately NOT human-only. Push moves only commits that have
+already landed through the gate; blocking it stranded finished work on the
+machine that made it, which is what happened to a remote project on `tg`. `pnpm
+smoke` asserts push is allowed on both paths, that commit is not, that the two
+refusal reasons differ, and that the commit refusal names push as the thing
+that IS allowed.
 
 Everything under `.aide/` is fair game, `project.md` included — a change to what
 the project refuses to be should land in the same commit as the code. There is no

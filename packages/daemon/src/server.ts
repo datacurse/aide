@@ -24,13 +24,11 @@ import { runLogPath, sshConfigPath } from "@aide/protocol/node"
 import { activity } from "./activity.js"
 import { MAX_PROJECT_DOC_CHARS } from "./agent.js"
 import {
-  autoCommitEnabled,
   chatStatuses,
   closeChat,
   reopenChat,
-  setAutoCommit,
 } from "./board.js"
-import { currentBranch, pushBranch, runChanges } from "./changes.js"
+import { currentBranch, pushBranch, runChanges, squashAndPush } from "./changes.js"
 import { ChatLane } from "./chat.js"
 import { CONFIG } from "./config.js"
 import { EventLog } from "./eventlog.js"
@@ -47,7 +45,7 @@ import {
 import { pickFolder } from "./picker.js"
 import { listRemoteDirectories, listSshHosts } from "./ssh.js"
 import { conversationProfile } from "./profile.js"
-import { commitWorkingTree, conversationBaseline } from "./review.js"
+import { commitWorkingTree, conversationBaseline, turnCommitMessage } from "./review.js"
 import * as repo from "./repo.js"
 import { BOOT_SOURCE_ID, currentSourceId, isStale } from "./source.js"
 import { getConversation, listConversations } from "./sessions.js"
@@ -662,52 +660,39 @@ app.get(
 )
 
 /**
- * Commit what is uncommitted, as a run you can watch.
- *
- * The project's route, not a conversation's, and that is the point of it. What
- * this takes is the working tree — the same list the rail draws and the same
- * list the new-chat block reads — so it can be pressed over work no chat
- * produced. It used to hang off `/conversations/:sessionId/commit` and measure
- * against that conversation's checkpoint, which meant a project dirtied by an
- * editor was blocked from every new chat with no button in aide that would clear
- * it. See `review.ts`.
- *
- * `sessionId` is optional and is attribution only: the commit's trailer, the
- * intent handed to the drafter, and the transcript the run streams into. Absent
- * is a normal case, not a degraded one.
- *
- * Returns a run id rather than a sha: the drafting is a model call on the diff
- * and takes about as long as a short turn, so it goes onto the event stream like
- * one. The browser subscribes, and the message, the paths and the sha arrive in
- * the conversation pane.
- *
- * There is no message in the body. There was one when a panel drafted a message,
- * showed it in a textarea and posted it back; that panel is gone, because a
- * review sitting underneath the transcript is not where anybody was looking. See
- * `commitWorkingTree` for what replaced it and what that costs.
- */
-/**
  * Start a commit run over a project's working tree.
  *
- * Lifted out of the route below because the auto-commit path needs exactly this
- * and must not get a second, subtly different one — an automatic commit that
- * skipped the gate, or attributed itself differently, or held the lock by another
- * route would be a second implementation of the one thing in aide that writes to
- * history. It throws what `hold` throws, which is how both callers learn the
- * checkout is busy.
+ * There is no route in front of this any more, and no button in front of a
+ * route: aide commits its own work, once per turn, from the idle hook below.
+ * Committing takes the working tree — the same list the rail draws — so what an
+ * editor changed alongside a turn lands with it; the run, its checks, its
+ * message and its sha all stream into the attributed conversation's transcript
+ * exactly as the pressed commit's did. The one thing that stayed a button is
+ * push, because sending work off the machine is the one irreversible step.
+ *
+ * One function on purpose: a second, subtly different commit path — one that
+ * skipped the gate, or attributed itself differently, or held the lock by
+ * another route — would be a second implementation of the one thing in aide
+ * that writes to history. It throws what `hold` throws, which is how a caller
+ * learns the checkout is busy.
+ *
+ * `turn` is what the finished turn can lend the message: its summary headline
+ * becomes the subject and its prompt's first line the body, with no model call
+ * — see `turnCommitMessage`. Null (no turn, or no summary written) falls back
+ * to the helper model drafting from the diff.
  */
 async function startCommit(opts: {
   project: Project
   sessionId: string | null
   force: boolean
   push: boolean
+  turn?: { text: string; headline: string | null } | null
 }): Promise<string> {
   const { project, sessionId, force } = opts
   // What the work was asked for, so the drafter can tell intent from incident.
-  // The conversation's opening message, now that there is no backlog row to
-  // carry it — which is the better source anyway: it is what you actually typed
-  // rather than a line somebody summarised it into. With no conversation there
-  // is no intent to give it, and the diff is the whole of what it has to go on.
+  // The turn's own prompt when there is one; otherwise the conversation's
+  // opening message. With no conversation there is no intent to give it, and
+  // the diff is the whole of what the drafter has to go on.
   const opening = sessionId
     ? (await listConversations(project)).find((c) => c.sessionId === sessionId)
     : undefined
@@ -737,7 +722,9 @@ async function startCommit(opts: {
       commitWorkingTree({
         project,
         sessionId,
-        request: opening?.firstPrompt ?? "",
+        request: opts.turn?.text || (opening?.firstPrompt ?? ""),
+        // The turn's own words, when it left any — no model call and no wait.
+        message: turnCommitMessage(opts.turn?.headline, opts.turn?.text ?? ""),
         verify: readVerify,
         push: opts.push,
         hasUpstream,
@@ -772,64 +759,29 @@ async function startCommit(opts: {
   })
 }
 
-app.post(
-  "/api/projects/:id/commit",
-  withProject(async (project, req, reply) => {
-    const body = (req.body ?? {}) as { sessionId?: unknown; force?: unknown; push?: unknown }
-    // Anything that is not a non-empty string is no attribution, including the
-    // `null` the browser sends when no chat is open. A session id off the wire
-    // only ever reaches a trailer and a lookup, so it needs no more shape than
-    // this.
-    const sessionId = typeof body.sessionId === "string" && body.sessionId ? body.sessionId : null
-
-    // Committing underneath a working agent races its next write, and the diff
-    // would be a half-finished turn. `hold` refuses the whole project below; this
-    // says the narrower case in the conversation's own words before it gets there.
-    if (sessionId && chat.turnForSession(sessionId)) {
-      return reply.code(409).send({ message: "a turn is still in flight for this conversation" })
-    }
-
-    try {
-      const runId = await startCommit({
-        project,
-        sessionId,
-        force: body.force === true,
-        // Chained onto this press rather than a setting, and INSIDE the same
-        // run: the checkbox says "and send it", which is a thing this press
-        // does, not a mode the project is in. It runs after the commit and only
-        // if the commit happened, so a refused gate never pushes.
-        push: body.push === true,
-      })
-      return { runId }
-    } catch (err) {
-      return reply.code(409).send({ message: err instanceof Error ? err.message : String(err) })
-    }
-  }),
-)
-
 /**
- * Commit a turn's work without being asked, when the project is set to.
+ * Commit each turn's work as the turn finishes. Not a setting — the only path.
  *
  * Registered on the lane rather than polled, and it runs AFTER the turn has let
  * go of the checkout — see `onProjectIdle`, which is only called for a chat turn
- * ending, so a commit cannot trigger another one.
+ * ending, so a commit cannot trigger another one. There is no route and no
+ * button: the commit endpoint was removed with the opt-in flag, and the human's
+ * one remaining git control is push.
  *
  * Everything it skips is deliberate. It never pushes: sending work off the
- * machine on a timer is a different promise from committing it locally, and the
- * checkbox that does push is read at the moment of a press for exactly that
- * reason. It never forces: a tree that fails its checks stops and asks, the same
- * as a pressed commit, because the brief's one-attempt-then-a-person rule is not
- * about who pressed the button. And it does not tick the chat off — that is the
- * second gate, and it is yours.
+ * machine is the one irreversible step, and it stays a press. It never forces: a
+ * tree that fails its checks gets the one repair attempt and then stays dirty,
+ * with the failure written into the transcript — the brief's
+ * one-attempt-then-a-person rule is not about who pressed the button, and a red
+ * commit in history would be worse than no commit. And it does not tick the
+ * chat off — that is the second gate, and it is yours.
  *
- * Failures are swallowed to a log line. This is a convenience hanging off the
- * end of a turn that already succeeded; the tree is still dirty, the rail still
- * says so, and the button still works.
+ * Failures are swallowed to a log line. The turn already succeeded; the tree is
+ * still dirty, the rail still says so, and the next turn to end tries again.
  */
-chat.onProjectIdle = (projectId, sessionId) => {
+chat.onProjectIdle = (projectId, sessionId, turn) => {
   void (async () => {
     try {
-      if (!(await autoCommitEnabled(projectId))) return
       const project = await getProject(projectId)
       if (!project) return
       // Nothing to commit is the common case — most turns are questions. Asked
@@ -837,7 +789,7 @@ chat.onProjectIdle = (projectId, sessionId) => {
       // than a run somebody has to watch start and stop.
       const pending = await repo.pending(repoOf(project))
       if (pending.files.length === 0) return
-      await startCommit({ project, sessionId, force: false, push: false })
+      await startCommit({ project, sessionId, force: false, push: false, turn })
     } catch (err) {
       // Including `hold` refusing because something else took the checkout in
       // the moment between the release and here. That is a race with a correct
@@ -847,25 +799,6 @@ chat.onProjectIdle = (projectId, sessionId) => {
     }
   })()
 }
-
-/**
- * Whether this project commits its own work, and the switch for it.
- *
- * A GET and a POST rather than a field on the project, because it is machine
- * state rather than a property of the repository — see `autoCommitEnabled`.
- */
-app.get(
-  "/api/projects/:id/auto-commit",
-  withProject(async (project) => ({ enabled: await autoCommitEnabled(project.id) })),
-)
-app.post(
-  "/api/projects/:id/auto-commit",
-  withProject(async (project, req) => {
-    const on = (req.body as { enabled?: unknown } | null)?.enabled === true
-    await setAutoCommit(project.id, on)
-    return { enabled: on }
-  }),
-)
 
 /**
  * Send the branch upstream. The second half of the commit button, on its own.
@@ -891,8 +824,20 @@ app.post(
       })
     }
 
+    // Fold the auto-commits into one commit before sending. The moment of the
+    // push is where that choice belongs: the per-turn commits are the local
+    // record, and whether upstream wants the steps or the change is decided by
+    // whoever presses this. Only meaningful with an upstream to measure against
+    // — a branch being published has nothing to squash to, so the flag is
+    // quietly a plain publish there rather than a refusal.
+    const squash = (req.body as { squash?: unknown } | null)?.squash === true
+
     try {
       const { ahead } = await repo.pending(repoOf(project))
+      if (squash && ahead !== null) {
+        const { branch, pushed, squashed } = await squashAndPush(repoOf(project))
+        return { branch, pushed, squashed }
+      }
       const { branch, pushed } = await pushBranch(repoOf(project), ahead !== null)
       return { branch, pushed }
     } catch (err) {
@@ -952,42 +897,15 @@ app.post(
     }
 
 
-    /**
-     * The tree is committed before the next conversation begins.
-     *
-     * Not tidiness. Every conversation measures its diff against a checkpoint
-     * taken when it started, so a chat opened on top of uncommitted work inherits
-     * that work as its baseline — and when the two touch the same file, git cannot
-     * separate them again, so no reading of what THIS chat did can be honest.
-     * Refusing here is what keeps `mixed` empty in the ordinary case.
-     *
-     * The way out is the rail's commit button, which reads this same list and
-     * takes all of it. That is not a detail: this refusal is only fair if the
-     * button that clears it is measured on exactly what is being refused, and for
-     * a long time it was not — it committed a conversation's work, so a tree
-     * dirtied by an editor was refused here and uncommittable there.
-     *
-     * Only for a NEW conversation. Refusing a follow-up would be the opposite of
-     * the rule: finishing the chat you are in is one of the ways out.
-     *
-     * A repo that cannot be read at all lets the message through rather than
-     * blocking it — the exception to fail-closed, because the very next thing this
-     * turn does is take a checkpoint of that same tree, which will fail loudly and
-     * say why. Guessing "dirty" here would answer a broken repository with a
-     * lecture about committing.
-     */
-    if (!body.sessionId) {
-      const outstanding = await repo.pending(repoOf(project)).catch(() => null)
-      if (outstanding && outstanding.files.length > 0) {
-        const n = outstanding.files.length
-        return reply.code(409).send({
-          message:
-            `${n} uncommitted file${n === 1 ? "" : "s"} on ${outstanding.branch ?? "this checkout"}. ` +
-            "Press commit in the rail on the right — it takes everything in that list, whether or " +
-            "not a chat made it — or commit them yourself.",
-        })
-      }
-    }
+    // A dirty tree no longer refuses a new conversation. It used to — a chat's
+    // diff is measured against a checkpoint, and uncommitted work becomes its
+    // baseline — but the way out was the commit button, and the button is gone:
+    // commits are automatic, once per turn, and a tree dirtied by an editor is
+    // swept into the next turn's commit rather than cleared by a press. Keeping
+    // the refusal without its release would be the wedge the brief warns about,
+    // built on purpose. The cost is honest and small: a chat started over a
+    // dirty tree may show the human's own edits as `mixed` in its diff, and the
+    // checkpoint still recovers everything either way.
 
     // Validated rather than cast: these come from a form, and an unknown mode
     // would otherwise reach the SDK as an undefined permission mode.

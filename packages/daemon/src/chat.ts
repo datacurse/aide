@@ -209,6 +209,17 @@ interface TurnRecord extends Omit<ChatTurn, "blocked"> {
    */
   settling: Promise<void> | null
   /**
+   * The headline of the turn's own closing summary, if it wrote one.
+   *
+   * Captured off the `turn.summary` event as it passes through, because the
+   * auto-commit that follows this turn wants the turn's one-line account of
+   * itself as the commit subject — and by the time that commit starts, the
+   * record is gone and re-reading the log to find one line would be a second
+   * reader of a file this class just wrote. Null for a turn that wrote no
+   * summary block, which is the case the helper-model fallback exists for.
+   */
+  headline: string | null
+  /**
    * An agent turn running INSIDE this held run, or null for almost every turn.
    *
    * Set only by `turnUnderHold`. Its presence changes three things about how the
@@ -338,7 +349,18 @@ export class ChatLane implements LiveChats {
    * commit is. A commit that finished would otherwise trigger another one, and
    * that one another, for as long as anything remained uncommitted.
    */
-  onProjectIdle: ((projectId: string, sessionId: string | null) => void) | null = null
+  onProjectIdle:
+    | ((
+        projectId: string,
+        sessionId: string | null,
+        /**
+         * What the finished turn can lend the commit that follows it: its
+         * prompt, and the headline of its own closing summary. The commit's
+         * subject comes from these instead of a model call — see `startCommit`.
+         */
+        turn: { text: string; headline: string | null },
+      ) => void)
+    | null = null
 
   #idleMs: number
   #closeGraceMs: number
@@ -466,6 +488,7 @@ export class ChatLane implements LiveChats {
       pending: new Set(),
       settling: null,
       nested: null,
+      headline: null,
       sourceIdAtStart: null,
     }
     this.#turns.set(runId, record)
@@ -600,6 +623,7 @@ export class ChatLane implements LiveChats {
       pending: new Set(),
       settling: null,
       nested: null,
+      headline: null,
       // A commit stages and writes history; it cannot edit the daemon's source,
       // so there is nothing for the end of it to compare against.
       sourceIdAtStart: null,
@@ -1066,6 +1090,12 @@ export class ChatLane implements LiveChats {
         // it so the browser can switch from "new chat" to a real conversation
         // without waiting for the turn to finish. The worker needs it too, or a
         // follow-up would not find the session it is already holding open.
+        // The turn's own one-line account of itself, kept for the auto-commit
+        // that follows this turn — see `TurnRecord.headline`. The LAST one wins,
+        // matching `parseTurnSummary`'s own rule for a reply with two blocks.
+        if (msg.body.type === "turn.summary" && turn) {
+          turn.headline = msg.body.headline
+        }
         if (msg.body.type === "run.started" && msg.body.sessionId) {
           const named = msg.body.sessionId
           worker.sessionId = named
@@ -1167,7 +1197,10 @@ export class ChatLane implements LiveChats {
       // ending and nothing else, which is what stops a commit triggering another
       // commit. Errors are the hook's own to handle: a turn that succeeded must
       // not be reported as failed because something downstream of it did not.
-      this.onProjectIdle?.(worker.projectId, worker.sessionId)
+      this.onProjectIdle?.(worker.projectId, worker.sessionId, {
+        text: record?.text ?? "",
+        headline: record?.headline ?? null,
+      })
     }
     // The RECORD is what holds the project, so it waits. Nothing else can be let
     // into the checkout until this turn's boundary has been written from it.

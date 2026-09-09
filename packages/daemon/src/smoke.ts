@@ -2469,4 +2469,85 @@ console.log("\nrun logs are read once, except the one being written")
   await rm(dir, { recursive: true, force: true })
 }
 
+console.log("\nsquash and push")
+{
+  // The push button's second spelling: fold the per-turn auto-commits into one
+  // before they leave the machine. Its own repo pair rather than the shared
+  // repo above, because it needs a REMOTE and the shared repo's sections lean
+  // on not having one — and because a squash rewinds HEAD, which would move the
+  // ground under every section after it.
+  const { squashAndPush } = await import("./changes.js")
+  const pen = await mkdtemp(join(tmpdir(), "aide-squash-"))
+  const origin = join(pen, "origin.git")
+  const work = join(pen, "work")
+  await run("git", ["init", "--bare", "-b", "main", origin], { windowsHide: true })
+  await run("git", ["init", "-b", "main", work], { windowsHide: true })
+  await git(work, ["config", "user.email", "smoke@example.com"])
+  await git(work, ["config", "user.name", "smoke"])
+  const save = async (name: string, subject: string) => {
+    await writeFile(join(work, name), `${subject}\n`, "utf8")
+    await git(work, ["add", name])
+    // Two `-m`s rather than one string with newlines: a literal newline inside
+    // a Windows argv is exactly the kind of quoting bet this test must not make.
+    await git(work, ["commit", "-m", subject, "-m", `Aide-Session: sess-${name}`])
+  }
+  await save("base.txt", "the base")
+  await git(work, ["remote", "add", "origin", origin])
+  await git(work, ["push", "-u", "origin", "main"])
+
+  await save("one.txt", "first turn's work")
+  await save("two.txt", "second turn's work")
+  await save("three.txt", "third turn's work")
+  // An uncommitted file rides through the squash untouched: `reset --soft`
+  // never rewrites the working tree, and a squash that swallowed the human's
+  // half-typed edit would be this feature disqualifying itself.
+  await writeFile(join(work, "wip.txt"), "not yet\n", "utf8")
+
+  const out = await squashAndPush(work)
+  check("three commits fold into one push", out.squashed === 3, String(out.squashed))
+  check("and the push reports one commit sent", out.pushed === 1, String(out.pushed))
+  check(
+    "the local branch is in step afterwards",
+    (await git(work, ["rev-list", "--count", "@{upstream}..HEAD"])).trim() === "0",
+  )
+  const remoteLog = await git(origin, ["log", "--pretty=%s", "main"])
+  check(
+    "the remote got the fold, not the steps",
+    remoteLog.trim().split("\n").length === 2,
+    remoteLog.trim().replace(/\n/g, " | "),
+  )
+  const message = await git(work, ["log", "-1", "--pretty=%B"])
+  check("the first subject leads the squash", message.startsWith("first turn's work"))
+  check(
+    "and every step survives in its body",
+    message.includes("- second turn's work") && message.includes("- third turn's work"),
+  )
+  check(
+    "the sessions ride along as trailers",
+    message.includes("Aide-Session: sess-one.txt") &&
+      message.includes("Aide-Session: sess-three.txt"),
+    "squashing must not cut the link from history to the transcripts",
+  )
+  check(
+    "the working tree's own edit is untouched",
+    (await git(work, ["status", "--porcelain", "--", "wip.txt"])).trim().startsWith("??"),
+    "reset --soft moves history, never files",
+  )
+  check(
+    "the files themselves all landed",
+    (await git(origin, ["ls-tree", "--name-only", "main"])).includes("three.txt"),
+  )
+
+  // One commit ahead is nothing to fold — the flag quietly means plain push.
+  await save("four.txt", "fourth turn's work")
+  const plain = await squashAndPush(work)
+  check("one ahead is a plain push", plain.squashed === 0 && plain.pushed === 1)
+  check(
+    "and its commit arrives as itself",
+    (await git(origin, ["log", "-1", "--pretty=%s", "main"])).trim() === "fourth turn's work",
+  )
+
+  await rm(pen, { recursive: true, force: true })
+}
+
 report()

@@ -139,6 +139,16 @@ process.on("message", (raw: unknown) => {
 })
 
 function finish(): void {
+  // The closing summary a real turn writes, minus the model. The lane snapshots
+  // its `headline` for the auto-commit's subject, and a stub that never wrote
+  // one would leave that path passing on "null means draft" alone.
+  if (!interrupted) {
+    send({
+      type: "event",
+      runId,
+      body: { type: "turn.summary", headline: `stub headline for turn ${turnsTaken}` },
+    })
+  }
   send({
     type: "event",
     runId,

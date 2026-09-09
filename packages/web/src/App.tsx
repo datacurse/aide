@@ -55,27 +55,6 @@ export function App() {
    */
   const [conversationsSeq, setConversationsSeq] = useState(0)
   /**
-   * The commit in flight, and the run it is happening in.
-   *
-   * Held here rather than in the rail that starts it or the pane that shows it,
-   * because it is the one thing both need: the rail presses the button, and the
-   * conversation is where the run has to appear. `starting` covers the half
-   * second before the daemon has answered, in which the projects list still
-   * reports the repo as free and the button would otherwise invite a second
-   * press.
-   */
-  const [commitRunId, setCommitRunId] = useState<string | null>(null)
-  const [starting, setStarting] = useState(false)
-  /**
-   * The last commit stopped on a failed check, so the next press may override it.
-   *
-   * Reported up by the conversation pane, which is where the run's events are.
-   * Not remembered anywhere durable: an override has to be answered while you
-   * are still looking at what failed, and one that survived a reload would be a
-   * commit-anyway armed for a reason nobody on screen can see.
-   */
-  const [verifyRefused, setVerifyRefused] = useState(false)
-  /**
    * A parked chat that has had its ▶ pressed and has not gone out yet.
    *
    * One press has to do two things that live in different components — open the
@@ -147,14 +126,7 @@ export function App() {
   // the same way and spent a while without the guard.
   usePoll(refresh, POLL_MS, [refresh])
 
-  // A run id belongs to the conversation it was started from. Carrying it across
-  // a move would replay one chat's commit under another chat's transcript.
-  useEffect(() => {
-    setCommitRunId(null)
-  }, [projectId, sessionId])
-
   const project = projects.find((p) => p.id === projectId) ?? null
-  const uncommitted = pending?.files.length ?? 0
 
   /**
    * A run let go of the checkout, so ask the chat list what it says now.
@@ -184,12 +156,12 @@ export function App() {
   }, [projectId, holderRunId])
 
   /**
-   * Why this project cannot take a chat, a commit or a push right now.
+   * Why this project cannot take a chat, a send or a push right now.
    *
    * The rules themselves are in `projectGates`, in protocol, rather than here —
-   * the wall draws a column per project and needs the same four answers for each
-   * of them, and two implementations of "is this project blocked" is the shape
-   * the brief has been bitten by twice, both times as a gate nobody could clear.
+   * the wall draws a column per project and needs the same answers for each of
+   * them, and two implementations of "is this project blocked" is the shape the
+   * brief has been bitten by twice, both times as a gate nobody could clear.
    * `pnpm smoke` asserts them there, which a component cannot be.
    *
    * Stated BEFORE the press rather than after it, which is what `start` is for:
@@ -198,109 +170,31 @@ export function App() {
    */
   const gates = projectGates({
     holder: project?.holder ?? null,
-    uncommitted,
-    commitRunId,
     held: heldBy,
   })
   const projectHeld = gates.start
 
   /**
-   * Whether the commit we started is the thing currently holding the repo.
+   * Push, on its own, with no run behind it. The one git button left —
+   * committing is automatic, once per turn, in the daemon.
    *
-   * Derived from the lock the daemon already publishes rather than from a flag
-   * set on press: the run outlives the request that started it, so a local
-   * "committing" would clear while the drafting was still going.
-   */
-  const committing = starting || (commitRunId !== null && project?.holder?.runId === commitRunId)
-  /** Why the commit button cannot be pressed, or null. See `projectGates`. */
-  const commitBlocked = gates.commit
-
-  /**
-   * Commit everything uncommitted in this project.
-   *
-   * The open chat is passed for attribution only — the trailer, and the
-   * transcript the run streams into. There need not be one: what gets committed
-   * is the rail's own list either way, which is what makes the rail's list
-   * something you can always clear.
-   *
-   * Returns as soon as the daemon has a run id — the work itself takes a model
-   * call and lands in the transcript. The refresh is not a nicety: until the
-   * projects list reports the commit as holding the repo, `committing` above is
-   * false and the button reads as pressable over a commit already running.
-   */
-  const commitWork = async (push: boolean) => {
-    if (!projectId) return
-    setStarting(true)
-    setError(null)
-    try {
-      // The override is spent on the press that uses it. Clearing it here rather
-      // than waiting for the new run's events means a second failure has to
-      // arm it again — otherwise one refusal would leave every later commit in
-      // this project forced, silently.
-      const force = verifyRefused
-      setVerifyRefused(false)
-      const { runId } = await api.commitProject(projectId, sessionId, force, push)
-      setCommitRunId(runId)
-      await refresh()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setStarting(false)
-    }
-  }
-
-  /**
-   * Push, on its own, with no run behind it.
-   *
-   * Synchronous from the browser's point of view — one git call, no model — so
-   * unlike a commit there is no run id to follow and the refresh at the end is
-   * the whole of the feedback: the rail's `ahead` drops and the button goes.
+   * Synchronous from the browser's point of view — a couple of git calls, no
+   * model — so there is no run id to follow and the refresh at the end is the
+   * whole of the feedback: the rail's `ahead` drops and the button goes.
    */
   const [pushing, setPushing] = useState(false)
-  const pushWork = async () => {
+  const pushWork = async (squash: boolean) => {
     if (!projectId) return
     setPushing(true)
     setError(null)
     try {
-      await api.pushProject(projectId)
+      await api.pushProject(projectId, squash)
       await refresh()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setPushing(false)
     }
-  }
-
-  /**
-   * Whether this project commits its own work as turns finish.
-   *
-   * Fetched per project rather than polled: the daemon is the only writer that
-   * matters and this browser is the only one that changes it, so the optimistic
-   * set below is not a guess — it is what the server is about to confirm.
-   */
-  const [autoCommit, setAutoCommit] = useState(false)
-  useEffect(() => {
-    if (!projectId) return setAutoCommit(false)
-    let live = true
-    void api
-      .autoCommit(projectId)
-      .then((r) => live && setAutoCommit(r.enabled))
-      // A project whose setting cannot be read is one that is not auto-
-      // committing, which is the safe reading of an unknown: it under-promises
-      // rather than implying work is being committed that is not.
-      .catch(() => live && setAutoCommit(false))
-    return () => {
-      live = false
-    }
-  }, [projectId])
-  const toggleAutoCommit = (on: boolean) => {
-    if (!projectId) return
-    setAutoCommit(on)
-    void api.setAutoCommit(projectId, on).catch((err: unknown) => {
-      // Put the switch back, or it claims a setting the daemon does not have.
-      setAutoCommit(!on)
-      setError(err instanceof Error ? err.message : String(err))
-    })
   }
 
   /**
@@ -635,17 +529,14 @@ export function App() {
         projectId={projectId}
         openSessionId={sessionId}
         draftId={draftId}
-        uncommitted={uncommitted}
         // Polled, unlike everything else the pane knows about other chats. The
         // box has to go dark the moment another chat takes the repo, not the
         // next time something asks for the list.
         holder={project?.holder ?? null}
-        adoptRunId={commitRunId}
         // Gated on the open chat being the one that was pressed, so a ▶ that
         // somehow outlived its navigation cannot fire at whatever is open now.
         autoSend={autoSend !== null && autoSend === draftId}
         onAutoSent={() => setAutoSend(null)}
-        onVerifyRefused={setVerifyRefused}
         onChanged={() => setConversationsSeq((n) => n + 1)}
         // A new chat has no id until its first turn starts. Put it in the
         // URL the moment it exists, so a reload mid-first-turn still lands
@@ -656,24 +547,18 @@ export function App() {
       />
 
       {/* Always on screen. Not a view of the repository — reading a change
-          belongs to the conversation that made it — but the answer to "can I
-          start the next thing", which has to be visible before you try, and the
-          button that makes the answer yes. */}
+          belongs to the conversation that made it — but the live reading of
+          what the next auto-commit will take, and the one git button left. */}
       <PendingRail
         projectId={projectId}
         pending={pending}
         error={pendingError}
-        commitBlocked={commitBlocked}
-        committing={committing}
-        verifyRefused={verifyRefused}
-        onCommit={(push) => void commitWork(push)}
-        onPush={() => void pushWork()}
+        onPush={(squash) => void pushWork(squash)}
         pushing={pushing}
-        // The same lock as a commit, and for the same reason: pushing while an
-        // agent writes would send a branch whose tip is about to move.
-        pushBlocked={commitBlocked}
-        autoCommit={autoCommit}
-        onAutoCommit={toggleAutoCommit}
+        // Locked while anything has the checkout: pushing while an agent
+        // writes — or while the auto-commit after its turn is landing — would
+        // send a branch whose tip is about to move.
+        pushBlocked={gates.push}
       />
 
       {remote && (

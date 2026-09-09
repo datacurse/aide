@@ -323,9 +323,14 @@ export type RunEventBody =
   | { type: "commit.drafted"; message: string; model: string }
   /**
    * What landed. `paths` is exactly what was staged, so the log answers "what
-   * did that button take" without a second call to git.
+   * did that commit take" without a second call to git.
+   *
+   * `subject` is the message's first line, here as well as in `commit.drafted`,
+   * because commits are automatic now and this event is the one a reader scans
+   * for — a sha with no words beside it answers "did it land" and not "what
+   * was it". Absent on logs from before it was recorded.
    */
-  | { type: "commit.landed"; sha: string; paths: string[] }
+  | { type: "commit.landed"; sha: string; paths: string[]; subject?: string }
   /**
    * What was sent, and where.
    *

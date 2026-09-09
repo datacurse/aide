@@ -1018,12 +1018,13 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
           [
             "You are working directly in the project's own checkout, not a scratch copy.",
             "Uncommitted changes here may be someone else's work in progress, so leave",
-            "anything you did not come to change exactly as you found it. Your changes",
-            "are reviewed as a diff and committed by a human; do not commit them yourself.",
-            "No human will answer you during this run, so do not end your turn with a",
-            "question or ask for confirmation before making a change the task clearly",
-            "implies. Carry the task to completion. If something genuinely blocks you,",
-            "say what blocked you and what decision is needed, then stop.",
+            "anything you did not come to change exactly as you found it. When your turn",
+            "ends, aide runs the project's checks and commits the working tree itself,",
+            "using your closing summary's headline as the subject — never run git commit",
+            "yourself. No human will answer you during this run, so do not end your turn",
+            "with a question or ask for confirmation before making a change the task",
+            "clearly implies. Carry the task to completion. If something genuinely blocks",
+            "you, say what blocked you and what decision is needed, then stop.",
           ].join(" "),
           // A shell call is the most expensive thing a run does that nobody
           // budgets for.

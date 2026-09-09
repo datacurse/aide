@@ -1,9 +1,9 @@
 /**
- * Why a project cannot take another turn, or another commit, right now.
+ * Why a project cannot take another turn, or a push, right now.
  *
  * ## Why this is here and not in the component that draws it
  *
- * These four answers lived inline in `App.tsx`, computed for the ONE project the
+ * These answers lived inline in `App.tsx`, computed for the ONE project the
  * four panes are scoped to. That was fine while there was one. The wall draws a
  * column per project and needs the same answers for every one of them, and the
  * obvious way to get there — recompute them in the column — puts two
@@ -15,6 +15,16 @@
  * of the worst one was a terminal. So the rules live in one pure function that
  * both views call, and `pnpm smoke` asserts them — which a React component cannot
  * be.
+ *
+ * ## What is no longer here
+ *
+ * There used to be a `commit` gate and a dirty-tree rule on `start` and `send`.
+ * Both went with the commit button: aide commits the working tree itself when a
+ * turn ends and its checks pass, so an uncommitted tree is a moment in the
+ * cycle rather than a state a human has to clear — and blocking a new chat on
+ * it, with no button left to press, would be the wedge this file exists to
+ * prevent, built deliberately. What survives is the LOCK: one agent has the
+ * checkout, and everything here says who.
  *
  * Everything here is a SENTENCE or null, never a boolean. A dead control has to
  * be able to say what is in the way; `Button`'s `locked` prop takes exactly this,
@@ -38,43 +48,21 @@ export interface ProjectGates {
   /**
    * Why a new chat cannot be started here, or null.
    *
-   * Two rules, and the ORDER of them is load-bearing. A held checkout is very
-   * nearly always a dirty one too, and "commit that work first" is an instruction
-   * you cannot follow while a run has the repo — the commit button is locked by
-   * the same holder. Reporting the uncommitted count first sends you to a button
-   * that is itself locked, which is a loop.
-   *
-   * The holder half is also not the uncommitted half arriving early. A run writes
-   * files nobody can anticipate and the rail only learns of them a poll after they
-   * land, so a chat admitted beside a run in flight takes a tree that is being
-   * written under it as its baseline. Waiting for files to appear is waiting for
-   * the wrong event.
+   * One rule: something has the checkout. A run writes files nobody can
+   * anticipate and the rail only learns of them a poll after they land, so a
+   * chat admitted beside a run in flight takes a tree that is being written
+   * under it as its baseline.
    */
   start: string | null
   /**
-   * Why the commit button cannot be pressed, or null.
-   *
-   * One reason, and it is a wait rather than a refusal: something else has the
-   * checkout. Notably NOT "there is nothing to commit" — that is an empty button,
-   * not a locked one, and the difference is the whole point of the padlock.
-   *
-   * There used to be a second reason, "open the conversation that made these
-   * changes", from when a commit was measured against a chat's checkpoint. A
-   * commit takes the working tree, so that was a dead button over work your own
-   * editor had made, in a project the same work was blocking every new chat in.
-   */
-  commit: string | null
-  /**
-   * Why the push button cannot be pressed, or null. The same lock as a commit,
-   * for a different reason: pushing while an agent writes sends a branch whose
-   * tip is about to move.
+   * Why the push button cannot be pressed, or null. The same lock, for a
+   * different reason: pushing while an agent writes — or while the auto-commit
+   * that follows a turn is still landing — sends a branch whose tip is about
+   * to move.
    */
   push: string | null
   /**
    * Why the message box cannot send, or null.
-   *
-   * Both halves are held back from different chats, which is what makes this
-   * different from `start` rather than a copy of it.
    *
    * A run somewhere ELSE stops every box, this one included: the daemon takes one
    * turn per project and refuses the rest, so a follow-up to the chat you are
@@ -83,34 +71,18 @@ export interface ProjectGates {
    * — so the holder is compared by RUN ID, and deliberately not by session as
    * well. A commit is attributed to a conversation without being that
    * conversation's turn, so "the holder's session is the open one" is true of a
-   * commit you walked away from and came back to, and that box has to stay shut.
+   * commit still landing after its turn, and that box has to stay shut.
    *
    * The cost is a padlock for the length of one fetch when you open a chat whose
    * turn is already running — until the transcript comes back with its
    * `activeRunId` and the box becomes the interrupt. It is not a lie while it is
    * up: nothing could be sent in that moment either.
-   *
-   * Uncommitted work stops only a chat that has NOT started, because the way out
-   * of it is to finish the chat that caused it. A chat whose own turn is in
-   * flight is exempt for the same reason, and it has to be named separately: for
-   * its first few seconds a new chat has no session id yet while its own edits
-   * are already piling up in the tree.
    */
   send: string | null
 }
 
 /**
- * The four gates for one project.
- *
- * `uncommitted` is a count rather than the list, because that is all any rule
- * reads and a count is what both callers already have to hand.
- *
- * Two run ids, and they are not the same question. `commitRunId` is the commit
- * THIS view started, which must not report itself as the thing in its own way —
- * a commit holds the checkout, so a button that locked on any holder would lock
- * the instant it was pressed. `openRunId` is the turn on screen, which is the one
- * you can interrupt rather than the one you must wait for, so the composer's
- * padlock lifts for it alone.
+ * The gates for one project.
  *
  * `held` is the wording, injected rather than written here, so the sentence a
  * lock speaks has one home in the web package (`heldBy` in `ui.tsx`) and this
@@ -118,45 +90,22 @@ export interface ProjectGates {
  */
 export function projectGates(opts: {
   holder: GateHolder | null
-  uncommitted: number
-  /** The commit this view started, exempt from its own commit/push locks. */
-  commitRunId?: string | null
   /** The run being watched, exempt from the composer's lock. */
   openRunId?: string | null
-  /** The open chat has a session, so the tree does not block its box. */
-  started?: boolean
-  /** The open chat's own turn is in flight — exempt for the same reason. */
-  busy?: boolean
   held: (title: string) => string
 }): ProjectGates {
-  const { holder, uncommitted, held } = opts
+  const { holder, held } = opts
 
   const heldBySomethingElse = (mine: string | null) =>
     holder && holder.runId !== mine ? held(holder.title) : null
 
-  // Any holder at all. What blocks a NEW chat is the lock existing, including a
-  // commit this very view started: the daemon refuses a fresh turn under any
-  // holder, so exempting our own would offer a button the daemon then turns away.
-  const anyHolder = holder ? held(holder.title) : null
-
-  const dirty = (remedy: string) =>
-    uncommitted > 0
-      ? `${uncommitted} uncommitted file${uncommitted === 1 ? "" : "s"}${remedy}`
-      : null
-
-  // Holder FIRST, always. A held checkout is very nearly always a dirty one too,
-  // and the remedy for dirt is a commit button that this same holder has locked.
+  // Any holder at all blocks a NEW chat, including an auto-commit still
+  // landing: the daemon refuses a fresh turn under any holder, so exempting one
+  // would offer a button the daemon then turns away.
   return {
-    start: anyHolder ?? dirty(" — commit that work before starting another chat."),
-    commit: heldBySomethingElse(opts.commitRunId ?? null),
-    push: heldBySomethingElse(opts.commitRunId ?? null),
-    send:
-      heldBySomethingElse(opts.openRunId ?? null) ??
-      (opts.started === true || opts.busy === true
-        ? null
-        : dirty(
-            " in this project. Press commit in the rail on the right — it takes all of them, whether or not a chat made them.",
-          )),
+    start: holder ? held(holder.title) : null,
+    push: holder ? held(holder.title) : null,
+    send: heldBySomethingElse(opts.openRunId ?? null),
   }
 }
 

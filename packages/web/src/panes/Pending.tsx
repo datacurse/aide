@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react"
 import type {
   GitCommit,
   GitFileChange,
@@ -91,139 +90,90 @@ function Note({ children }: { children: React.ReactNode }) {
  * The uncommitted-work indicator, and the history under it.
  *
  * On screen at all times, beside every pane, because the top half is the one
- * fact that decides what you are allowed to do next: a new conversation is
- * refused while that list has anything in it. A status you have to go to a tab
- * to read cannot carry that job — you would meet the refusal before you met the
- * reason.
+ * live reading of the working tree there is — what the next auto-commit will
+ * take, and what the checkpoint would put back.
  *
- * The commit button is here, next to the list of what it would take, and it
- * takes exactly this list. That sentence used to be false: it committed a
- * CONVERSATION's work, measured against that chat's checkpoint, so it could not
- * be pressed without one open. Nothing makes the files in this rail a chat's —
- * an editor, a formatter and an install all write to the same tree — and for
- * those the rail was a permanent block with a dead button beside it and a
- * terminal as the only way out.
+ * There is NO commit button any more, and that is the design rather than a
+ * regression: aide commits the working tree itself when a turn ends and the
+ * project's checks pass, so what this rail shows is a moment in the cycle
+ * rather than a state you have to clear. A tree that STAYS dirty means either
+ * no turn has ended since the files changed, or the last commit's checks failed
+ * twice — and the transcript beside this rail is where that story is written.
  *
- * A chat still matters to a commit, just not to what it takes: with one open the
- * run streams into its transcript and the commit carries its id. With none, the
- * run streams into whatever the middle pane is showing and the commit is
- * attributed to nobody, which is the truth about it.
- *
- * Nothing is filtered out of the list. Every file here is one a commit can take,
- * which has to stay true: the block on starting a new conversation reads this
- * same list, so a file that could sit here uncommittable would be a block with
- * no way out of it.
+ * What remains a control is push, because sending work off the machine is the
+ * one irreversible step. Two spellings of it: as-is, and squashed — the
+ * per-turn auto-commits folded into one before they leave.
  */
 export function PendingRail({
   projectId,
   pending,
   error,
-  commitBlocked,
-  committing,
-  verifyRefused,
-  onCommit,
   onPush,
   pushing,
   pushBlocked,
-  autoCommit,
-  onAutoCommit,
 }: {
   projectId: string | null
   pending: GitPending | null
   /** A failed poll, reported above the last good answer rather than replacing it. */
   error: string | null
   /**
-   * Why this work cannot be committed from here, or null when it can.
+   * Send the branch upstream — as it stands, or squashed into one commit.
    *
-   * A sentence rather than a boolean, and it goes on the disabled button's
-   * title: "commit is greyed out" with no reason is the shape of a bug. The only
-   * reason left is another run holding the checkout, which is a wait rather than
-   * something to go and do.
+   * The choice is made at the moment of the press, which is where it belongs:
+   * the per-turn commits are the local record, and whether upstream wants the
+   * steps or the change depends on what is being sent.
    */
-  commitBlocked: string | null
-  committing: boolean
-  /**
-   * The last commit stopped because one of the project's checks failed, and the
-   * one automatic attempt at fixing it did not clear it either.
-   *
-   * Turns the button into a second, deliberate press rather than adding a
-   * checkbox beside it: the failure is written out in the conversation next to
-   * this rail, so the only honest place to offer "anyway" is after you have been
-   * shown what is wrong.
-   */
-  verifyRefused: boolean
-  onCommit: (push: boolean) => void
-  /**
-   * Send the branch upstream, on its own.
-   *
-   * Separate from `onCommit` because pushing and committing are separate acts —
-   * the gate is the commit, and a push only ever moves what that gate already
-   * let through. The common case for this button is a commit that has already
-   * happened: the box was not ticked, or the push failed, or the work was
-   * committed before there was a remote to send it to.
-   */
-  onPush: () => void
+  onPush: (squash: boolean) => void
   pushing: boolean
-  /** Why a push cannot happen from here, or null. Same contract as `commitBlocked`. */
-  pushBlocked: string | null
   /**
-   * This project commits each turn's work as it finishes.
-   *
-   * A SETTING, unlike the "and push" checkbox below — it persists per project
-   * and acts on turns nobody is watching, which is why it is drawn in the header
-   * rather than beside the button it automates.
+   * Why a push cannot happen from here, or null. A sentence rather than a
+   * boolean, and it goes on the disabled button's title: "push is greyed out"
+   * with no reason is the shape of a bug.
    */
-  autoCommit: boolean
-  onAutoCommit: (on: boolean) => void
+  pushBlocked: string | null
 }) {
   const files = pending?.files ?? []
-  /**
-   * Ticked once and remembered, because "and push" is nearly always the same
-   * answer for a given project — but it is still read at the moment of the press
-   * rather than stored anywhere, so it is a habit rather than a setting. Nothing
-   * about it survives a reload, which is the point: a checkbox that silently
-   * pushes months later is a setting wearing a checkbox's clothes.
-   */
-  const [pushAfterCommit, setPushAfterCommit] = useState(false)
   // Null means no upstream at all, which is not the same as being in step: the
   // first push of a new branch has nothing to count and everything to send.
   const ahead = pending?.ahead ?? null
   const canPush = ahead === null || ahead > 0
+  // Hidden rather than disabled when there is nothing to send — a greyed-out
+  // button on a branch that is in step is a question nobody asked. Squash only
+  // when there are at least two commits to fold.
+  const pushControls = canPush && (
+    <div className="mt-2 flex items-center gap-2">
+      <Button
+        tone="primary"
+        onClick={() => onPush(false)}
+        locked={pushBlocked}
+        disabled={pushing}
+        title={
+          ahead === null
+            ? `Publish ${pending?.branch ?? "this branch"} — it has no upstream yet, so this sets one.`
+            : `Send ${ahead} commit${ahead === 1 ? "" : "s"} upstream, as they are.`
+        }
+      >
+        {pushing ? "pushing…" : ahead === null ? "publish branch" : `push ${ahead}`}
+      </Button>
+      {ahead !== null && ahead > 1 && (
+        <Button
+          onClick={() => onPush(true)}
+          locked={pushBlocked}
+          disabled={pushing}
+          title={`Fold these ${ahead} per-turn commits into one — every subject survives in its body — and push that. Nothing is forced; only unpushed commits are folded.`}
+        >
+          squash & push
+        </Button>
+      )}
+    </div>
+  )
   return (
     <aside className="flex w-64 shrink-0 flex-col border-l border-line bg-chrome">
       {/* No count in the header. The sentence two rows down says "9 files
           uncommitted on main" — a badge saying 9 beside it is the same number
           twice, close enough together to read as two different facts you have
-          to reconcile. The sentence wins because it is the copy that also names
-          the branch and what to do about it; the badge could only ever be the
-          number. */}
-      {/* The auto-commit switch lives in the HEADER, not beside the button, and
-          the difference from "and push" is the whole reason. That checkbox is
-          read at the moment of a press and stored nowhere — a habit. This is a
-          setting: it persists, it acts when nobody is looking, and it changes
-          what happens after turns you have not sent yet. Something that survives
-          a reload has to be visible without one, so it sits with the pane's
-          identity rather than under the verb it modifies. */}
-      <PaneHeader title="uncommitted">
-        {projectId && (
-          <label
-            className="flex cursor-pointer select-none items-center gap-1 text-[10px] text-fg-dim hover:text-fg-muted"
-            title={
-              autoCommit
-                ? "Turns commit their own work when they finish. The checks still run, and a failure still stops and asks — this skips the press, not the gate. It never pushes."
-                : "Commit each turn's work as it finishes, without being asked. The gate is unchanged: checks run, a failure stops and asks, and nothing is pushed."
-            }
-          >
-            <input
-              type="checkbox"
-              className="accent-accent"
-              checked={autoCommit}
-              onChange={(e) => onAutoCommit(e.target.checked)}
-            />
-            auto
-          </label>
-        )}
-      </PaneHeader>
+          to reconcile. */}
+      <PaneHeader title="uncommitted" />
 
       {error && (
         <div className="shrink-0 border-b border-line px-3 py-1 font-sans text-[11px] text-err">
@@ -239,87 +189,22 @@ export function PendingRail({
             <Note>Reading the working tree…</Note>
           ) : files.length === 0 ? (
             <div className="shrink-0 border-b border-line px-3 py-2 font-sans text-[11px] leading-relaxed text-fg-dim">
-              Nothing uncommitted on {pending.branch ?? "this checkout"}. A new chat can start.
-              {/* The push button lives HERE, on the clean tree, because that is
-                  when it is the only thing left to do: the work is committed, a
-                  human already approved it, and it has not left the machine.
-                  Hidden rather than disabled when there is nothing to send —
-                  a greyed-out button on a branch that is in step is a question
-                  nobody asked. */}
-              {canPush && (
-                <div className="mt-2">
-                  <Button
-                    tone="primary"
-                    onClick={onPush}
-                    locked={pushBlocked}
-                    disabled={pushing}
-                    title={
-                      ahead === null
-                        ? `Publish ${pending.branch ?? "this branch"} — it has no upstream yet, so this sets one.`
-                        : `Send ${ahead} commit${ahead === 1 ? "" : "s"} upstream.`
-                    }
-                  >
-                    {pushing
-                      ? "pushing…"
-                      : ahead === null
-                        ? "publish branch"
-                        : `push ${ahead}`}
-                  </Button>
-                </div>
-              )}
+              Nothing uncommitted on {pending.branch ?? "this checkout"}.
+              {pushControls}
             </div>
           ) : (
             <>
               <div className="shrink-0 border-b border-line px-3 py-2 font-sans text-[11px] leading-relaxed text-fg-dim">
-                {/* Said here rather than only at the refusal. Meeting the rule for
-                    the first time as an error, after typing a message, is how a
-                    deliberate constraint reads as a bug. */}
+                {/* What WILL happen, not what to do: there is nothing to press.
+                    A reader meeting this list for the first time should learn
+                    that it clears itself. */}
                 <span className="text-warn">
                   {files.length} file{files.length === 1 ? "" : "s"}
                 </span>{" "}
-                uncommitted on {pending.branch ?? "a detached checkout"}. Commit this work before
-                starting another chat.
-                {verifyRefused && (
-                  <div className="mt-2 text-warn">
-                    A check failed, so nothing was committed. What ran — and whatever aide tried
-                    about it — is beside this rail. Read that, then press again to commit anyway.
-                  </div>
-                )}
-                <div className="mt-2 flex items-center gap-2">
-                  <Button
-                    tone={verifyRefused ? "danger" : "primary"}
-                    onClick={() => onCommit(pushAfterCommit)}
-                    // Locked by the run that has the checkout; disabled by our
-                    // own commit already being in flight. Only the first has
-                    // something else holding it, and only the first is worth a
-                    // padlock — the second says "committing…" on its own face.
-                    locked={commitBlocked}
-                    disabled={committing}
-                    title={
-                      verifyRefused
-                        ? "Commit this work even though a check failed. The failure stays in the log."
-                        : `Draft a message from these ${files.length} file${files.length === 1 ? "" : "s"} and commit all of them. Both happen in the pane beside this one, where you can watch them.`
-                    }
-                  >
-                    {committing ? "committing…" : verifyRefused ? "commit anyway" : "commit"}
-                  </Button>
-                  {/* Beside the button rather than under it, because it changes
-                      what that press DOES. A checkbox on its own line reads as a
-                      third thing on the rail; here it reads as an adverb on the
-                      verb next to it. */}
-                  <label
-                    className="flex cursor-pointer select-none items-center gap-1 text-[11px] text-fg-dim"
-                    title="After the commit lands, send the branch upstream. The commit happens either way — if the push fails, the log says so and the work is still committed."
-                  >
-                    <input
-                      type="checkbox"
-                      className="accent-accent"
-                      checked={pushAfterCommit}
-                      onChange={(e) => setPushAfterCommit(e.target.checked)}
-                    />
-                    and push
-                  </label>
-                </div>
+                uncommitted on {pending.branch ?? "a detached checkout"}. aide commits these when
+                the next turn ends and the checks pass; a tree that stays dirty has its story in
+                the transcript.
+                {pushControls}
               </div>
               {/* Sized to its contents and capped, rather than given the top half
                   outright: a run that touched sixty files must not push the
