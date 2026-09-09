@@ -60,7 +60,18 @@ import { planUsage } from "./usage.js"
 const log = new EventLog()
 const chat = new ChatLane(log)
 
-const app = Fastify({ logger: { level: process.env["AIDE_LOG_LEVEL"] ?? "warn" } })
+// `bodyLimit` because a chat turn carries pasted screenshots as base64 in its
+// JSON body. Fastify's default is 1MiB, which the web side's own rules exceed
+// by design — `MAX_ATTACHMENT_BYTES` allows 10MB per image and base64 adds a
+// third — so a send with a few screenshots died here as a 413 before any aide
+// code saw it. From the list that read as ▶ flickering and nothing running:
+// the refusal put the draft back, and the reason was drawn in a pane the eye
+// had already left. Sized to four max-size images plus text; loopback-only
+// behind the origin guard, so the cap is sanity, not exposure.
+const app = Fastify({
+  logger: { level: process.env["AIDE_LOG_LEVEL"] ?? "warn" },
+  bodyLimit: 64 * 1024 * 1024,
+})
 await app.register(fastifyWebsocket)
 
 // ---------------------------------------------------------------------------
