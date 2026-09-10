@@ -98,7 +98,7 @@ Decisions already taken, which are not gaps to fill:
   static import is hoisted and its output would print above `repo: <path>` — the
   run would still be correct and would read as though the sections had been
   shuffled. When changing any of this, the check that matters is that the
-  assertion count does not fall: `pnpm smoke` prints 777 `ok` lines as of
+  assertion count does not fall: `pnpm smoke` prints 790 `ok` lines as of
   2026-09-10, and a refactor that quietly drops some is the failure this number
   exists to catch.
   It fell once on purpose — the card view was removed and took ~30 of its own
@@ -811,7 +811,14 @@ Decisions already taken, which are not gaps to fill:
   the editor's own syntax colours (filled diff backgrounds were tried and
   fought the tokens), a Bash as its command over its output, a Grep as the
   pattern beside its filter chips, anything unrecognised as JSON — instead of
-  unfolding the whole flat list to find one row. The card and a flat row's
+  unfolding the whole flat list to find one row. An Edit is ONE unified diff
+  rather than two blocks side by side — `linediff.ts` in protocol is plain
+  LCS over lines, shared lines drawn once as context, long unchanged runs
+  collapsed to a rule with a count, and `pnpm smoke` pins the property that
+  catches a diff silently losing a line: dropping the insertions must
+  reconstruct the old text and dropping the deletions the new one. Side by
+  side was the version before it and left the reader finding the change by
+  eye. The card and a flat row's
   own expansion render through ONE component (`CallBlocks`), so the two
   readings cannot diverge — opening a row behind `show N steps` gets the same
   structured blocks, and the JSON dump it used to show is gone with its

@@ -1,4 +1,5 @@
 import type { ReactNode } from "react"
+import { collapseUnchanged, diffLines } from "@aide/protocol"
 import { highlightCode, langOfPath } from "./highlight.js"
 import { X } from "./icons.js"
 import { useRemembered } from "./useRemembered.js"
@@ -155,8 +156,80 @@ function ShellOutput({ text, clamp }: { text: string; clamp: string }) {
     </pre>
   )
 }
+
 const num = (o: Record<string, unknown>, key: string): number | null =>
   typeof o[key] === "number" ? (o[key] as number) : null
+
+/**
+ * An Edit as a unified diff: shared lines once as context, and only what
+ * moved marked — the reading every diff tool gives, and the reason a
+ * fifty-line edit whose change is three lines no longer costs a card full of
+ * text shown twice.
+ *
+ * The MARKER carries the direction (`+`, `-`, in the diff colours) and the
+ * row takes a faint tint of it; the code itself keeps its syntax colours, so
+ * the two systems layer instead of fighting — the same trade the filled
+ * backgrounds lost. Long unchanged stretches collapse to a rule with a
+ * count, drawn like the shell elision so a cut looks like a cut.
+ *
+ * `diffLines` and `collapseUnchanged` are in protocol, where `pnpm smoke`
+ * pins them: a line attributed to the wrong side reads as a change that
+ * never happened, and nothing about that is visible to the compiler.
+ */
+function DiffBlock({
+  old,
+  next,
+  lang,
+  clamp,
+}: {
+  old: string
+  next: string
+  lang: string | null
+  clamp: string
+}) {
+  const rows = collapseUnchanged(diffLines(old, next))
+  return (
+    <pre className={`${CODE} ${clamp}`}>
+      {rows.map((row, i) =>
+        row.tag === "gap" ? (
+          <span
+            key={i}
+            className="flex items-center gap-2 py-0.5 text-[10px] text-fg-dim select-none"
+          >
+            <span className="h-px flex-1 bg-line" />
+            {row.hidden} unchanged
+            <span className="h-px flex-1 bg-line" />
+          </span>
+        ) : (
+          <span
+            key={i}
+            className={`block ${
+              row.tag === "add"
+                ? "bg-diff-add-fg/10"
+                : row.tag === "del"
+                  ? "bg-diff-del-fg/10"
+                  : ""
+            }`}
+          >
+            <span
+              className={`select-none ${
+                row.tag === "add"
+                  ? "text-diff-add-fg"
+                  : row.tag === "del"
+                    ? "text-diff-del-fg"
+                    : "text-fg-dim"
+              }`}
+            >
+              {row.tag === "add" ? "+ " : row.tag === "del" ? "- " : "  "}
+            </span>
+            {highlightCode(row.text, lang)}
+            {"\n"}
+          </span>
+        ),
+      )}
+    </pre>
+  )
+}
 
 /** The search knobs worth surfacing — the half of a Grep a JSON dump buries. */
 const SEARCH_FLAGS = ["path", "glob", "type", "output_mode", "-n", "-i", "-A", "-B", "-C"] as const
@@ -177,24 +250,11 @@ function Body({ call, clamp }: { call: CallDetailData; clamp: string }) {
         {o["replace_all"] === true && (
           <p className="font-sans text-[10px] text-fg-dim">replaces every occurrence</p>
         )}
-        {/* Side by side — before and after are one comparison, and stacked
-            they could never be on screen at once. The BORDER carries what
-            left and what arrived; the text keeps the editor's own syntax
-            colours. Filled red and green backgrounds were tried first and
-            fought the tokens — the direction of the change was loud and the
-            change itself was the hard thing to read. */}
-        <div className="grid grid-cols-2 gap-1.5">
-          <Labeled label="old" tone="text-diff-del-fg">
-            <pre className={`${CODE} ${clamp} border-l-2 border-diff-del-fg/70`}>
-              {highlightCode(dedent(oldS, cut), lang)}
-            </pre>
-          </Labeled>
-          <Labeled label="new" tone="text-diff-add-fg">
-            <pre className={`${CODE} border-l-2 border-diff-add-fg/70 ${clamp}`}>
-              {highlightCode(dedent(newS, cut), lang)}
-            </pre>
-          </Labeled>
-        </div>
+        {/* ONE diff, not two blocks. Side by side was the version before
+            this and left the reader finding the change by eye: for a
+            fifty-line edit whose change is three lines, most of the card was
+            unchanged text shown twice, and the two columns scrolled apart. */}
+        <DiffBlock old={dedent(oldS, cut)} next={dedent(newS, cut)} lang={lang} clamp={clamp} />
       </>
     )
   }

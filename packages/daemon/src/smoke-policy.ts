@@ -28,6 +28,8 @@ import {
   chatModeFromSdk,
   chatModelLabel,
   classifyFailure,
+  collapseUnchanged,
+  diffLines,
   currentActivity,
   isChatModel,
   isImageAttachment,
@@ -1871,6 +1873,82 @@ console.log("\nfile attachments")
   check(
     "an untyped file routes to the agent's disk",
     !isImageAttachment({ mediaType: "application/octet-stream" }),
+  )
+}
+
+console.log("\nan edit, as a diff")
+{
+  // What the Edit card draws instead of two blocks side by side. Every way
+  // this fails is quiet on screen: a line attributed to the wrong side reads
+  // as a change that never happened, and none of it is visible to `tsc`.
+  const tags = (a: string, b: string) =>
+    diffLines(a, b)
+      .map((l) => (l.tag === "keep" ? "=" : l.tag === "add" ? "+" : "-"))
+      .join("")
+
+  check("identical text is all context", tags("a\nb\nc", "a\nb\nc") === "===")
+  check(
+    "a changed line is a deletion then an insertion",
+    tags("a\nb\nc", "a\nB\nc") === "=-+=",
+    "old above new — a tie in the walk has to go to the deletion or a change reads backwards",
+  )
+  check("an inserted line is only an insertion", tags("a\nc", "a\nb\nc") === "=+=")
+  check("a deleted line is only a deletion", tags("a\nb\nc", "a\nc") === "=-=")
+  check(
+    "context between two changes is kept once",
+    tags("x\nsame\ny", "X\nsame\nY") === "-+=-+",
+    "the shared line must not be printed on both sides",
+  )
+  check("everything new is all insertion", tags("", "a\nb") === "-++")
+  check(
+    "a moved line is not invented as unchanged",
+    tags("a\nb", "b\na") === "-=+" || tags("a\nb", "b\na") === "+=-",
+    "LCS keeps one of the two and moves the other; either is honest",
+  )
+  // The reconstruction property: dropping insertions gives back the old text
+  // and dropping deletions gives back the new one. This is the assertion that
+  // catches a diff that silently loses or duplicates a line.
+  const A = "one\ntwo\nthree\nfour"
+  const B = "one\ntwo point five\nthree\nfour\nfive"
+  const d = diffLines(A, B)
+  check(
+    "dropping the insertions reconstructs the old text",
+    d.filter((l) => l.tag !== "add").map((l) => l.text).join("\n") === A,
+  )
+  check(
+    "dropping the deletions reconstructs the new text",
+    d.filter((l) => l.tag !== "del").map((l) => l.text).join("\n") === B,
+  )
+
+  // The fold over long unchanged runs — the same idea as the shell elision,
+  // and the count has to be the number actually hidden or the rule lies.
+  const long: ReturnType<typeof diffLines> = [
+    { tag: "del", text: "x" },
+    ...Array.from({ length: 20 }, (_, i) => ({ tag: "keep" as const, text: `k${i}` })),
+    { tag: "add", text: "y" },
+  ]
+  const folded = collapseUnchanged(long)
+  const gap = folded.find((r) => r.tag === "gap")
+  check("a long unchanged run collapses", gap !== undefined)
+  check(
+    "and the count is what it actually hid",
+    gap?.tag === "gap" && gap.hidden === 14,
+    "20 kept, 3 of context at each end",
+  )
+  check(
+    "the rows still add up to every line",
+    folded.reduce((n, r) => n + (r.tag === "gap" ? r.hidden : 1), 0) === long.length,
+    "a fold that drops a line shows less than happened, which is the one thing it must not do",
+  )
+  check(
+    "a short unchanged run is left alone",
+    !collapseUnchanged([
+      { tag: "del", text: "x" },
+      { tag: "keep", text: "a" },
+      { tag: "keep", text: "b" },
+      { tag: "add", text: "y" },
+    ]).some((r) => r.tag === "gap"),
+    "a fold the same height as what it replaces trades readable lines for a rule",
   )
 }
 
