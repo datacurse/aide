@@ -41,9 +41,9 @@ function Dot({
       : call.status === "err"
         ? "bg-err"
         : looked
-          ? // Opaque background, not transparent: the row's hairline runs
-            // behind the dots, and a see-through ring draws it straight
-            // through its own middle.
+          ? // Opaque background, not transparent: the row's connecting line
+            // runs behind the dots, and a see-through ring would draw it
+            // straight through its own middle.
             "border-[1.5px] border-ok bg-editor"
           : "bg-ok"
   const state =
@@ -343,11 +343,26 @@ export function ToolTimeline({
                           hover === m ? "bg-hover" : ""
                         }`}
                       >
+                        {/* The connector, in the dots' own green rather than a
+                            grey hairline — same colour means the junction with
+                            a solid dot simply disappears, which is most of
+                            what reads as "the line flows into the node". */}
                         {on && (
                           <span
-                            className={`absolute top-1/2 h-px bg-line ${m === lo ? "left-1/2" : "left-0"} ${
+                            className={`absolute top-1/2 h-[2px] -translate-y-1/2 bg-ok ${m === lo ? "left-1/2" : "left-0"} ${
                               m === hi ? "right-1/2" : "right-0"
                             }`}
+                          />
+                        )}
+                        {/* A soft neck under each dot: a 4px pill a little
+                            wider than the dots, so the 2px line swells as it
+                            arrives and the circle grows out of the bulge
+                            instead of sitting on a wire. The cheap half of a
+                            metaball, for none of the filter tricks. */}
+                        {on && cs.length > 0 && (
+                          <span
+                            className="absolute top-1/2 left-1/2 h-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-ok"
+                            style={{ width: (cells.widths.get(m) ?? 24) - 10 }}
                           />
                         )}
                         {cs.length > 0 && (
