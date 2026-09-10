@@ -135,14 +135,32 @@ export interface WordSpan {
 const tokenize = (s: string): string[] => s.match(/[A-Za-z0-9_$]+|\s+|[^A-Za-z0-9_$\s]/g) ?? []
 
 /**
- * How different two lines may be before word-level marking is dropped.
+ * How much of a line must survive for word-level marking to be worth it.
  *
- * Below this much shared material the lines are not a rewrite of each other,
- * they are two different lines — and marking 90% of both as "changed" is a
- * mosaic that says less than the plain +/- pair. `pairWords` returns null
- * there and the caller draws the lines whole.
+ * Measured against the SHORTER line, and this is the whole of the rule.
+ * Against the longer one, a short line whose words all appear somewhere in a
+ * long one scores highly — so two unrelated sentences that happen to share a
+ * clause paired up, and the card drew a mostly-dimmed line whose bright
+ * fragments were scattered noise. Against the shorter line the question
+ * becomes the right one: is one of these lines mostly a rewrite of the
+ * other? A reflowed paragraph, where every line shares most of its words
+ * with a DIFFERENT line, is exactly the case this rejects.
+ *
+ * 0.6 rather than 0.3 for the same reason: at a third shared, the marking is
+ * already a mosaic that says less than the plain +/- pair.
  */
-const MIN_SHARED = 0.3
+const MIN_SHARED = 0.6
+
+/**
+ * How lopsided two lines may be and still be a rewrite of each other.
+ *
+ * A line whose text is wholly contained in a much longer one shares 100% of
+ * itself and is still not the same line — the reflowed-paragraph case, where
+ * every line shares most of its words with a DIFFERENT line and the card drew
+ * mostly-dimmed noise. Half the length is the cutoff: an edit that doubles a
+ * line's length has changed more than it kept.
+ */
+const MIN_LENGTH_RATIO = 0.5
 
 /** Longest common subsequence over tokens, as spans. Null when too dissimilar. */
 export function pairWords(oldLine: string, newLine: string): {
@@ -180,8 +198,17 @@ export function pairWords(oldLine: string, newLine: string): {
     } else if ((lcs[i + 1]![j] ?? 0) >= (lcs[i]![j + 1] ?? 0)) i++
     else j++
   }
-  const longest = Math.max(oldLine.length, newLine.length)
-  if (longest === 0 || sharedChars / longest < MIN_SHARED) return null
+  const shorter = Math.min(oldLine.trim().length, newLine.trim().length)
+  const longer = Math.max(oldLine.trim().length, newLine.trim().length)
+  if (shorter === 0) return null
+  // Two guards, because one ratio cannot say both things. `shorter` asks
+  // whether the surviving material is most of the smaller line — the mosaic
+  // test. `longer` asks whether these are even comparable lengths: a short
+  // line WHOLLY CONTAINED in a long one scores 1.0 on the first test and is
+  // still not a rewrite of it, which is how two unrelated sentences sharing
+  // a clause paired up and drew a mostly-dimmed line of scattered fragments.
+  if (sharedChars / shorter < MIN_SHARED) return null
+  if (shorter / longer < MIN_LENGTH_RATIO) return null
 
   const left: WordSpan[] = []
   const right: WordSpan[] = []

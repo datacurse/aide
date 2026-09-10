@@ -2003,6 +2003,23 @@ console.log("\nan edit, as a diff")
     pairWords("import { X } from './x.js'", "return notEvenClose(1, 2, 3)") === null,
     "marking 90% of both lines as changed says less than the plain +/- pair",
   )
+  // The share is measured against the SHORTER line. Against the longer one, a
+  // short line whose words all appear somewhere in a long one scores highly —
+  // which paired two unrelated sentences sharing one clause and drew a
+  // mostly-dimmed line whose bright fragments were noise. Seen on screen.
+  check(
+    "a short line contained in a much longer one does not pair",
+    pairWords(
+      "reconstruct the old text and dropping the deletions the new one.",
+      "reconstruct the old text and dropping the deletions the new one. Inside a changed line the words that actually MOVED are found the same way and the ones that survived are dimmed rather than tinted.",
+    ) === null,
+    "a reflowed paragraph is every line sharing most of its words with a DIFFERENT line",
+  )
+  check(
+    "but a genuine rewrite of one line still pairs",
+    pairWords("const clamp = expand ? '' : 'max-h-48'", "const clamp = expand ? '' : 'max-h-64'") !==
+      null,
+  )
   check(
     "an empty line pairs with nothing",
     pairWords("", "something") === null,

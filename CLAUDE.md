@@ -98,7 +98,7 @@ Decisions already taken, which are not gaps to fill:
   static import is hoisted and its output would print above `repo: <path>` — the
   run would still be correct and would read as though the sections had been
   shuffled. When changing any of this, the check that matters is that the
-  assertion count does not fall: `pnpm smoke` prints 798 `ok` lines as of
+  assertion count does not fall: `pnpm smoke` prints 800 `ok` lines as of
   2026-09-10, and a refactor that quietly drops some is the failure this number
   exists to catch.
   It fell once on purpose — the card view was removed and took ~30 of its own
@@ -821,9 +821,16 @@ Decisions already taken, which are not gaps to fill:
   (`pairWords`, LCS over tokens) and the ones that survived are DIMMED rather
   than the changed span tinted — the code already carries syntax colour, so a
   third colour over the same glyphs is two systems fighting; fading what
-  survived leaves the highlight to be the absence of dimming. Two lines
-  sharing under 30% of their characters are not word-diffed at all, because
-  marking 90% of both says less than the plain +/- pair. `split` in
+  survived leaves the highlight to be the absence of dimming. Whether two
+  lines pair at all takes TWO guards and not one ratio: 60% of the SHORTER
+  line has to survive (the mosaic test), and the shorter must be at least
+  half the longer — a line wholly contained in a much longer one shares 100%
+  of itself and is still not a rewrite of it, which is how two unrelated
+  sentences sharing a clause drew a mostly-dimmed line of scattered
+  fragments. The dimming is also applied as character RANGES over a line
+  tokenised whole, never per span: highlighting each span separately re-lexes
+  a string or comment split across a span boundary, so half of it silently
+  loses its colour. `split` in
   `settings` draws the same diff as two aligned columns — `splitRows` zips a
   run of deletions against the insertions that follow it, so three-out
   against one-in is three rows with two empty rights — and it is the toggle

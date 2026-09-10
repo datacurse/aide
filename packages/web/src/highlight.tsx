@@ -157,6 +157,78 @@ export function highlightCode(code: string, lang: string | null): ReactNode {
   return tokenize(code, spec)
 }
 
+/**
+ * One line, syntax-highlighted, with the character ranges that did NOT change
+ * dimmed.
+ *
+ * The line is tokenised WHOLE and the dimming applied over the result, which
+ * is the whole point of this function existing. Highlighting each word-diff
+ * span separately — the obvious version, and the one that shipped — re-lexes
+ * every span from scratch: a string, a comment or a keyword split across a
+ * span boundary is two fragments, each parsed as if it began a line, so
+ * `bg-fg-dim/5` → `bg-fg-dim/[0.04]` drew half a string in string colour and
+ * the rest as code. Syntax is a property of the line; the diff is a property
+ * of ranges within it, and the two have to be applied in that order.
+ */
+export function highlightWithDim(
+  code: string,
+  lang: string | null,
+  /** Ranges that survived the edit, as [start, end) character offsets. */
+  dim: Array<[number, number]>,
+): ReactNode {
+  if (dim.length === 0) return highlightCode(code, lang)
+  const nodes = highlightCode(code, lang)
+  const parts = Array.isArray(nodes) ? nodes : [nodes]
+  const isDim = (at: number) => dim.some(([from, to]) => at >= from && at < to)
+
+  const out: ReactNode[] = []
+  let at = 0
+  let key = 0
+  // Each highlighted piece is walked by character so a token straddling the
+  // boundary between a changed and an unchanged range is split HERE, keeping
+  // whatever colour the tokenizer already gave it.
+  const emit = (text: string, className: string | undefined) => {
+    let run = ""
+    let runDim = isDim(at)
+    const flush = () => {
+      if (run === "") return
+      const cls = [className, runDim ? "opacity-45" : ""].filter(Boolean).join(" ")
+      out.push(
+        cls === "" ? (
+          run
+        ) : (
+          <span key={key++} className={cls}>
+            {run}
+          </span>
+        ),
+      )
+      run = ""
+    }
+    for (const ch of text) {
+      const d = isDim(at)
+      if (d !== runDim) {
+        flush()
+        runDim = d
+      }
+      run += ch
+      at += ch.length
+    }
+    flush()
+  }
+
+  for (const part of parts) {
+    if (typeof part === "string") {
+      emit(part, undefined)
+      continue
+    }
+    // A tokenizer span: keep its class, subdivide by the dim ranges.
+    const el = part as { props?: { className?: string; children?: unknown } }
+    const text = String(el.props?.children ?? "")
+    emit(text, el.props?.className)
+  }
+  return out
+}
+
 function tokenize(code: string, spec: LangSpec): ReactNode[] {
   const out: ReactNode[] = []
   let plain = ""

@@ -7,7 +7,7 @@ import {
   type DiffRow,
   type WordSpan,
 } from "@aide/protocol"
-import { highlightCode, langOfPath } from "./highlight.js"
+import { highlightCode, highlightWithDim, langOfPath } from "./highlight.js"
 import { X } from "./icons.js"
 import { useRemembered } from "./useRemembered.js"
 
@@ -219,15 +219,17 @@ function GapRule({ hidden }: { hidden: number }) {
  */
 function DiffText({ spans, text, lang }: { spans: WordSpan[] | null; text: string; lang: string | null }) {
   if (spans === null) return <>{highlightCode(text, lang)}</>
-  return (
-    <>
-      {spans.map((s, i) => (
-        <span key={i} className={s.changed ? "" : "opacity-45"}>
-          {highlightCode(s.text, lang)}
-        </span>
-      ))}
-    </>
-  )
+  // Ranges, not per-span highlighting: the line is tokenised whole and the
+  // dimming laid over it — see `highlightWithDim` for the bug that forces
+  // this order, where a string split across a span boundary was re-lexed and
+  // half of it lost its colour.
+  const dim: Array<[number, number]> = []
+  let at = 0
+  for (const s of spans) {
+    if (!s.changed) dim.push([at, at + s.text.length])
+    at += s.text.length
+  }
+  return <>{highlightWithDim(text, lang, dim)}</>
 }
 
 /**
