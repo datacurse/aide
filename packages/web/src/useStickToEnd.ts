@@ -70,6 +70,13 @@ export function useStickToEnd(
     if (!el || !body) return
 
     let dragging = false
+    /**
+     * When the reader last pressed something inside the pane. Growth landing
+     * within a beat of a press is the reader OPENING something — a call
+     * card, a fold, a tool row — and is the one growth the follow must not
+     * chase; see `follow`.
+     */
+    let pressedAt = 0
     // A few pixels of slack: at fractional zoom the arithmetic lands half a
     // pixel short of the end, and an exact test would leave the pill on screen
     // for a view that is plainly already at the bottom.
@@ -88,10 +95,27 @@ export function useStickToEnd(
     }
     const follow = () => {
       if (!following.current || selecting()) return
+      // Growth right on the heels of a press is the thing the press opened,
+      // not the stream arriving — and snapping to the end then hoists what
+      // was just clicked out from under the pointer, which is how selecting
+      // a timeline dot at the bottom of a finished turn shoved the whole
+      // grid upward. Skipping one beat costs a streaming turn nothing (its
+      // growth is continuous, and the next one follows again); whatever the
+      // press opened has pushed the end off screen anyway, so `read` retires
+      // the follow until the reader closes it or jumps back down.
+      if (Date.now() - pressedAt < 250) return
       el.scrollTop = el.scrollHeight
     }
     const down = (e: MouseEvent) => {
-      if (e.button === 0) dragging = true
+      if (e.button === 0) {
+        dragging = true
+        pressedAt = Date.now()
+      }
+    }
+    // Keyboard activation opens the same things a click does — the timeline
+    // dots are focusable buttons — so a key inside the pane counts as a press.
+    const press = () => {
+      pressedAt = Date.now()
     }
     // On the window, not on the pane: a drag very often ends outside the box it
     // started in, and a mouse-up missed here leaves the follow paused for good.
@@ -109,6 +133,7 @@ export function useStickToEnd(
     read()
     el.addEventListener("scroll", read, { passive: true })
     el.addEventListener("mousedown", down)
+    el.addEventListener("keydown", press)
     window.addEventListener("mouseup", up)
     // Content growing under a view that is already at the end fires no scroll
     // event, so the follow cannot hang off `scroll` the way the button's state
@@ -140,6 +165,7 @@ export function useStickToEnd(
     return () => {
       el.removeEventListener("scroll", read)
       el.removeEventListener("mousedown", down)
+      el.removeEventListener("keydown", press)
       window.removeEventListener("mouseup", up)
       grow.disconnect()
     }
