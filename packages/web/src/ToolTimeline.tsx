@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useId, useMemo, useRef, useState } from "react"
 import { buildTimeline, looksOnly, type TimelineCall, type TimelineRow } from "@aide/protocol"
 
 /**
@@ -18,49 +18,118 @@ import { buildTimeline, looksOnly, type TimelineCall, type TimelineRow } from "@
  * nothing queued or predicted is ever drawn.
  */
 
-/** Column width for n dots side by side; 24px floor so single dots align. */
-const colWidth = (n: number): number => Math.max(24, n * 10 + (n - 1) * 3 + 10)
+/** Dot diameter. 1.5× the original 10px, because these are CLICK TARGETS. */
+const DOT = 15
+/** The gap between parallel calls in one cell. */
+const GAP = 3
+
+/** Column width for n dots side by side; 24px floor so header numbers align. */
+const colWidth = (n: number): number => Math.max(24, n * DOT + (n - 1) * GAP + 10)
 
 /**
- * The row connector as one filled SVG path per cell: a 2px line that SWELLS
- * into each dot with tangent curves and ends underneath the outermost dots.
+ * The row connector, one SVG per cell: a half-opacity 2px line that SWELLS
+ * into each dot with tangent curves, fading up to that dot's OWN colour.
  *
  * Drawn, because rectangles could not say this. The first version was a grey
  * hairline (disconnected from the dots it joined), the second a rounded pill
  * under each dot (which poked past the row's end dots — a stadium shape has
  * no way to stop AT a circle). A path can: each swell rises from line
  * thickness to just under the dot's radius with horizontal tangents at both
- * ends, so it leaves the line smoothly and disappears under the dot's edge,
- * and an endpoint dot simply gets no swell on its outer side. SVG rather than
- * canvas for the same result: crisp at any zoom, no resize or repaint
- * plumbing, and the dots stay HTML — focusable, hoverable, clickable.
+ * ends, and an endpoint dot simply gets no swell on its outer side. SVG
+ * rather than canvas for the same result: crisp at any zoom, no resize or
+ * repaint plumbing, and the dots stay HTML — focusable, hoverable, clickable.
  *
- * Geometry mirrors the HTML dots exactly: 10px dots on a 3px gap, centred in
- * the cell — `colWidth` is the same arithmetic. The swell's half-height is
- * 4.5 against the dot's radius of 5, so its seam is always covered, ring dots
- * included.
+ * Each half-swell is its own gradient, and the gradient is doing two jobs.
+ * The line runs at half opacity so the PATH reads apart from the NODES, and
+ * the swell fades from that back to full — the line genuinely dissolves into
+ * the dot rather than butting against it. And the far stop takes the dot's
+ * colour, so the approach to a failed call shades green into red along the
+ * way: the transition lives in the connector, not on a hard edge.
+ *
+ * Geometry mirrors the HTML dots exactly — `DOT` on `GAP`, centred; the
+ * swell peaks half a pixel under the dot's radius so its seam is always
+ * covered, ring dots included.
  */
-function connectorPath(xs: number[], from: number, to: number): string {
+function Connector({
+  gid,
+  w,
+  xs,
+  reds,
+  from,
+  to,
+}: {
+  /** Unique per cell — gradient ids are document-global. */
+  gid: string
+  w: number
+  xs: number[]
+  /** Which dots are failures, so their swell can shade into red. */
+  reds: boolean[]
+  from: number
+  to: number
+}) {
   const y = 12 // half the 24px row
   const t = 1 // half the line's thickness
-  const r = 4.5 // the swell's peak, just under the dot's radius
-  const lead = 7 // how far out a swell begins
-  let d = `M ${from} ${y - t} L ${to} ${y - t} L ${to} ${y + t} L ${from} ${y + t} Z `
-  for (const x of xs) {
+  const r = DOT / 2 - 0.5 // the swell's peak, just under the dot's radius
+  const lead = 10 // how far out a swell begins
+  const halves: { key: string; d: string; x1: number; x2: number; red: boolean }[] = []
+  xs.forEach((x, i) => {
+    const red = reds[i] === true
     // A half-swell only where the line actually continues on that side — the
     // outermost dots end the shape instead of wearing a stub past the row.
     if (x > from + 0.5) {
-      d +=
-        `M ${x - lead} ${y - t} C ${x - lead + 3} ${y - t} ${x - 5} ${y - r} ${x} ${y - r} ` +
-        `L ${x} ${y + r} C ${x - 5} ${y + r} ${x - lead + 3} ${y + t} ${x - lead} ${y + t} Z `
+      halves.push({
+        key: `l${i}`,
+        d:
+          `M ${x - lead} ${y - t} C ${x - lead + 4} ${y - t} ${x - r - 1} ${y - r} ${x} ${y - r} ` +
+          `L ${x} ${y + r} C ${x - r - 1} ${y + r} ${x - lead + 4} ${y + t} ${x - lead} ${y + t} Z`,
+        x1: x - lead,
+        x2: x,
+        red,
+      })
     }
     if (x < to - 0.5) {
-      d +=
-        `M ${x + lead} ${y - t} C ${x + lead - 3} ${y - t} ${x + 5} ${y - r} ${x} ${y - r} ` +
-        `L ${x} ${y + r} C ${x + 5} ${y + r} ${x + lead - 3} ${y + t} ${x + lead} ${y + t} Z `
+      halves.push({
+        key: `r${i}`,
+        d:
+          `M ${x + lead} ${y - t} C ${x + lead - 4} ${y - t} ${x + r + 1} ${y - r} ${x} ${y - r} ` +
+          `L ${x} ${y + r} C ${x + r + 1} ${y + r} ${x + lead - 4} ${y + t} ${x + lead} ${y + t} Z`,
+        x1: x + lead,
+        x2: x,
+        red,
+      })
     }
-  }
-  return d
+  })
+  return (
+    <svg aria-hidden="true" width={w} height={24} className="pointer-events-none absolute inset-0">
+      <defs>
+        {halves.map((h) => (
+          <linearGradient
+            key={h.key}
+            id={`${gid}${h.key}`}
+            gradientUnits="userSpaceOnUse"
+            x1={h.x1}
+            y1={0}
+            x2={h.x2}
+            y2={0}
+          >
+            <stop offset="0" style={{ stopColor: "var(--color-ok)" }} stopOpacity={0.5} />
+            <stop
+              offset="1"
+              style={{ stopColor: h.red ? "var(--color-err)" : "var(--color-ok)" }}
+            />
+          </linearGradient>
+        ))}
+      </defs>
+      <path
+        d={`M ${from} ${y - t} L ${to} ${y - t} L ${to} ${y + t} L ${from} ${y + t} Z`}
+        style={{ fill: "var(--color-ok)" }}
+        fillOpacity={0.5}
+      />
+      {halves.map((h) => (
+        <path key={h.key} d={h.d} fill={`url(#${gid}${h.key})`} />
+      ))}
+    </svg>
+  )
 }
 
 /** File rows show their tail; `search`, `shell` and friends are already short. */
@@ -86,7 +155,7 @@ function Dot({
           ? // Opaque background, not transparent: the row's connecting line
             // runs behind the dots, and a see-through ring would draw it
             // straight through its own middle.
-            "border-[1.5px] border-ok bg-editor"
+            "border-2 border-ok bg-editor"
           : "bg-ok"
   const state =
     call.status === "err"
@@ -115,7 +184,7 @@ function Dot({
             onPick()
           }
         }}
-        className={`block size-2.5 cursor-pointer rounded-full focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-info ${shape} ${
+        className={`block size-[15px] cursor-pointer rounded-full focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-info ${shape} ${
           selected ? "outline-2 outline-offset-1 outline-fg" : ""
         }`}
       />
@@ -152,6 +221,11 @@ export function ToolTimeline({
    */
   const composing = live && !calls.some((c) => c.status === "busy")
   const [hover, setHover] = useState<number | null>(null)
+  // Gradient ids are document-global and a page draws one grid per turn, so
+  // every cell's defs get a prefix unique to this instance. Stripped to
+  // alphanumerics because the raw useId contains colons, which are legal in
+  // an id and unreliable inside a `url(#…)` reference.
+  const gid = useId().replace(/[^a-zA-Z0-9]/g, "")
   const wrap = useRef<HTMLDivElement>(null)
   const strip = useRef<HTMLDivElement>(null)
   /**
@@ -376,10 +450,14 @@ export function ToolTimeline({
                     // A row touched once gets none — there is nothing to join.
                     const on = lo !== hi && m >= lo && m <= hi
                     const w = cells.widths.get(m) ?? 24
-                    // The HTML dots' geometry, recomputed for the path: 10px
-                    // dots on a 3px gap, centred — `colWidth`'s arithmetic.
+                    // The HTML dots' geometry, recomputed for the path: DOT
+                    // on GAP, centred — `colWidth`'s own arithmetic.
                     const xs = cs.map(
-                      (_, i) => w / 2 - (cs.length * 10 + (cs.length - 1) * 3) / 2 + 5 + i * 13,
+                      (_, i) =>
+                        w / 2 -
+                        (cs.length * DOT + (cs.length - 1) * GAP) / 2 +
+                        DOT / 2 +
+                        i * (DOT + GAP),
                     )
                     const from = m === lo ? (xs[0] ?? w / 2) : 0
                     const to = m === hi ? (xs[xs.length - 1] ?? w / 2) : w
@@ -394,17 +472,14 @@ export function ToolTimeline({
                         }`}
                       >
                         {on && (
-                          <svg
-                            aria-hidden="true"
-                            width={w}
-                            height={24}
-                            className="pointer-events-none absolute inset-0"
-                          >
-                            <path
-                              d={connectorPath(xs, from, to)}
-                              style={{ fill: "var(--color-ok)" }}
-                            />
-                          </svg>
+                          <Connector
+                            gid={`${gid}${m}`}
+                            w={w}
+                            xs={xs}
+                            reds={cs.map((c) => c.status === "err")}
+                            from={from}
+                            to={to}
+                          />
                         )}
                         {cs.length > 0 && (
                           <span className="relative z-[1] flex h-full items-center justify-center gap-[3px]">
