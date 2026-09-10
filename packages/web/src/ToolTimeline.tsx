@@ -26,108 +26,68 @@ const GAP = 3
 /** Column width for n dots side by side; 24px floor so header numbers align. */
 const colWidth = (n: number): number => Math.max(24, n * DOT + (n - 1) * GAP + 10)
 
+/** One connector segment between two neighbouring dots, in cell-local coords. */
+interface Segment {
+  x1: number
+  x2: number
+  /** CSS variable names — each end takes its own dot's colour. */
+  c1: string
+  c2: string
+}
+
 /**
- * The row connector, one SVG per cell: a half-opacity 2px line that SWELLS
- * into each dot with tangent curves, fading up to that dot's OWN colour.
+ * The connectors for one cell: plain 4px segments between neighbouring dots,
+ * at half opacity, in the dots' own colours.
  *
- * Drawn, because rectangles could not say this. The first version was a grey
- * hairline (disconnected from the dots it joined), the second a rounded pill
- * under each dot (which poked past the row's end dots — a stadium shape has
- * no way to stop AT a circle). A path can: each swell rises from line
- * thickness to just under the dot's radius with horizontal tangents at both
- * ends, and an endpoint dot simply gets no swell on its outer side. SVG
- * rather than canvas for the same result: crisp at any zoom, no resize or
- * repaint plumbing, and the dots stay HTML — focusable, hoverable, clickable.
+ * The swelling metaball shapes this replaces were drawn twice and refused
+ * twice — the organic feel turned out to be carried by COLOUR, not geometry.
+ * A segment runs centre to centre and the 15px dots cover its ends, so
+ * nothing pokes past a row's edge; where its two dots differ — a failure's
+ * red, a running call's blue — the fill is a gradient across the whole
+ * segment, so the path shades smoothly into the state it arrives at. Half
+ * opacity is what keeps a line reading as a line beside full-strength dots.
  *
- * Each half-swell is its own gradient, and the gradient is doing two jobs.
- * The line runs at half opacity so the PATH reads apart from the NODES, and
- * the swell fades from that back to full — the line genuinely dissolves into
- * the dot rather than butting against it. And the far stop takes the dot's
- * colour, so the approach to a failed call shades green into red along the
- * way: the transition lives in the connector, not on a hard edge.
- *
- * Geometry mirrors the HTML dots exactly — `DOT` on `GAP`, centred; the
- * swell peaks half a pixel under the dot's radius so its seam is always
- * covered, ring dots included.
+ * Coordinates arrive grid-global translated into this cell, and a segment
+ * that crosses cells is drawn by every cell it touches with the SAME
+ * endpoints — `userSpaceOnUse` gradients interpolate over the full span, so
+ * the colour ramp lines up across the boundary.
  */
-function Connector({
-  gid,
-  w,
-  xs,
-  reds,
-  from,
-  to,
-}: {
-  /** Unique per cell — gradient ids are document-global. */
-  gid: string
-  w: number
-  xs: number[]
-  /** Which dots are failures, so their swell can shade into red. */
-  reds: boolean[]
-  from: number
-  to: number
-}) {
-  const y = 12 // half the 24px row
-  const t = 1 // half the line's thickness
-  const r = DOT / 2 - 0.5 // the swell's peak, just under the dot's radius
-  const lead = 10 // how far out a swell begins
-  const halves: { key: string; d: string; x1: number; x2: number; red: boolean }[] = []
-  xs.forEach((x, i) => {
-    const red = reds[i] === true
-    // A half-swell only where the line actually continues on that side — the
-    // outermost dots end the shape instead of wearing a stub past the row.
-    if (x > from + 0.5) {
-      halves.push({
-        key: `l${i}`,
-        d:
-          `M ${x - lead} ${y - t} C ${x - lead + 4} ${y - t} ${x - r - 1} ${y - r} ${x} ${y - r} ` +
-          `L ${x} ${y + r} C ${x - r - 1} ${y + r} ${x - lead + 4} ${y + t} ${x - lead} ${y + t} Z`,
-        x1: x - lead,
-        x2: x,
-        red,
-      })
-    }
-    if (x < to - 0.5) {
-      halves.push({
-        key: `r${i}`,
-        d:
-          `M ${x + lead} ${y - t} C ${x + lead - 4} ${y - t} ${x + r + 1} ${y - r} ${x} ${y - r} ` +
-          `L ${x} ${y + r} C ${x + r + 1} ${y + r} ${x + lead - 4} ${y + t} ${x + lead} ${y + t} Z`,
-        x1: x + lead,
-        x2: x,
-        red,
-      })
-    }
-  })
+function Connector({ gid, w, segs }: { gid: string; w: number; segs: Segment[] }) {
   return (
     <svg aria-hidden="true" width={w} height={24} className="pointer-events-none absolute inset-0">
       <defs>
-        {halves.map((h) => (
-          <linearGradient
-            key={h.key}
-            id={`${gid}${h.key}`}
-            gradientUnits="userSpaceOnUse"
-            x1={h.x1}
-            y1={0}
-            x2={h.x2}
-            y2={0}
-          >
-            <stop offset="0" style={{ stopColor: "var(--color-ok)" }} stopOpacity={0.5} />
-            <stop
-              offset="1"
-              style={{ stopColor: h.red ? "var(--color-err)" : "var(--color-ok)" }}
-            />
-          </linearGradient>
-        ))}
+        {segs.map((s, i) =>
+          s.c1 === s.c2 ? null : (
+            <linearGradient
+              key={i}
+              id={`${gid}s${i}`}
+              gradientUnits="userSpaceOnUse"
+              x1={s.x1}
+              y1={0}
+              x2={s.x2}
+              y2={0}
+            >
+              <stop offset="0" style={{ stopColor: `var(${s.c1})` }} stopOpacity={0.5} />
+              <stop offset="1" style={{ stopColor: `var(${s.c2})` }} stopOpacity={0.5} />
+            </linearGradient>
+          ),
+        )}
       </defs>
-      <path
-        d={`M ${from} ${y - t} L ${to} ${y - t} L ${to} ${y + t} L ${from} ${y + t} Z`}
-        style={{ fill: "var(--color-ok)" }}
-        fillOpacity={0.5}
-      />
-      {halves.map((h) => (
-        <path key={h.key} d={h.d} fill={`url(#${gid}${h.key})`} />
-      ))}
+      {segs.map((s, i) =>
+        s.c1 === s.c2 ? (
+          <rect
+            key={i}
+            x={s.x1}
+            y={10}
+            width={s.x2 - s.x1}
+            height={4}
+            style={{ fill: `var(${s.c1})` }}
+            fillOpacity={0.5}
+          />
+        ) : (
+          <rect key={i} x={s.x1} y={10} width={s.x2 - s.x1} height={4} fill={`url(#${gid}s${i})`} />
+        ),
+      )}
     </svg>
   )
 }
@@ -253,9 +213,19 @@ export function ToolTimeline({
     }
     const widths = new Map<number, number>()
     for (const m of t.messages) widths.set(m, colWidth(widest.get(m) ?? 0))
+    // Each column's x offset from the start of the message columns, so a row
+    // can place its dots in GRID-GLOBAL coordinates: a segment between two
+    // dots crosses cell boundaries, and every cell drawing its slice needs
+    // the same endpoints or the gradient ramps stop lining up.
+    const offsets = new Map<number, number>()
+    let acc = 0
+    for (const m of t.messages) {
+      offsets.set(m, acc)
+      acc += widths.get(m) ?? 24
+    }
     const busy = new Set<number>()
     for (const r of t.rows) for (const c of r.calls) if (c.status === "busy") busy.add(c.message)
-    return { grid, widths, busy }
+    return { grid, widths, offsets, busy }
   }, [t])
 
   const measure = () => {
@@ -429,11 +399,35 @@ export function ToolTimeline({
             </tr>
           </thead>
           <tbody>
-            {t.rows.map((r) => {
+            {t.rows.map((r, ri) => {
               const byMsg = cells.grid.get(r.key)
-              const touched = t.messages.filter((m) => byMsg?.has(m))
-              const lo = touched[0] ?? 0
-              const hi = touched[touched.length - 1] ?? 0
+              // Every dot in the row at its grid-global x, in order. The
+              // segments between consecutive dots are the row's connectors,
+              // and each carries the colours of BOTH its dots so the fill
+              // can shade from one state into the next.
+              const dots: { x: number; c: string }[] = []
+              for (const m of t.messages) {
+                const cs = byMsg?.get(m) ?? []
+                const w = cells.widths.get(m) ?? 24
+                const off = cells.offsets.get(m) ?? 0
+                cs.forEach((call, i) => {
+                  dots.push({
+                    x:
+                      off +
+                      w / 2 -
+                      (cs.length * DOT + (cs.length - 1) * GAP) / 2 +
+                      DOT / 2 +
+                      i * (DOT + GAP),
+                    c:
+                      call.status === "err"
+                        ? "--color-err"
+                        : call.status === "busy"
+                          ? "--color-info"
+                          : "--color-ok",
+                  })
+                })
+              }
+              const segs = dots.slice(1).map((b, i) => ({ a: dots[i]!, b }))
               return (
                 <tr key={r.key}>
                   <td
@@ -446,21 +440,14 @@ export function ToolTimeline({
                   </td>
                   {t.messages.map((m) => {
                     const cs = byMsg?.get(m) ?? []
-                    // The connector from first touch to last, behind the dots.
-                    // A row touched once gets none — there is nothing to join.
-                    const on = lo !== hi && m >= lo && m <= hi
                     const w = cells.widths.get(m) ?? 24
-                    // The HTML dots' geometry, recomputed for the path: DOT
-                    // on GAP, centred — `colWidth`'s own arithmetic.
-                    const xs = cs.map(
-                      (_, i) =>
-                        w / 2 -
-                        (cs.length * DOT + (cs.length - 1) * GAP) / 2 +
-                        DOT / 2 +
-                        i * (DOT + GAP),
-                    )
-                    const from = m === lo ? (xs[0] ?? w / 2) : 0
-                    const to = m === hi ? (xs[xs.length - 1] ?? w / 2) : w
+                    const off = cells.offsets.get(m) ?? 0
+                    // This cell's slice of the row's segments, translated to
+                    // local coordinates. A row touched once has no segments —
+                    // there is nothing to join.
+                    const local = segs
+                      .filter((s) => s.b.x > off && s.a.x < off + w)
+                      .map((s) => ({ x1: s.a.x - off, x2: s.b.x - off, c1: s.a.c, c2: s.b.c }))
                     return (
                       <td
                         key={m}
@@ -471,15 +458,11 @@ export function ToolTimeline({
                           hover === m ? "bg-hover" : ""
                         }`}
                       >
-                        {on && (
-                          <Connector
-                            gid={`${gid}${m}`}
-                            w={w}
-                            xs={xs}
-                            reds={cs.map((c) => c.status === "err")}
-                            from={from}
-                            to={to}
-                          />
+                        {/* Keyed by row INDEX as well as column: gradient ids
+                            are document-global, and every row in this column
+                            renders its own defs. */}
+                        {local.length > 0 && (
+                          <Connector gid={`${gid}r${ri}m${m}`} w={w} segs={local} />
                         )}
                         {cs.length > 0 && (
                           <span className="relative z-[1] flex h-full items-center justify-center gap-[3px]">
