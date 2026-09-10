@@ -106,6 +106,50 @@ export function diffLines(oldText: string, newText: string): DiffLine[] {
  */
 export type DiffRow = DiffLine | { tag: "gap"; hidden: number }
 
+/**
+ * One row of a SPLIT view: what sits on the left, and what sits on the right.
+ *
+ * The same diff as `DiffRow`, paired for two columns. A changed stretch is a
+ * run of deletions beside a run of insertions, zipped index by index — three
+ * lines out against one line in gives three rows, two of them with nothing on
+ * the right, so the columns stay aligned however lopsided the change is.
+ * Pairing here rather than in the renderer for the same reason the diff
+ * itself is here: an off-by-one in the zip puts a deletion next to the wrong
+ * insertion, which reads as a change nobody made and is invisible to `tsc`.
+ */
+export type SplitRow =
+  | { tag: "keep"; text: string }
+  | { tag: "change"; left: string | null; right: string | null }
+  | { tag: "gap"; hidden: number }
+
+export function splitRows(rows: readonly DiffRow[]): SplitRow[] {
+  const out: SplitRow[] = []
+  let i = 0
+  while (i < rows.length) {
+    const row = rows[i]!
+    if (row.tag === "gap") {
+      out.push(row)
+      i++
+      continue
+    }
+    if (row.tag === "keep") {
+      out.push({ tag: "keep", text: row.text })
+      i++
+      continue
+    }
+    // A maximal run of deletions, then the insertions that follow it: one
+    // changed STRETCH, which is what the two columns have to line up.
+    const dels: string[] = []
+    while (i < rows.length && rows[i]!.tag === "del") dels.push((rows[i++] as DiffLine).text)
+    const adds: string[] = []
+    while (i < rows.length && rows[i]!.tag === "add") adds.push((rows[i++] as DiffLine).text)
+    for (let k = 0; k < Math.max(dels.length, adds.length); k++) {
+      out.push({ tag: "change", left: dels[k] ?? null, right: adds[k] ?? null })
+    }
+  }
+  return out
+}
+
 export function collapseUnchanged(lines: readonly DiffLine[], context = 3): DiffRow[] {
   const out: DiffRow[] = []
   // One pass: find each maximal run of `keep`, and if it is long
