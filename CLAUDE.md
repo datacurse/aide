@@ -905,26 +905,35 @@ Decisions already taken, which are not gaps to fill:
   header slot: the model is thinking or composing, and without the mark a
   grid whose last column has settled is indistinguishable from a stale one.
   It sits in the header and draws no dot, because it claims no call.
-- **The CELL selects, not the dot.** A 15px dot on a 24px cell in a row that is
-  mostly empty space made the grid a page of small targets, and the empty space
-  was never ambiguous: one row is one file, one column is one message, so a
-  click beside a dot can only mean the call sitting there. The `<td>` carries
-  the handler and the dot carries none — a press on the dot BUBBLES to the same
-  path, because two click handlers for one dot are two answers to one question
-  and the inner one wins silently. With several calls in one message the nearest
-  to the pointer wins, which puts the boundary at the midpoint between
-  neighbours. That nearest test measures the RENDERED dots through `data-dotid`
-  rather than recomputing from `DOT`/`GAP` and the column width: that arithmetic
-  already exists twice — the flex layout the browser performs, and the
-  connector's own x positions — and a third copy deciding what you clicked is
-  the one that disagrees after a padding change, selecting the neighbour with
-  nothing on screen to explain it. An empty cell gets no handler at all, so it
-  stays inert instead of becoming a target that does nothing. The dot keeps
-  `role="button"`, `tabIndex` and its own `onKeyDown`, which is the whole
+- **The COLUMN selects, not the dot — and not merely the cell.** A 15px dot on a
+  24px cell made the grid a page of small targets, and the first fix — the
+  `<td>` taking the click — was not enough for the reason the shape makes
+  obvious: a message is usually one or two calls spread down a grid of many
+  rows, so cell-only targeting still left most of the column dead and you had to
+  find the row that happened to hold the dot. The column is the unambiguous
+  unit. A click anywhere in it means "this message", and which of its calls is
+  answered by the pointer being nearest one — in BOTH axes, so two dots in
+  different rows split at the midpoint between them exactly as two side by side
+  in one row do. One rule, one boundary, whichever way the neighbours lie. Every
+  cell of a column therefore carries the same handler over that column's calls
+  across all rows (`columnCalls`), and a column with no calls gets none, so it
+  stays inert rather than becoming a target that does nothing. The dot carries
+  no `onClick` — a press on it BUBBLES to the same path, because two click
+  handlers for one dot are two answers to one question and the inner one wins
+  silently. That nearest test measures the RENDERED dots through `data-dotid`,
+  queried from the SCROLL CONTAINER rather than the cell (a `<td>` holds only
+  its own row's dots, and this has to reach across rows), never recomputed from
+  `DOT`/`GAP` and the column width: that arithmetic already exists twice — the
+  flex layout the browser performs, and the connector's own x positions — and a
+  third copy deciding what you clicked is the one that disagrees after a padding
+  change, selecting a neighbour with nothing on screen to explain it. The dot
+  keeps `role="button"`, `tabIndex` and its own `onKeyDown`, which is the whole
   keyboard path: a keypress has no coordinates for "nearest" to mean anything.
-  `toggleUnlessSelecting` is deliberately NOT used here — it guards rows holding
-  prose somebody may be dragging across, and a grid cell holds only dots and an
-  SVG, so a drag over one selects nothing.
+  The header row is deliberately NOT a target — it carries the message number
+  and the failure bracket, and its job is orientation rather than selection.
+  `toggleUnlessSelecting` is deliberately not used either — it guards rows
+  holding prose somebody may be dragging across, and a grid cell holds only dots
+  and an SVG, so a drag over one selects nothing.
 - **A refusal is amber; only a fault is red.** aide declining a call — the shell
   policy turning down `grep`, a Plan turn declining to edit — is the system
   working exactly as designed, and the run routes around it in one round trip. A

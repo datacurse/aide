@@ -404,40 +404,73 @@ export function ToolTimeline({
     }
     return out
   }, [t.messages, t.failed, t.recovery, t.refused])
-  const callsIn = (m: number) => t.rows.reduce((n, r) => n + (cells.grid.get(r.key)?.get(m)?.length ?? 0), 0)
+  /**
+   * Every call in a column, across all rows — what a click anywhere in that
+   * column is choosing between. Built once per timeline rather than per cell,
+   * since every cell of a column needs the same list.
+   */
+  const columnCalls = useMemo(() => {
+    const out = new Map<number, TimelineCall[]>()
+    for (const r of t.rows) {
+      for (const c of r.calls) {
+        const list = out.get(c.message)
+        if (list) list.push(c)
+        else out.set(c.message, [c])
+      }
+    }
+    return out
+  }, [t])
+  const callsIn = (m: number) => columnCalls.get(m)?.length ?? 0
 
   const pick = (c: TimelineCall) => onSelect?.(selected === c.id ? null : c.id)
 
   /**
-   * A click anywhere in a cell selects the call nearest the pointer.
+   * A click anywhere in a COLUMN selects the call nearest the pointer.
    *
-   * The cell is the target rather than the dot because a 15px dot on a 24px×24px
-   * cell leaves most of the row unclickable, and the empty part is not ambiguous:
-   * one row is one file and one column is one message, so there is only one thing
-   * a click in that space can mean. With several calls in one message the nearest
-   * wins, which puts the boundary exactly at the midpoint between neighbours.
+   * Not the cell, and the difference is the whole point: a message is usually
+   * one or two calls spread down a grid of many rows, so cell-only targeting
+   * still left most of the column dead — you had to find the one row that
+   * happened to hold the dot. The column is what is unambiguous. A click in it
+   * means "this message", and the only question left is which of its calls,
+   * which the pointer answers by being nearest one of them. With a single call
+   * in the column — the common case — every pixel of it selects that call.
    *
-   * Measured off the rendered dots (`data-dotid`) rather than recomputed from
-   * DOT/GAP and the column width. That arithmetic already exists twice — once
-   * for the flex layout the browser performs, once for the connector's x
-   * positions — and a third copy deciding what you clicked would be the one that
-   * disagrees after a padding change, silently selecting the neighbour. One call
-   * in the cell skips the measuring entirely, which is nearly every cell.
+   * Nearest is measured in BOTH axes, so two dots in different rows split at
+   * the midpoint between them exactly as two dots side by side in one row do.
+   * One rule, one boundary, whichever way the neighbours happen to lie.
+   *
+   * Measured off the RENDERED dots (`data-dotid`) rather than recomputed from
+   * DOT/GAP, the column width and the row height. That arithmetic already
+   * exists twice — the flex layout the browser performs, and the connector's
+   * own x positions — and a third copy deciding what you clicked is the one
+   * that disagrees after a padding change, selecting a neighbour with nothing
+   * on screen to explain it. The single-call case skips the measuring entirely.
    */
-  const pickNearest = (e: ReactMouseEvent<HTMLTableCellElement>, cs: TimelineCall[]) => {
+  const pickInColumn = (e: ReactMouseEvent<HTMLElement>, cs: TimelineCall[]) => {
     const only = cs[0]
     if (!only) return
     if (cs.length === 1) {
       pick(only)
       return
     }
+    // The scroll container, which is the one ancestor holding every row's dots
+    // — a `<td>` holds only its own, and this has to reach across rows.
+    const root = wrap.current
+    if (!root) {
+      pick(only)
+      return
+    }
     let best = only
     let bestDist = Infinity
     for (const c of cs) {
-      const el = e.currentTarget.querySelector(`[data-dotid="${CSS.escape(c.id)}"]`)
+      const el = root.querySelector(`[data-dotid="${CSS.escape(c.id)}"]`)
       if (!el) continue
       const r = el.getBoundingClientRect()
-      const d = Math.abs(e.clientX - (r.left + r.width / 2))
+      const dx = e.clientX - (r.left + r.width / 2)
+      const dy = e.clientY - (r.top + r.height / 2)
+      // Squared, because only the comparison matters and a square root per dot
+      // buys nothing.
+      const d = dx * dx + dy * dy
       if (d < bestDist) {
         bestDist = d
         best = c
@@ -669,6 +702,10 @@ export function ToolTimeline({
                   </td>
                   {t.messages.map((m) => {
                     const cs = byMsg?.get(m) ?? []
+                    // This column's calls across EVERY row — what a click in
+                    // this cell is choosing between, since the target is the
+                    // column rather than the cell.
+                    const inColumn = columnCalls.get(m) ?? []
                     const w = cells.widths.get(m) ?? 24
                     const off = cells.offsets.get(m) ?? 0
                     // This cell's slice of the row's segments, translated to
@@ -683,18 +720,18 @@ export function ToolTimeline({
                         style={{ width: cells.widths.get(m), minWidth: cells.widths.get(m) }}
                         onMouseEnter={() => setHover(m)}
                         onMouseLeave={() => setHover(null)}
-                        // The whole CELL selects, not just the 15px dot in it.
-                        // A dot is a small target on a row that is mostly empty
-                        // space, and the empty space is unambiguous — this row
-                        // is one file, this column is one message, so a click
-                        // anywhere in the cell can only mean the call sitting
-                        // there. With several calls side by side the nearest
-                        // one wins, which splits the cell at the midpoint
-                        // between neighbours. `onPickAt` is undefined for an
-                        // empty cell, so those stay inert rather than becoming
-                        // a click target that does nothing.
-                        onClick={cs.length > 0 ? (e) => pickNearest(e, cs) : undefined}
-                        className={`relative h-6 p-0 ${cs.length > 0 ? "cursor-pointer" : ""} ${
+                        // The whole COLUMN selects, so this cell answers for
+                        // its message even when the dot is several rows away —
+                        // a message is usually one or two calls down a tall
+                        // grid, and requiring the right row left most of the
+                        // column dead. Nearest-in-both-axes decides between a
+                        // column's calls, which is the midpoint between them
+                        // whether they sit side by side or rows apart. A column
+                        // with no calls at all gets no handler, so it stays
+                        // inert rather than becoming a target that does
+                        // nothing.
+                        onClick={inColumn.length > 0 ? (e) => pickInColumn(e, inColumn) : undefined}
+                        className={`relative h-6 p-0 ${inColumn.length > 0 ? "cursor-pointer" : ""} ${
                           recovery.has(m) ? "bg-warn/10" : ""
                         } ${hover === m ? "bg-hover" : ""}`}
                       >
