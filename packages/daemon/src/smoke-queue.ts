@@ -19,7 +19,14 @@ import { tmpdir } from "node:os"
 import { fileURLToPath } from "node:url"
 import { join } from "node:path"
 import { promisify } from "node:util"
-import type { ChatState, ChatStatus, Project, RunEvent, RunEventBody } from "@aide/protocol"
+import type {
+  ChatSettings,
+  ChatState,
+  ChatStatus,
+  Project,
+  RunEvent,
+  RunEventBody,
+} from "@aide/protocol"
 import { STATE_DIR } from "@aide/protocol"
 
 // Point the chat lane at the stub and keep turns short, BEFORE importing it —
@@ -649,6 +656,69 @@ console.log("\na composed chat keeps the mode it was composed at")
     "the picker would otherwise read Auto while the turn went out on Plan",
   )
   check("and picking another sets it", mergedMode("plan", { mode: "auto" }) === "auto")
+}
+
+// ---------------------------------------------------------------------------
+console.log("\na chat's own settings beat the defaults, and only its own")
+// Mode, model, effort and thinking used to be one remembered value each, shared
+// by every chat — switching model for one deliberate turn silently switched
+// every conversation. The precedence that replaced it lives in protocol so both
+// composers read one rule; every reading of it fails quietly, so each rung is
+// pinned here.
+{
+  const { resolveChatSettings } = await import("@aide/protocol")
+  const defaults: ChatSettings = {
+    mode: "auto",
+    effort: "high",
+    thinking: true,
+    model: "claude-opus-5",
+  }
+
+  const untouched = resolveChatSettings({ composed: null, chosen: {}, inherited: null, defaults })
+  check(
+    "a chat that picked nothing runs on the defaults",
+    untouched.mode === "auto" &&
+      untouched.effort === "high" &&
+      untouched.thinking === true &&
+      untouched.model === "claude-opus-5",
+  )
+  check(
+    "its own pick beats the default",
+    resolveChatSettings({
+      composed: null,
+      chosen: { model: "claude-haiku-4-5-20251001", effort: "low" },
+      inherited: null,
+      defaults,
+    }).model === "claude-haiku-4-5-20251001",
+  )
+  check(
+    "thinking OFF for one chat survives a default of on",
+    resolveChatSettings({ composed: null, chosen: { thinking: false }, inherited: null, defaults })
+      .thinking === false,
+    "`??` and never `||` — false is a choice here, and `||` reads it as absence",
+  )
+  check(
+    "the mode a chat was last driven at beats the default",
+    resolveChatSettings({ composed: null, chosen: {}, inherited: "plan", defaults }).mode === "plan",
+    "a chat run on Plan elsewhere must not silently revert on open",
+  )
+  check(
+    "but loses to a mode picked in this chat's own bar",
+    resolveChatSettings({ composed: null, chosen: { mode: "auto" }, inherited: "plan", defaults })
+      .mode === "auto",
+    "the pick is explicit and may not have been sent yet",
+  )
+  check(
+    "and a composed chat's mode outranks everything",
+    resolveChatSettings({ composed: "plan", chosen: { mode: "auto" }, inherited: null, defaults })
+      .mode === "plan",
+    "a survey sent at a mode that acts is an instruction and its own contradiction",
+  )
+  check(
+    "a pick of one control leaves the others on the defaults",
+    resolveChatSettings({ composed: null, chosen: { effort: "low" }, inherited: null, defaults })
+      .model === "claude-opus-5",
+  )
 }
 
 // ---------------------------------------------------------------------------

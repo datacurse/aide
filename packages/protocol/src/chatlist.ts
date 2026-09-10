@@ -15,7 +15,7 @@
  * What is left is the one bit aide records about a chat and the order the list
  * puts them in.
  */
-import type { ChatMode } from "./session.js"
+import type { ChatMode, ChatModel, EffortLevel } from "./session.js"
 
 /**
  * Which mode a draft keeps when its box is written to.
@@ -42,6 +42,60 @@ export function mergedMode(
   content: { mode?: ChatMode | undefined },
 ): ChatMode | undefined {
   return "mode" in content ? content.mode : held
+}
+
+/**
+ * Everything a turn is sent with besides the words: how much rope the agent
+ * gets, which model answers, whether it may think. One shape serves both the
+ * defaults every chat starts on and what an individual chat resolves to.
+ */
+export interface ChatSettings {
+  mode: ChatMode
+  effort: EffortLevel
+  thinking: boolean
+  model: ChatModel
+}
+
+/**
+ * What one chat has had picked in its own bar. A field is present only when a
+ * human chose it FOR THIS CHAT; absent fields fall through to the defaults.
+ */
+export type ChatSettingsChoice = Partial<ChatSettings>
+
+/**
+ * What a chat's controls read, given everything that has an opinion.
+ *
+ * These four used to be one remembered value each, shared by every chat, so
+ * switching to Haiku for one long mechanical turn silently switched every other
+ * conversation with it. The controls are per chat now, and the precedence is a
+ * rule worth pinning because every reading of it fails quietly:
+ *
+ * - `composed` (mode only) wins outright. Only a chat aide wrote the words for
+ *   carries one — a survey sent at a mode that acts is an instruction and its
+ *   own contradiction. It does not survive a pick by hand, but that is the
+ *   picker's job (it clears the draft's copy), not this function's.
+ * - `chosen` — this chat's own picks — beats `inherited`, because a pick is
+ *   explicit and may not have been sent yet, and beats the defaults because
+ *   that is the whole point of having one.
+ * - `inherited` (mode only) beats the defaults: a chat last driven on Auto in
+ *   VS Code must not start asking permission just because it was opened here.
+ *
+ * `??` and never `||` on `thinking`: false is a choice here, and `||` would
+ * read "thinking off for this chat" as absence and put the default back.
+ */
+export function resolveChatSettings(args: {
+  composed: ChatMode | null
+  chosen: ChatSettingsChoice
+  inherited: ChatMode | null
+  defaults: ChatSettings
+}): ChatSettings {
+  const { composed, chosen, inherited, defaults } = args
+  return {
+    mode: composed ?? chosen.mode ?? inherited ?? defaults.mode,
+    effort: chosen.effort ?? defaults.effort,
+    thinking: chosen.thinking ?? defaults.thinking,
+    model: chosen.model ?? defaults.model,
+  }
 }
 
 /** Running, finished, or neither. */

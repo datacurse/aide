@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react"
 import { mergedMode, PerProjectMemo } from "@aide/protocol"
 import type { Attachment, ChatMode } from "@aide/protocol"
+import { carryChatSettings } from "./chatSettings.js"
 
 /**
  * What is in the message box but has not been sent.
@@ -524,6 +525,11 @@ export function addBacklogChat(
  * is what keeps a second message typed while the first turn was still running.
  */
 export function carryDraft(from: string, to: string): void {
+  // The chat's own picks — mode, model, effort, thinking — are keyed the same
+  // way, so they make the move too. Before the early return below: a chat
+  // whose box is empty still made its picks, and they must not be the one
+  // thing the rename strands under a key nothing will read again.
+  carryChatSettings(from, to)
   const row = cache.get(from)
   if (!row) return
   commit(from, null)

@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react"
 import { MAX_ATTACHMENT_BYTES, readAsAttachment } from "./attachments.js"
+import { useChatChoice, useChatDefaults } from "./chatSettings.js"
 import { readDraft, saveDraft, useDraft } from "./drafts.js"
 import { Lightning, Lock, X } from "./icons.js"
 import { LOCKED } from "./ui.js"
 import { TYPING_KEY } from "./typing.js"
 import { useAutoGrow } from "./useAutoGrow.js"
+import { useClickAway } from "./useClickAway.js"
 import { useRemembered } from "./useRemembered.js"
 import {
   CHAT_MODELS,
@@ -12,7 +14,7 @@ import {
   CHAT_MODE_LABEL,
   EFFORT_LEVELS,
   chatModelLabel,
-  isChatModel,
+  resolveChatSettings,
   type Attachment,
   type ChatMode,
   type ChatModel,
@@ -23,10 +25,6 @@ import {
 const kb = (bytes: number) =>
   bytes > 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.round(bytes / 1024)} KB`
 
-const isChatMode = (v: unknown): v is ChatMode =>
-  typeof v === "string" && (CHAT_MODES as readonly string[]).includes(v)
-const isEffort = (v: unknown): v is EffortLevel =>
-  typeof v === "string" && (EFFORT_LEVELS as readonly string[]).includes(v)
 const isBool = (v: unknown): v is boolean => typeof v === "boolean"
 
 /**
@@ -63,27 +61,6 @@ function ContextMeter({ usage }: { usage: ContextUsage | null }) {
 }
 
 /**
- * Close a menu when the next click lands outside it.
- *
- * Shared by the two pickers in this bar rather than written twice, because the
- * failure of a second copy is not a duplicate listener — it is one of the two
- * menus staying open under the other, which on a row of controls this narrow
- * means the open one covers the button you were reaching for.
- */
-function useClickAway(open: boolean, close: () => void) {
-  const box = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!open) return
-    const away = (e: MouseEvent) => {
-      if (box.current && !box.current.contains(e.target as Node)) close()
-    }
-    document.addEventListener("mousedown", away)
-    return () => document.removeEventListener("mousedown", away)
-  }, [open, close])
-  return box
-}
-
-/**
  * Which model answers the turn.
  *
  * Its own button rather than a row inside the mode menu, and the reason is what
@@ -95,8 +72,8 @@ function useClickAway(open: boolean, close: () => void) {
  *
  * It shows the label at all times, including the default. A picker that renders
  * as nothing until you touch it cannot answer the question you actually have,
- * which is "what is about to answer this" — and with a per-message control that
- * you deliberately flip and mean to restore, a blank reading of "whatever it was
+ * which is "what is about to answer this" — and with a control that you
+ * deliberately flip and mean to restore, a blank reading of "whatever it was
  * last time" is the state that sends an expensive turn to a cheap model.
  */
 function ModelPicker({ model, onModel }: { model: ChatModel; onModel: (m: ChatModel) => void }) {
@@ -355,58 +332,47 @@ export function Composer({
   const attachments = draft?.attachments ?? NOTHING_ATTACHED
   const edit = (patch: { text?: string; attachments?: Attachment[] }) =>
     saveDraft(draftKey, { text, attachments, ...patch })
-  // Remembered, not reset. Picking Plan and then having the next page load put
-  // you back on Auto is how a turn you meant to read first goes ahead and edits.
-  // A stored value from before there were two modes fails `isChatMode` and falls
-  // back here, which is the right answer: "manual" is not a mode any more.
-  const [preferred, setPreferred] = useRemembered<ChatMode>("aide.chat.mode", "auto", isChatMode)
-  const [effort, setEffort] = useRemembered<EffortLevel>("aide.chat.effort", "high", isEffort)
   /**
-   * Remembered like the other two, and NOT inherited from the conversation.
+   * The defaults every chat starts on, and what THIS chat has picked over them.
    *
-   * There is nowhere to inherit it from: the session store stamps every user
-   * turn with the mode it was sent under, which is what `inheritedMode` reads,
-   * and it says nothing about thinking. Guessing from whether the last turn
-   * produced a thought would be worse than not — a turn that thought about
-   * nothing looks identical to one that was not allowed to.
-   */
-  const [thinking, setThinking] = useRemembered<boolean>("aide.chat.thinking", true, isBool)
-  /**
-   * Remembered like the mode and the effort, and NOT inherited from the
-   * conversation — for a different reason from thinking's, which is that there
-   * is nowhere to read it from. There is somewhere here: every assistant message
-   * in the session store names the model that wrote it. It is not read on
-   * purpose. A conversation's last turn was answered by whatever was picked for
-   * THAT message, so inheriting would make one deliberate turn on Haiku the
-   * standing setting for the chat, and the next real question would go out cheap
-   * with the picker showing why only if you looked. The mode is inherited
-   * because it is a property of how a conversation is being driven; the model is
-   * a property of the message.
+   * These four were one remembered value each, shared by every chat — switching
+   * to Haiku for one deliberate turn quietly switched every other conversation
+   * with it, and nothing on screen said so. A pick in this bar is now filed
+   * under the chat's own key (the draft key, which survives the chat being
+   * named — `carryDraft` moves the picks with the words), and a chat that has
+   * picked nothing follows the defaults, which only the `settings` panel in the
+   * rail's foot edits. Picking here changes nothing anywhere else, which is the
+   * whole point.
    *
-   * The default is the daemon's default named again rather than imported: the
-   * daemon reads `AIDE_TASK_MODEL` and this is a browser. If the two ever
-   * disagree the picker is the honest one, because it is what somebody read
-   * before pressing send.
+   * Still NOT read off the conversation itself. Thinking has nowhere to be read
+   * from — the session store says nothing about it, and guessing from whether
+   * the last turn produced a thought would be worse than not, since a turn that
+   * thought about nothing looks identical to one that was not allowed to. The
+   * model has somewhere (every assistant message names the model that wrote it)
+   * and is not read on purpose: the chat's own pick already survives in the
+   * choice store, so reading the transcript on top of it could only resurrect a
+   * pick the human has since undone.
    */
-  const [model, setModel] = useRemembered<ChatModel>("aide.chat.model", "claude-opus-5", isChatModel)
+  const [defaults] = useChatDefaults()
+  const [chosen, choose] = useChatChoice(draftKey)
   /**
-   * Unlike the three above, this one is not sent anywhere. It is read by the
+   * Unlike the settings above, this one is not sent anywhere. It is read by the
    * transcript, out of the same key, which is why it is not in `onSend`'s
-   * message — a turn that ran while it was on is not a turn that differs.
+   * message — a turn that ran while it was on is not a turn that differs. And
+   * it is deliberately still global: how a reply is revealed is a reading
+   * preference, not a property of a chat.
    */
   const [typewriter, setTypewriter] = useRemembered<boolean>(TYPING_KEY, false, isBool)
   /**
-   * The mode this particular conversation was last driven at, which beats the
-   * remembered preference while it is open — a chat you were running on Auto in
-   * VS Code should not start asking permission just because you opened it here.
-   *
-   * Held apart from `preferred` rather than written into it, because inheriting
-   * must not quietly change your default for every other conversation. Opening
-   * one old Auto chat is not a decision to run everything on Auto.
+   * The mode this particular conversation was last driven at — a chat you were
+   * running on Auto in VS Code should not start asking permission just because
+   * you opened it here. It matters only for a chat with no pick of its own:
+   * a pick made in this bar is explicit and may not have been sent yet, so it
+   * outranks what the last turn happened to go out under.
    */
   const [inherited, setInherited] = useState<ChatMode | null>(null)
   /**
-   * A mode the chat itself carries, which outranks both of the above.
+   * A mode the chat itself carries, which outranks everything.
    *
    * Only a chat aide composed has one — `survey` — and it is on the draft rather
    * than in a prop because the draft is the thing that survives: the button
@@ -415,13 +381,20 @@ export function Composer({
    * the pane and would be gone on reload, which for a row you parked and came
    * back to is exactly when the mode still has to be right.
    *
-   * It loses to `inherited` nowhere and to `preferred` nowhere, but it does NOT
-   * survive you picking a mode by hand: `chooseMode` writes `preferred` and
-   * clears the draft's copy, because a picker that visibly says Auto while the
-   * turn goes out on Plan is worse than either mode.
+   * It does NOT survive you picking a mode by hand: `chooseMode` writes the
+   * chat's own pick and clears the draft's copy, because a picker that visibly
+   * says Auto while the turn goes out on Plan is worse than either mode.
    */
   const composed = draft?.mode ?? null
-  const mode = composed ?? inherited ?? preferred
+  // Who wins is `resolveChatSettings`, in protocol, where `pnpm smoke:queue`
+  // pins it — a precedence written inline here is one the wall's copy of this
+  // component could quietly disagree with.
+  const { mode, effort, thinking, model } = resolveChatSettings({
+    composed,
+    chosen,
+    inherited,
+    defaults,
+  })
 
   // Keyed on the session too: two conversations can carry the same mode, and
   // without the id the effect would not re-fire on the second one, leaving your
@@ -430,13 +403,14 @@ export function Composer({
     setInherited(inheritedMode)
   }, [sessionId, inheritedMode])
 
-  // Choosing from the menu is a decision, so it both overrides the inherited
-  // value and becomes the new default — and it drops the one a composed chat
-  // carried, or the picker would sit there reading Auto while the turn went out
-  // on Plan. Yours is the last word on a chat you have opened.
+  // Choosing from the menu is a decision about THIS chat: it overrides the
+  // inherited value and is filed under the chat's own key — never written to
+  // the defaults, which only the settings panel edits. It also drops the mode a
+  // composed chat carried, or the picker would sit there reading Auto while the
+  // turn went out on Plan. Yours is the last word on a chat you have opened.
   const chooseMode = (m: ChatMode) => {
     setInherited(null)
-    setPreferred(m)
+    choose({ mode: m })
     if (draft?.mode) saveDraft(draftKey, { text, attachments, mode: undefined })
   }
   const [note, setNote] = useState<string | null>(null)
@@ -607,9 +581,14 @@ export function Composer({
       {note && <p className="mt-1 font-sans text-[11px] text-warn">{note}</p>}
 
       <div className="mt-1.5 flex items-center gap-3">
-        <ModePicker mode={mode} effort={effort} onMode={chooseMode} onEffort={setEffort} />
-        <ModelPicker model={model} onModel={setModel} />
-        <ThinkingToggle on={thinking} onToggle={() => setThinking(!thinking)} />
+        <ModePicker
+          mode={mode}
+          effort={effort}
+          onMode={chooseMode}
+          onEffort={(e) => choose({ effort: e })}
+        />
+        <ModelPicker model={model} onModel={(m) => choose({ model: m })} />
+        <ThinkingToggle on={thinking} onToggle={() => choose({ thinking: !thinking })} />
         <TypingToggle on={typewriter} onToggle={() => setTypewriter(!typewriter)} />
         <ContextMeter usage={usage} />
         <div className="ml-auto flex items-center gap-2">

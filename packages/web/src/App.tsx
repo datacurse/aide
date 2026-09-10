@@ -6,6 +6,7 @@ import { usePoll } from "./usePoll.js"
 import { DaemonBar } from "./Daemon.js"
 import { Dashboard } from "./Dashboard.js"
 import { carryDraft, draftKey, openComposedChat, openNewChat } from "./drafts.js"
+import { SettingsButton } from "./Settings.js"
 import { SURVEY_PROMPT } from "./survey.js"
 import { useAppLocation } from "./useAppLocation.js"
 import { useKeyed } from "./useKeyed.js"
@@ -416,6 +417,10 @@ export function App() {
             </p>
           )}
           <DaemonBar health={health} onChanged={() => void refresh()}>
+            {/* What every chat starts on. Here rather than anywhere per-project,
+                because the defaults are about aide itself — the same scope as
+                the daemon controls it sits between. */}
+            <SettingsButton />
             <button
               type="button"
               onClick={() => setChiming(!chiming)}

@@ -828,6 +828,23 @@ Decisions already taken, which are not gaps to fill:
   than refused — that is the stale-tab case, and the cost of a model retired
   since the page loaded should be a turn on the default, not a red line over
   something somebody typed.
+- **The composer's controls are per-CHAT, with defaults in `settings`.** Mode,
+  model, effort and thinking were one remembered value each, shared by every
+  chat: switching to Haiku for one deliberate turn silently switched every
+  other conversation, and nothing on screen said so. A pick in a chat's bar is
+  now filed under that chat's draft key (`chatSettings.ts`; `carryDraft`
+  carries the picks when a draft becomes a session), and a chat that picked
+  nothing follows the defaults edited from `settings` in the rail's foot —
+  which keep the old `aide.chat.*` localStorage keys, so nobody's built-up
+  preference reset the day this changed. The precedence is
+  `resolveChatSettings` in protocol, pinned by `pnpm smoke:queue`, because
+  every rung fails quietly: composed beats all (a survey must go out on Plan),
+  a chat's own pick beats `inherited` (it is explicit and may not have been
+  sent yet), `inherited` beats the default (a chat driven on Auto elsewhere
+  must not start asking permission here), and thinking resolves with `??`,
+  never `||` — false is a choice, and `||` reads it as absence. The wire is
+  unchanged: the daemon still sees a model and mode per message, and the
+  `#followUp` revert rule above is untouched.
 - **The page does not hot-update while a turn is in flight.** A run in this repo
   rewrites the modules the page is running, and a module Fast Refresh cannot
   swap in reloads the browser out from under the turn you are watching — taking
