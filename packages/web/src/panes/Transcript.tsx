@@ -25,6 +25,7 @@ import {
   Warning,
   X,
 } from "../icons.js"
+import { ImageViewer, useImageViewer } from "../ImageViewer.js"
 import { Markdown } from "../Markdown.js"
 import { CallBlocks, CallDetail } from "../CallDetail.js"
 import { ToolTimeline } from "../ToolTimeline.js"
@@ -1068,7 +1069,7 @@ function ToolRow({ line }: { line: ToolLine }) {
  * decided by where this row actually is on screen, not by counting events.
  */
 function UserRow({ line }: { line: UserLine }) {
-  const [zoom, setZoom] = useState(false)
+  const viewer = useImageViewer()
 
   // Partitioned by what the bytes ARE, never by which field carried them. The
   // `images` field is trusted nowhere: logs written by a daemon from before the
@@ -1095,18 +1096,26 @@ function UserRow({ line }: { line: UserLine }) {
             <button
               key={i}
               type="button"
-              onClick={() => setZoom((v) => !v)}
-              title={zoom ? "Shrink it" : "Show it full size"}
-              className={zoom ? "cursor-zoom-out" : "cursor-zoom-in"}
+              onClick={() => viewer.show(i)}
+              title="See what this is, full size"
+              className="cursor-zoom-in"
             >
               <img
                 src={`data:${img.mediaType};base64,${img.data}`}
                 alt="attached image"
-                className={`w-auto rounded-sm border border-line ${zoom ? "max-h-80" : "h-12"}`}
+                className="h-12 w-auto rounded-sm border border-line"
               />
             </button>
           ))}
         </div>
+      )}
+      {viewer.open !== null && (
+        <ImageViewer
+          images={pictures}
+          index={viewer.open}
+          onIndex={viewer.show}
+          onClose={viewer.close}
+        />
       )}
       {/* Files show as named chips, not pictures: their bytes went to a folder
           on the agent's machine, and which file it was is the whole answer a

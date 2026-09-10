@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import type { Attachment, ChatOrder, ChatStatus } from "@aide/protocol"
-import { born, sortChats } from "@aide/protocol"
+import { born, isImageAttachment, sortChats } from "@aide/protocol"
 import { api, type ConversationRow, type LockHolder } from "../api.js"
 import { collectAttachments } from "../attachments.js"
 import {
@@ -17,6 +17,7 @@ import {
   type Draft,
 } from "../drafts.js"
 import { Check, Lock, Play, X } from "../icons.js"
+import { ImageViewer, useImageViewer } from "../ImageViewer.js"
 import { draftName, useAutoNames } from "../naming.js"
 import { Button, Empty, LOCKED, SELECTED } from "../ui.js"
 import { useKeyed } from "../useKeyed.js"
@@ -321,6 +322,11 @@ function CaptureBox({ projectId }: { projectId: string }) {
   const [note, setNote] = useState<string | null>(null)
   const box = useRef<HTMLTextAreaElement>(null)
   useAutoGrow(box, text, { minRows: 1, maxRows: 8 })
+  // Indexed over the pictures alone, so paging with the arrow keys cannot land
+  // on an attachment that has nothing to draw. See the composer, which does the
+  // same thing over the same shape of row.
+  const pictures = attachments.filter(isImageAttachment)
+  const viewer = useImageViewer()
 
   const submit = () => {
     if (!text.trim() && attachments.length === 0) return
@@ -364,19 +370,54 @@ function CaptureBox({ projectId }: { projectId: string }) {
     >
       {attachments.length > 0 && (
         <div className="mb-1.5 flex flex-wrap gap-1.5">
-          {attachments.map((a) => (
-            <button
-              key={a.id}
-              type="button"
-              onClick={() => edit({ attachments: attachments.filter((x) => x.id !== a.id) })}
-              title="Remove this attachment"
-              className="inline-flex items-center gap-1 rounded border border-line-soft px-1.5 py-0.5 font-sans text-[10px] text-fg-dim hover:border-err hover:text-err"
-            >
-              <span className="max-w-32 truncate">{a.name ?? "image"}</span>
-              <X className="size-2.5" />
-            </button>
-          ))}
+          {attachments.map((a) => {
+            // The chip was one button that removed the whole attachment, with
+            // no thumbnail — so a parked idea with two screenshots in it read as
+            // two rows saying "image", and the only thing you could do to either
+            // was throw it away. It splits the same way the composer's does: the
+            // picture opens, the ✕ removes, and neither is nested inside the
+            // other (a button inside a button is dropped by the browser).
+            const seat = pictures.findIndex((p) => p.id === a.id)
+            return (
+              <span
+                key={a.id}
+                className="inline-flex items-center gap-1 rounded border border-line-soft px-1.5 py-0.5 font-sans text-[10px] text-fg-dim"
+              >
+                {seat >= 0 && (
+                  <button
+                    type="button"
+                    onClick={() => viewer.show(seat)}
+                    title="See what this is, full size"
+                    className="cursor-zoom-in"
+                  >
+                    <img
+                      src={`data:${a.mediaType};base64,${a.data}`}
+                      alt=""
+                      className="size-3.5 rounded-sm object-cover"
+                    />
+                  </button>
+                )}
+                <span className="max-w-32 truncate">{a.name ?? "image"}</span>
+                <button
+                  type="button"
+                  onClick={() => edit({ attachments: attachments.filter((x) => x.id !== a.id) })}
+                  title="Remove this attachment"
+                  className="hover:text-err"
+                >
+                  <X className="size-2.5" />
+                </button>
+              </span>
+            )
+          })}
         </div>
+      )}
+      {viewer.open !== null && (
+        <ImageViewer
+          images={pictures}
+          index={viewer.open}
+          onIndex={viewer.show}
+          onClose={viewer.close}
+        />
       )}
       {/* A textarea, not an input. An input scrolls sideways once the text passes
           the width of the box, so the sentence you are in the middle of writing

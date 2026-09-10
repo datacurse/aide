@@ -3,6 +3,7 @@ import { MAX_ATTACHMENT_BYTES, collectAttachments } from "./attachments.js"
 import { useChatChoice, useChatDefaults } from "./chatSettings.js"
 import { readDraft, saveDraft, useDraft } from "./drafts.js"
 import { File as FileGlyph, Lightning, Lock, Paperclip, X } from "./icons.js"
+import { ImageViewer, useImageViewer } from "./ImageViewer.js"
 import { LOCKED } from "./ui.js"
 import { TYPING_KEY } from "./typing.js"
 import { useAutoGrow } from "./useAutoGrow.js"
@@ -514,6 +515,18 @@ export function Composer({
   const picker = useRef<HTMLInputElement>(null)
   const [dragOver, setDragOver] = useState(false)
 
+  /**
+   * The viewer indexes the PICTURES, not the attachments.
+   *
+   * A chip row can mix a screenshot with a zip, and paging through the set with
+   * the arrow keys must not stop on something that has no picture to draw. So
+   * the images are pulled out first and a chip looks up its own seat in that
+   * list, which is also how a non-image chip decides to draw the file glyph
+   * instead of a thumbnail.
+   */
+  const pictures = attachments.filter(isImageAttachment)
+  const viewer = useImageViewer()
+
   return (
     <div
       className={`shrink-0 border-t border-line bg-chrome px-3 py-2 ${
@@ -540,35 +553,58 @@ export function Composer({
     >
       {attachments.length > 0 && (
         <div className="mb-2 flex flex-wrap gap-1.5">
-          {attachments.map((a) => (
-            <span
-              key={a.id}
-              className="flex items-center gap-1.5 rounded border border-line bg-input px-1.5 py-0.5 font-sans text-[11px] text-fg-muted"
-            >
-              {isImageAttachment(a) ? (
-                <img
-                  src={`data:${a.mediaType};base64,${a.data}`}
-                  alt=""
-                  className="size-4 rounded-sm object-cover"
-                />
-              ) : (
-                <FileGlyph className="size-3.5 shrink-0 text-fg-dim" />
-              )}
-              <span className="max-w-48 truncate">
-                {a.name ?? a.mediaType.replace("image/", "")}
-              </span>
-              {kb(a.bytes)}
-              <button
-                type="button"
-                onClick={() => edit({ attachments: attachments.filter((x) => x.id !== a.id) })}
-                className="text-fg-dim hover:text-err"
-                title="Remove"
+          {attachments.map((a) => {
+            // Only the picture opens the viewer, not the whole chip. The chip
+            // already contains the remove button, and a button inside a button
+            // is markup the browser fixes by dropping the INNER one — so the ✕
+            // would go from visibly removing an attachment to silently doing
+            // nothing.
+            const seat = pictures.findIndex((p) => p.id === a.id)
+            return (
+              <span
+                key={a.id}
+                className="flex items-center gap-1.5 rounded border border-line bg-input px-1.5 py-0.5 font-sans text-[11px] text-fg-muted"
               >
-                <X className="size-3" />
-              </button>
-            </span>
-          ))}
+                {seat >= 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => viewer.show(seat)}
+                    title="See what this is, full size"
+                    className="cursor-zoom-in"
+                  >
+                    <img
+                      src={`data:${a.mediaType};base64,${a.data}`}
+                      alt=""
+                      className="size-4 rounded-sm object-cover"
+                    />
+                  </button>
+                ) : (
+                  <FileGlyph className="size-3.5 shrink-0 text-fg-dim" />
+                )}
+                <span className="max-w-48 truncate">
+                  {a.name ?? a.mediaType.replace("image/", "")}
+                </span>
+                {kb(a.bytes)}
+                <button
+                  type="button"
+                  onClick={() => edit({ attachments: attachments.filter((x) => x.id !== a.id) })}
+                  className="text-fg-dim hover:text-err"
+                  title="Remove"
+                >
+                  <X className="size-3" />
+                </button>
+              </span>
+            )
+          })}
         </div>
+      )}
+      {viewer.open !== null && (
+        <ImageViewer
+          images={pictures}
+          index={viewer.open}
+          onIndex={viewer.show}
+          onClose={viewer.close}
+        />
       )}
 
       <textarea
