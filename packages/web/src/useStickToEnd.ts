@@ -71,11 +71,18 @@ export function useStickToEnd(
 
     let dragging = false
     /**
-     * When the reader last pressed something inside the pane. Growth landing
-     * within a beat of a press is the reader OPENING something — a call
+     * A press inside the pane arms this, and the NEXT growth consumes it.
+     * Growth caused by a press is the reader OPENING something — a call
      * card, a fold, a tool row — and is the one growth the follow must not
-     * chase; see `follow`.
+     * chase; see `follow`. A one-shot flag rather than a time window,
+     * because the first version was `Date.now() - pressedAt < 250` and lost
+     * the race to any card heavy enough to matter: a whole-height Write
+     * card can take longer than that to render and lay out, its growth
+     * landed after the window closed, and the follower chased it anyway.
+     * `pressedAt` survives only to expire a stale arm — a press that caused
+     * no growth must not eat a stream beat minutes later.
      */
+    let skipGrowth = false
     let pressedAt = 0
     // A few pixels of slack: at fractional zoom the arithmetic lands half a
     // pixel short of the end, and an exact test would leave the pill on screen
@@ -95,26 +102,32 @@ export function useStickToEnd(
     }
     const follow = () => {
       if (!following.current || selecting()) return
-      // Growth right on the heels of a press is the thing the press opened,
-      // not the stream arriving — and snapping to the end then hoists what
-      // was just clicked out from under the pointer, which is how selecting
-      // a timeline dot at the bottom of a finished turn shoved the whole
-      // grid upward. Skipping one beat costs a streaming turn nothing (its
+      // Growth on the heels of a press is the thing the press opened, not
+      // the stream arriving — and snapping to the end then hoists what was
+      // just clicked out from under the pointer, which is how selecting a
+      // timeline dot at the bottom of a finished turn shoved the whole grid
+      // upward. Skipping one beat costs a streaming turn nothing (its
       // growth is continuous, and the next one follows again); whatever the
-      // press opened has pushed the end off screen anyway, so `read` retires
-      // the follow until the reader closes it or jumps back down.
-      if (Date.now() - pressedAt < 250) return
+      // press opened has pushed the end off screen anyway, so `read`
+      // retires the follow until the reader closes it or jumps back down.
+      if (skipGrowth && Date.now() - pressedAt < 2000) {
+        skipGrowth = false
+        return
+      }
+      skipGrowth = false
       el.scrollTop = el.scrollHeight
     }
     const down = (e: MouseEvent) => {
       if (e.button === 0) {
         dragging = true
+        skipGrowth = true
         pressedAt = Date.now()
       }
     }
     // Keyboard activation opens the same things a click does — the timeline
     // dots are focusable buttons — so a key inside the pane counts as a press.
     const press = () => {
+      skipGrowth = true
       pressedAt = Date.now()
     }
     // On the window, not on the pane: a drag very often ends outside the box it
