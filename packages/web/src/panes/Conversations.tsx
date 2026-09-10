@@ -21,6 +21,7 @@ import { draftName, useAutoNames } from "../naming.js"
 import { Button, Empty, LOCKED, SELECTED } from "../ui.js"
 import { useKeyed } from "../useKeyed.js"
 import { useAutoGrow } from "../useAutoGrow.js"
+import { useRemembered } from "../useRemembered.js"
 
 /**
  * The list of a project's conversations, and the rows in it.
@@ -595,17 +596,54 @@ function DoneCheck({
  * Drawn only when there is something on both sides of it. With one side empty a
  * heading is not telling two groups apart, it is a label on the only list there
  * is — and a 320px column has no room for a word that says nothing.
+ *
+ * Given `onToggle`, the heading is also the button that folds its group. The
+ * button is not a second control beside the label because the label already IS
+ * the group's one line — the count stays readable while the rows are gone, so
+ * folding hides the pile without hiding the fact that there is one. The word on
+ * the right says which way the next press goes, always drawn rather than on
+ * hover: a heading that is secretly a button is a button nobody presses.
  */
-function GroupLabel({ label, count, ruled }: { label: string; count: number; ruled?: boolean }) {
-  return (
-    <div
-      className={`flex items-baseline gap-1.5 px-3 pt-2 pb-1 font-sans text-[10px] font-semibold tracking-wide text-fg-dim uppercase ${
-        ruled ? "mt-1 border-t border-line" : ""
-      }`}
-    >
+function GroupLabel({
+  label,
+  count,
+  ruled,
+  folded,
+  onToggle,
+}: {
+  label: string
+  count: number
+  ruled?: boolean
+  /** The group's rows are hidden; the heading is all that is left of it. */
+  folded?: boolean
+  onToggle?: () => void
+}) {
+  const line = (
+    <>
       <span>{label}</span>
       <span className="font-normal normal-case tracking-normal tabular-nums">{count}</span>
-    </div>
+    </>
+  )
+  const base = `flex items-baseline gap-1.5 px-3 pt-2 pb-1 font-sans text-[10px] font-semibold tracking-wide text-fg-dim uppercase ${
+    ruled ? "mt-1 border-t border-line" : ""
+  }`
+  if (!onToggle) return <div className={base}>{line}</div>
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      title={
+        folded
+          ? `${count} archived chat${count === 1 ? "" : "s"} hidden. Click to show them.`
+          : "Hide the archived chats. The heading and the count stay."
+      }
+      className={`${base} w-full text-left hover:text-fg-muted`}
+    >
+      {line}
+      <span className="ml-auto font-normal normal-case tracking-normal">
+        {folded ? "show" : "hide"}
+      </span>
+    </button>
   )
 }
 
@@ -1156,6 +1194,25 @@ export function ConversationList({
   const archived = rows.filter((r) => r.status.state === "closed")
   /** A heading earns its line only when there is something on both sides of it. */
   const split = stillOpen.length > 0 && archived.length > 0
+  /**
+   * Whether the archived group is folded to its heading.
+   *
+   * One preference for the app, not one per project: this is a way of reading
+   * the list, like the typewriter, and a preference you set once should not
+   * have to be re-set in every project you visit.
+   *
+   * The heading survives one case the `split` rule would drop it in: a project
+   * whose every chat is archived, with the fold on. No heading there means the
+   * rows vanish with nothing left to press — a hidden group whose only control
+   * went with it — so the fold keeps its own heading even when it is the only
+   * group in the list.
+   */
+  const [hideArchived, setHideArchived] = useRemembered(
+    "aide.chats.hideArchived",
+    false,
+    (v): v is boolean => typeof v === "boolean",
+  )
+  const archivedHeading = archived.length > 0 && (stillOpen.length > 0 || hideArchived)
 
   const render = (row: ListRow) =>
     row.kind === "draft" ? (
@@ -1199,8 +1256,17 @@ export function ConversationList({
         )}
         {split && <GroupLabel label="open" count={stillOpen.length} />}
         {stillOpen.map(render)}
-        {split && <GroupLabel label="archived" count={archived.length} ruled />}
-        {archived.map(render)}
+        {archivedHeading && (
+          <GroupLabel
+            label="archived"
+            count={archived.length}
+            // No rule when there is nothing above it to be ruled off from.
+            ruled={stillOpen.length > 0}
+            folded={hideArchived}
+            onToggle={() => setHideArchived(!hideArchived)}
+          />
+        )}
+        {!hideArchived && archived.map(render)}
       </div>
     </div>
   )
