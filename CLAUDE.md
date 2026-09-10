@@ -98,7 +98,7 @@ Decisions already taken, which are not gaps to fill:
   static import is hoisted and its output would print above `repo: <path>` — the
   run would still be correct and would read as though the sections had been
   shuffled. When changing any of this, the check that matters is that the
-  assertion count does not fall: `pnpm smoke` prints 746 `ok` lines as of
+  assertion count does not fall: `pnpm smoke` prints 771 `ok` lines as of
   2026-09-10, and a refactor that quietly drops some is the failure this number
   exists to catch.
   It fell once on purpose — the card view was removed and took ~30 of its own
@@ -777,6 +777,33 @@ Decisions already taken, which are not gaps to fill:
   pins the working bar to a clock that never resets, the wedge signature, while
   the subagent's real steps churn invisibly. `pnpm smoke` pins the spawn
   judgement, both allowlists not naming the tool, and the container rule.
+- **The fold has a grid over it: one row per thing touched, one column per
+  MESSAGE.** The flat list of tool rows hid the two facts that matter about a
+  turn's work — which files it touched, and how many model round trips it
+  took, the number the profile already calls the one that predicts the wall
+  clock; ten calls in one message cost one round trip. `ToolTimeline` draws
+  both: ring for looked, disc for acted, red for failed, a spinner while a
+  call runs, and a tinted column under a red bracket for a message spent
+  redoing an earlier failure. It survives the test that removed the card,
+  because everything on it is DERIVED: `tool-timeline.ts` in protocol holds
+  message grouping (consecutive `tool.start`s are one message, because they
+  are read off one completed assistant message and appended as a batch), retry
+  marking (same tool and target after a failure in an EARLIER message —
+  same-message repeats went out together and are not retries, and a retry
+  that succeeds clears the failure), the failure classifier (ONE place over
+  the recorded result text; an unrecognised failure is a red dot with no tag,
+  degraded and honest), and the reads fold (over eight files the read-only
+  ones collapse into `reads · N files`; an edited file always keeps its row,
+  because it is the diff about to appear in the rail) — all pinned by `pnpm
+  smoke`. Subagent calls are deliberately off the grid: they interleave with
+  the main loop in real time, so drawing them on its message axis would split
+  one round trip into several — the `Agent` call is the dot, and the
+  subagent's work stays nested behind the fold. A call announced by the
+  `tool` delta draws as a spinner on the column the streaming message will
+  become; a column exists only once the model has actually sent it, and
+  nothing queued or predicted is ever drawn. Clicking a dot opens the flat
+  list at that call: the transcript stays the conversation's one full
+  reading, and the grid indexes it rather than replacing it.
 - **A tool row is drawn when the call opens, not when its event arrives.**
   `tool.start` is read off the COMPLETED assistant message, so a call the model
   announces two sentences into a reply reaches the log only once it has stopped

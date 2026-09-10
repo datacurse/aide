@@ -24,12 +24,16 @@ import { fileURLToPath } from "node:url"
 import {
   CHAT_MODELS,
   SUMMARY_FENCE,
+  buildTimeline,
   chatModeFromSdk,
   chatModelLabel,
+  classifyFailure,
   currentActivity,
   isChatModel,
   isImageAttachment,
   foldRows,
+  timelineMeta,
+  toolTarget,
   formatLocation,
   parseLocation,
   parseTurnSummary,
@@ -44,6 +48,7 @@ import {
   type Health,
   type RunEvent,
   type RunEventBody,
+  type TimelineCall,
 } from "@aide/protocol"
 import { parseProjectDoc } from "@aide/protocol/node"
 import { attachedFilesNote, fileAttachmentNames } from "./attachment-files.js"
@@ -1866,5 +1871,170 @@ console.log("\nfile attachments")
     "an untyped file routes to the agent's disk",
     !isImageAttachment({ mediaType: "application/octet-stream" }),
   )
+}
+
+console.log("\nthe tool timeline")
+{
+  // Every rule here fails invisibly on screen: a message split in two draws one
+  // round trip as several, an unmarked retry hides what a failure cost, and a
+  // fold that drops a file shows less than happened with nothing looking wrong.
+  let seq = 0
+  const ev = (body: RunEventBody): RunEvent => ({ ...body, runId: "r", seq: ++seq, ts: seq })
+  const call = (id: string, name: string, input: unknown, parent: string | null = null) =>
+    ev({ type: "tool.start", toolUseId: id, name, input, parentToolUseId: parent })
+  const done = (id: string, ok: boolean) => ev({ type: "tool.end", toolUseId: id, ok, summary: "" })
+  const say = (text: string) => ev({ type: "assistant.text", text, parentToolUseId: null })
+
+  const meta = timelineMeta([
+    ev({ type: "user.message", text: "go" }),
+    // Message 1: two calls read off one completed assistant message — they are
+    // consecutive in the log, and that adjacency IS the message boundary.
+    say("looking"),
+    call("a", "Grep", { pattern: "x" }),
+    call("b", "Read", { file_path: "src/a.ts" }),
+    done("a", true),
+    done("b", true),
+    // Message 2: an edit that fails...
+    say("editing"),
+    call("c", "Edit", { file_path: "src/a.ts" }),
+    done("c", false),
+    // ...message 3 retries it and succeeds...
+    say("again"),
+    call("d", "Edit", { file_path: "src/a.ts" }),
+    done("d", true),
+    // ...so message 4's identical edit is an ordinary call, not a retry.
+    say("more"),
+    call("e", "Edit", { file_path: "src/a.ts" }),
+    done("e", true),
+    // Message 5: a subagent's call lands between two main-loop calls and must
+    // not split them — it is on its own message axis, not this one.
+    say("fan out"),
+    call("f", "Bash", { command: "pnpm typecheck" }),
+    call("n1", "Read", { file_path: "sub.ts" }, "agent-1"),
+    call("g", "Bash", { command: "pnpm build" }),
+    // Message 6: two same-target calls in ONE message where the first fails —
+    // they went out together, before the model could see either fail.
+    say("parallel"),
+    call("j", "Write", { file_path: "src/b.ts" }),
+    call("k", "Write", { file_path: "src/b.ts" }),
+    done("j", false),
+    done("k", true),
+    // A new turn: the ordinals AND the failure memory both start over.
+    ev({ type: "user.message", text: "next" }),
+    say("fresh"),
+    call("i", "Edit", { file_path: "src/a.ts" }),
+    done("i", true),
+  ])
+  check(
+    "calls of one message share its column",
+    meta.get("a")?.message === 1 && meta.get("b")?.message === 1,
+  )
+  check("prose between calls opens a new one", meta.get("c")?.message === 2)
+  check(
+    "a failed call's re-attempt is marked a retry",
+    meta.get("d")?.retry === true,
+    "the spec forbids the UI inferring this from target matching — it is computed here, once",
+  )
+  check(
+    "and a retry that succeeded clears the failure",
+    meta.get("e")?.retry === false,
+    "a third identical call is ordinary work, not a permanent echo of one old mistake",
+  )
+  check(
+    "a subagent's call does not split the message around it",
+    meta.get("f")?.message === 5 && meta.get("g")?.message === 5,
+  )
+  check("and gets no column of its own", meta.get("n1") === undefined)
+  check(
+    "same-message repeats are not retries",
+    meta.get("k")?.retry === false,
+    "calls in one message went out together, before the model could see either fail",
+  )
+  check("a new turn restarts the ordinals", meta.get("i")?.message === 1)
+  check("and forgets the old turn's failures", meta.get("i")?.retry === false)
+
+  const at = (over: Partial<TimelineCall>): TimelineCall => ({
+    id: `t${++seq}`,
+    message: 1,
+    tool: "Read",
+    target: "f.ts",
+    status: "ok",
+    failTag: null,
+    retry: false,
+    ...over,
+  })
+
+  // Rows: by target, in first-touch order, with search and shell as their own.
+  const t1 = buildTimeline([
+    at({ tool: "Grep", target: "x" }),
+    at({ tool: "Read", target: "src/a.ts", message: 2 }),
+    at({ tool: "Bash", target: "pnpm build", message: 3 }),
+    at({ tool: "Edit", target: "src/a.ts", message: 3, status: "err", retry: false }),
+    at({ tool: "Edit", target: "src/a.ts", message: 4, retry: true }),
+  ])
+  check(
+    "rows are ordered by first touch",
+    t1.rows.map((r) => r.key).join("|") === "search|src/a.ts|shell",
+    t1.rows.map((r) => r.key).join("|"),
+  )
+  check(
+    "a file row keeps the path colour and the rest are muted",
+    t1.rows.find((r) => r.key === "src/a.ts")?.sys === false &&
+      t1.rows.find((r) => r.key === "search")?.sys === true,
+  )
+  check("a failed call marks its message", t1.failed.join(",") === "3")
+  check(
+    "a message of nothing but retries is a recovery",
+    t1.recovery.join(",") === "4",
+    "the round trips a failure cost, tinted so they read as cost",
+  )
+
+  // The fold: more than eight files and the ones only read collapse — but a
+  // file that was WRITTEN keeps its row, because it is the diff about to
+  // appear in the rail.
+  const nine = Array.from({ length: 9 }, (_, i) => at({ target: `src/f${i}.ts` }))
+  const t2 = buildTimeline([...nine, at({ tool: "Edit", target: "src/hot.ts", message: 2 })])
+  const reads = t2.rows.find((r) => r.key === "reads")
+  check("ten files fold the read-only ones", reads !== undefined && reads.label === "reads · 9 files")
+  check(
+    "but an edited file always keeps its own row",
+    t2.rows.some((r) => r.key === "src/hot.ts" && !r.sys),
+  )
+  check(
+    "eight files do not fold",
+    !buildTimeline(Array.from({ length: 8 }, (_, i) => at({ target: `src/f${i}.ts` }))).rows.some(
+      (r) => r.key === "reads",
+    ),
+  )
+
+  // A live call — announced by a delta, not yet logged — lands one past the
+  // last known column: the message it belongs to is the one still streaming.
+  const t3 = buildTimeline([at({ message: 3 }), at({ message: 0, status: "busy" })])
+  check("a streaming call lands one past the last column", t3.messages.join(",") === "3,4")
+
+  // One classifier, over what the log recorded. A failure it does not
+  // recognise is a red dot with no tag — degraded and honest — where a wrong
+  // tag is a lie in red.
+  check(
+    "a stale Edit anchor is named",
+    classifyFailure("Edit", "String to replace not found in file") === "stale anchor",
+  )
+  check(
+    "a policy refusal is named denied",
+    classifyFailure("Bash", "Permission to use Bash with command grep has been denied.") ===
+      "denied",
+  )
+  check("a missing file is named", classifyFailure("Read", "File does not exist.") === "not found")
+  check(
+    "a timeout is named",
+    classifyFailure("Bash", "Command timed out after 120000ms") === "timeout",
+  )
+  check("an unrecognised failure gets no tag", classifyFailure("Bash", "exit code 1") === null)
+
+  // The retry identity reads the raw field, so two targets that would truncate
+  // alike cannot read as one retried call.
+  check("a shell call's target is its command", toolTarget("Bash", { command: "pnpm build" }) === "pnpm build")
+  check("a file call's target is its path", toolTarget("Edit", { file_path: "src/a.ts" }) === "src/a.ts")
+  check("no readable target is empty, not invented", toolTarget("Agent", { count: 3 }) === "")
 }
 

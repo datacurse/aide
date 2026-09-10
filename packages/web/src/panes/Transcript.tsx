@@ -1,12 +1,17 @@
 import { useEffect, useMemo, useState, type ReactNode, type RefObject } from "react"
 import {
+  classifyFailure,
   foldRows,
   stripPartialTurnSummary,
   stripTurnSummary,
+  timelineMeta,
+  toolTarget,
   type MessageFile,
   type MessageImage,
   type RunEvent,
   type RunStatus,
+  type TimelineCall,
+  type TimelineMeta,
 } from "@aide/protocol"
 import {
   ArrowClockwise,
@@ -20,6 +25,7 @@ import {
   X,
 } from "../icons.js"
 import { Markdown } from "../Markdown.js"
+import { ToolTimeline } from "../ToolTimeline.js"
 import { Button, Empty, money } from "../ui.js"
 import type { LiveTool } from "../useRunStream.js"
 
@@ -94,6 +100,14 @@ interface ToolLine {
   startedAt: number
   /** Null while it is still running; the row counts up from `startedAt` instead. */
   ms: number | null
+  /**
+   * Which assistant message issued this call — 1-based within its turn — and
+   * whether it re-attempts a call that failed in an earlier message. The two
+   * facts the timeline grid draws; `timelineMeta` in protocol derives both.
+   * 0 and false for a call announced by a delta whose event has not landed.
+   */
+  message: number
+  retry: boolean
 }
 /**
  * The snapshot taken before the agent was let near the working tree.
@@ -375,7 +389,11 @@ function foldSteps(lines: Line[], live: boolean): Line[] {
   })
 }
 
-function toLines(events: RunEvent[], live?: LiveText | null): Line[] {
+function toLines(
+  events: RunEvent[],
+  live: LiveText | null | undefined,
+  meta: Map<string, TimelineMeta>,
+): Line[] {
   const lines: Line[] = []
   const byToolId = new Map<string, ToolLine>()
   const byRequestId = new Map<string, PermissionLine>()
@@ -449,6 +467,8 @@ function toLines(events: RunEvent[], live?: LiveText | null): Line[] {
           name: e.name,
           input: e.input,
           nested: !!e.parentToolUseId,
+          message: meta.get(e.toolUseId)?.message ?? 0,
+          retry: meta.get(e.toolUseId)?.retry ?? false,
           ok: null,
           summary: "",
           // The delta's stamp when there was one. This event is appended once
@@ -710,6 +730,10 @@ function toLines(events: RunEvent[], live?: LiveText | null): Line[] {
       // tool and counts, and fills in what it touched when the event lands.
       input: null,
       nested: false,
+      // Not yet logged, so no message ordinal — the grid resolves 0 to the
+      // column the streaming message will become.
+      message: 0,
+      retry: false,
       ok: null,
       summary: "",
       startedAt: t.startedAt,
@@ -767,27 +791,6 @@ function took(ms: number): string {
 const SLOW_TOOL_MS = 2000
 
 /**
- * Tools whose calls are named in a closed fold rather than merely counted.
- *
- * A `Grep` that matched nothing is derivation and a `Read` is how the agent
- * looked; neither predicts anything you are about to review. A write does — the
- * files named here are the files about to appear in the rail, so folding them
- * into "9 steps" would hide the one part of a turn that says what the diff will
- * be. This is what stops the fold from being the card again.
- */
-const WRITING_TOOLS = new Set(["Edit", "Write", "NotebookEdit"])
-
-/** `3 Grep · 2 Bash`, newest concern first: what the run was made of. */
-function summarizeSteps(steps: ToolLine[]): string {
-  const counts = new Map<string, number>()
-  for (const s of steps) counts.set(s.name, (counts.get(s.name) ?? 0) + 1)
-  return [...counts]
-    .sort((a, b) => b[1] - a[1])
-    .map(([name, n]) => (n > 1 ? `${n} ${name}` : name))
-    .join(" · ")
-}
-
-/**
  * A folded run of tool calls: what it was made of, what it wrote, how long it
  * took. Closed by default — see `StepsLine` for why this is not the card.
  */
@@ -840,80 +843,88 @@ function CommitFold({ line }: { line: StepsLine & { commit: NonNullable<StepsLin
 
 function StepsRow({ line }: { line: StepsLine }) {
   const [open, setOpen] = useState(false)
-  const failed = line.steps.filter((s) => s.ok === false).length
   // Summed rather than measured end-to-end: calls in one message run
   // concurrently, so the span would report wall-clock the turn did not spend
   // waiting on these. The same distinction the dashboard draws between its
   // `agent time` tile and its share bar.
   const ms = line.steps.reduce((n, s) => n + (s.ms ?? 0), 0)
-  const wrote = [
-    ...new Set(
-      line.steps
-        .filter((s) => WRITING_TOOLS.has(s.name))
-        .map((s) => describeInput(s.name, s.input))
-        .filter(Boolean),
-    ),
-  ]
+  /**
+   * The grid charts the main loop only. A subagent's calls interleave with it
+   * in real time, so drawing them on the same message axis would split one
+   * round trip into several — the `Agent` call itself is the dot, and the
+   * subagent's work stays behind the fold, nested where it always was. What
+   * the closed row used to spell out — which tools, what was written, what
+   * failed — the grid now shows persistently: edited files always keep their
+   * own row, and a failure is a red dot you cannot scroll past.
+   */
+  const gridCalls: TimelineCall[] = line.steps
+    .filter((s) => !s.nested)
+    .map((s) => ({
+      id: s.toolUseId,
+      message: s.message,
+      tool: s.name,
+      target: toolTarget(s.name, s.input),
+      status: s.ok === null ? "busy" : s.ok ? "ok" : "err",
+      failTag: s.ok === false ? classifyFailure(s.name, s.summary) : null,
+      retry: s.retry,
+    }))
 
-  if (open) {
-    return (
-      <div>
-        <button
-          onClick={() => setOpen(false)}
-          className="flex w-full min-w-0 items-baseline gap-2 rounded px-1 py-0.5 text-left text-[11px] text-fg-dim hover:bg-hover hover:text-fg-muted"
-        >
-          <Minus className={MARK} />
-          <span className="shrink-0">
-            hide {line.steps.length > 0 ? `${line.steps.length} step${line.steps.length === 1 ? "" : "s"}` : "thinking"}
-          </span>
-        </button>
-        {/* The originals, in the order they happened — not a rendering of the
-            summary. This is the whole claim that nothing is lost by folding, and
-            `rows` rather than steps-then-asides is what keeps it true: joining
-            the two lists put every remark after every call, so an opened fold
-            said "Clean." about work that had not run yet. */}
-        {line.rows.map((r) => renderLine(r))}
-      </div>
+  /**
+   * A dot was clicked: the flat list is the detail view, so open it and put
+   * that call's row mid-pane. Two frames, because the rows do not exist in the
+   * document until the open has rendered and painted.
+   */
+  const openCall = (id: string) => {
+    setOpen(true)
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        const el = document.querySelector(`[data-callid="${CSS.escape(id)}"]`)
+        if (!(el instanceof HTMLElement)) return
+        el.scrollIntoView({ block: "center", behavior: "smooth" })
+        el.animate(
+          [{ backgroundColor: "rgba(240, 210, 122, 0.18)" }, { backgroundColor: "transparent" }],
+          { duration: 900 },
+        )
+      }),
     )
   }
 
-  // 11px, the same as the rows it stands for — a fold that shouted louder than
-  // its own contents would be the derivation getting MORE weight for being
-  // collapsed.
   return (
-    <button
-      onClick={() => setOpen(true)}
-      className="flex w-full min-w-0 items-baseline gap-2 rounded px-1 py-0.5 text-left text-[11px] hover:bg-hover"
-      title={line.steps.map((s) => `${s.name} ${describeInput(s.name, s.input)}`).join("\n")}
-    >
-      {/* The same caret the file tree opens a folder with, for the same gesture. */}
-      <CaretRight className={`${MARK} text-fg-dim`} />
-      {/* A fold can hold no calls at all — a turn that reasons at length and then
-          answers — so the count names whichever it actually contains rather than
-          reporting "0 steps" over a page of hidden thinking. */}
-      <span className="shrink-0 text-fg-muted">
-        {line.steps.length > 0
-          ? `${line.steps.length} step${line.steps.length === 1 ? "" : "s"}`
-          : `thought ${line.thought > 1 ? `${line.thought}×` : ""}`.trim()}
-      </span>
-      <span className="min-w-0 truncate text-fg-dim">
-        {summarizeSteps(line.steps)}
-        {/* Named, not just counted: a fold that hid six blocks of reasoning
-            behind a bare call count would be understating what is inside it. */}
-        {line.steps.length > 0 && line.thought > 0 && (
-          <span> · thought {line.thought > 1 ? `${line.thought}×` : ""}</span>
-        )}
-        {wrote.length > 0 && <span className="text-syn-string"> · wrote {wrote.join(", ")}</span>}
-      </span>
-      {/* A failure inside a closed fold has to be visible from outside it, or the
-          fold hides the one row that explains what happened next. */}
-      {failed > 0 && (
-        <span className="shrink-0 text-err">
-          {failed} failed
+    <div>
+      {gridCalls.length > 0 && <ToolTimeline calls={gridCalls} onOpenCall={openCall} />}
+      {/* 11px, the same as the rows it stands for — a fold that shouted louder
+          than its own contents would be the derivation getting MORE weight for
+          being collapsed. A fold can hold no calls at all — a turn that
+          reasons at length and then answers — so the label names whichever it
+          actually contains rather than reporting "0 steps" over a page of
+          hidden thinking. */}
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full min-w-0 items-baseline gap-2 rounded px-1 py-0.5 text-left text-[11px] text-fg-dim hover:bg-hover hover:text-fg-muted"
+      >
+        {open ? <Minus className={MARK} /> : <CaretRight className={`${MARK} text-fg-dim`} />}
+        <span className="shrink-0">
+          {open ? "hide" : "show"}{" "}
+          {line.steps.length > 0
+            ? `${line.steps.length} step${line.steps.length === 1 ? "" : "s"}`
+            : "thinking"}
         </span>
-      )}
-      {ms >= SLOW_TOOL_MS && <span className="shrink-0 text-fg-dim">{took(ms)}</span>}
-    </button>
+        {/* Named, not just counted: the grid draws calls and not reasoning, so
+            the thinking is the one thing this line still has to admit to. */}
+        {!open && line.thought > 0 && (
+          <span className="min-w-0 truncate">
+            thought {line.thought > 1 ? `${line.thought}×` : ""}
+          </span>
+        )}
+        {!open && ms >= SLOW_TOOL_MS && <span className="shrink-0">{took(ms)}</span>}
+      </button>
+      {/* The originals, in the order they happened — not a rendering of the
+          summary. This is the whole claim that nothing is lost by folding, and
+          `rows` rather than steps-then-asides is what keeps it true: joining
+          the two lists put every remark after every call, so an opened fold
+          said "Clean." about work that had not run yet. */}
+      {open && line.rows.map((r) => renderLine(r))}
+    </div>
   )
 }
 
@@ -936,7 +947,8 @@ function ToolRow({ line }: { line: ToolLine }) {
   const detailed = line.input !== null
 
   return (
-    <div className={line.nested ? "ml-4 border-l border-line pl-3" : ""}>
+    // `data-callid` is how a clicked timeline dot finds this row to scroll to.
+    <div data-callid={line.toolUseId} className={line.nested ? "ml-4 border-l border-line pl-3" : ""}>
       <div
         onClick={() => detailed && toggleUnlessSelecting(setOpen)}
         className={`flex min-w-0 items-baseline gap-2 rounded px-1 py-0.5 hover:bg-hover ${detailed ? "cursor-pointer" : ""}`}
@@ -1603,7 +1615,10 @@ export function Transcript({
   // happened to leave — the number would mean something different on every turn.
   // `busy`, NOT `!!live`. See the prop: `live` empties between blocks, so using
   // it here made the fold boundary jump on every one of those gaps.
-  const lines = useMemo(() => foldSteps(toLines(events, live), busy ?? false), [events, live, busy])
+  const lines = useMemo(
+    () => foldSteps(toLines(events, live, timelineMeta(events)), busy ?? false),
+    [events, live, busy],
+  )
   const shown = tail !== undefined && lines.length > tail ? lines.slice(-tail) : lines
   /**
    * The transcript's own element, held as state rather than in a ref: it is not
