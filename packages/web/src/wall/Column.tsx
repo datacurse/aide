@@ -23,6 +23,7 @@ import {
   type Draft,
 } from "../drafts.js"
 import { ArrowDown, CaretRight, Check, EyeSlash, GitCommit, Lock, X } from "../icons.js"
+import { isCommitRun } from "../liveCommit.js"
 import { draftName } from "../naming.js"
 import { Transcript, type LiveText } from "../panes/Transcript.js"
 import { Button, heldBy, LOCKED } from "../ui.js"
@@ -386,6 +387,20 @@ export function WallColumn({
   const busy = runId !== null && !finished
 
   /**
+   * The adopted run is the auto-commit, which is background work and not
+   * watched — the same rule, from the same function, as the conversation pane.
+   * See `isCommitRun`. A column is the surface this matters most on: it exists
+   * to be glanced at across projects, and a commit narrating itself in one
+   * column reads as that project needing something when it needs nothing.
+   */
+  const commitRun = useMemo(
+    () => isCommitRun(turnEvents, runId, heldRunId, holder?.held ?? false),
+    [turnEvents, runId, heldRunId, holder?.held],
+  )
+  /** A turn worth drawing is in flight — the commit is deliberately not one. */
+  const watching = busy && !commitRun
+
+  /**
    * The chat, oldest first, with the live turn folded in.
    *
    * The transcript on disk plus this sitting's events, exactly as the pane does
@@ -418,6 +433,15 @@ export function WallColumn({
   }, [view, turnEvents])
 
   /**
+   * What the column draws — everything, minus the commit while it is landing.
+   * The record appears whole once the run is over, exactly as in the pane.
+   */
+  const shownEvents = useMemo(
+    () => (busy && commitRun ? events.filter((e) => e.runId !== runId) : events),
+    [events, busy, commitRun, runId],
+  )
+
+  /**
    * The reply arriving right now.
    *
    * Handed to the transcript rather than drawn after it, so the finished copy
@@ -428,10 +452,10 @@ export function WallColumn({
    */
   const liveText = useMemo<LiveText | null>(
     () =>
-      busy && runId && (draft.text || draft.thinking || draft.tools.length)
+      watching && runId && (draft.text || draft.thinking || draft.tools.length)
         ? { runId, thinking: draft.thinking, text: draft.text, tools: draft.tools }
         : null,
-    [busy, runId, draft.text, draft.thinking, draft.tools],
+    [watching, runId, draft.text, draft.thinking, draft.tools],
   )
 
   /**
@@ -656,7 +680,7 @@ export function WallColumn({
             arrives — so the follow would never fire and a streaming turn would
             write off the bottom, which is the bug this whole hook exists for. */}
         <div ref={setInner}>
-        {events.length === 0 ? (
+        {shownEvents.length === 0 ? (
           /*
            * An empty chat is not always an empty box, and conflating the two is
            * how a message goes missing. A draft that has been sent has had its
@@ -698,9 +722,9 @@ export function WallColumn({
           // Reading further back is what the panes are for, and the header still
           // goes there.
           <Transcript
-            events={events}
+            events={shownEvents}
             live={liveText}
-            busy={busy}
+            busy={watching}
             tail={WALL_TAIL}
             scroller={body}
           />
@@ -713,7 +737,7 @@ export function WallColumn({
             writing. Smaller and cornered tighter than the pane's, because a
             column is a fifth of the width and the pane's pill would cover the
             text it is offering to take you past. */}
-        {!atEnd && events.length > 0 && (
+        {!atEnd && shownEvents.length > 0 && (
           <button
             type="button"
             onClick={toBottom}
@@ -732,7 +756,10 @@ export function WallColumn({
       )}
 
       <Composer
-        busy={busy}
+        // `watching`, not `busy` — an adopted commit run must not put the box
+        // into its working state; a send under a commit queues. Same reasoning
+        // as the pane's composer.
+        busy={watching}
         // Not drawn on a column. The meter is a per-conversation reading and this
         // is a strip a few hundred pixels wide whose every row has to earn its
         // place; the panes have it, one click away.

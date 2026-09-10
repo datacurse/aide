@@ -1250,23 +1250,6 @@ function CommitMessageRow({ message, model }: { message: string; model: string }
 }
 
 /**
- * The message as it is being typed, in the box the finished one lands in.
- *
- * Deliberately not the markdown blob a chat turn's draft renders into. A commit
- * message is preformatted text with a 72-column body, and rendering it as prose
- * for ten seconds and then as a `pre` reflows the one thing the reader is in the
- * middle of reading.
- */
-export function CommitMessageDraft({ text, model }: { text: string; model: string }) {
-  return (
-    <CommitMessageBox
-      message={text}
-      note={<span>{model ? `${model} is writing it` : "being written"}</span>}
-    />
-  )
-}
-
-/**
  * This turn changed the daemon, so the daemon you are talking to is behind.
  *
  * Written as what happens NEXT, not as what is true now, and the distinction is

@@ -21,7 +21,8 @@ import { useRemembered } from "../useRemembered.js"
 import { useRunStream } from "../useRunStream.js"
 import { useStickToEnd } from "../useStickToEnd.js"
 import { TYPING_KEY, useTyped } from "../typing.js"
-import { CommitMessageDraft, Transcript, type LiveText } from "./Transcript.js"
+import { isCommitRun } from "../liveCommit.js"
+import { Transcript, type LiveText } from "./Transcript.js"
 
 /**
  * The open conversation.
@@ -102,13 +103,9 @@ export function ConversationPane({
   /**
    * A run started somewhere else that belongs on this transcript.
    *
-   * The commit is the only one: it is pressed in the git rail, which is beside
-   * this pane rather than inside it, so it streams here — the only pane wide
-   * enough to read a commit message being written and a failed check's output.
-   *
-   * It arrives whatever is open, including an unstarted chat and nothing at all,
-   * because a commit no longer needs a conversation. That is not a mismatch: the
-   * pane is where runs are watched, and this is a run.
+   * The commit is the only one that ever arrived this way, and a commit is no
+   * longer watched live — see `isCommitRun` — so adopting one today subscribes
+   * to it silently and shows its record when it ends.
    */
   adoptRunId?: string | null
   /**
@@ -328,30 +325,34 @@ export function ConversationPane({
   )
   const busy = runId !== null && !finished
 
-  // The point of the whole conversation pane is that you leave it running and
-  // come back. Something has to say when to come back.
-  useDoneChime(busy, runId)
-
   /**
-   * The commit run's drafting model, while it is still writing the message.
+   * The run on screen is the auto-commit, not a conversation's turn.
    *
-   * A commit is the one run that streams text without being a chat turn, so the
-   * text arriving during it belongs in the box the finished message lands in
-   * rather than in the transcript. Null once `commit.drafted` has landed,
-   * because that box is now the real one.
+   * Committing is background work and is not watched — see `isCommitRun`. While
+   * this is true and the run is in flight, the pane draws NOTHING about it: no
+   * step rows, no streaming message box, no working bar, no chime when it ends,
+   * and the composer stays open because a send under a commit queues rather
+   * than waits. The record — the folded "committed abc1234" line, or a failed
+   * check's output — appears in the transcript the moment the run is over,
+   * which is where a commit explains itself.
    *
-   * It reads `commit.drafting` and not "this run has emitted a `commit.step`",
-   * which is what it used to do and what a commit outgrew: a failing check now
-   * gets one agent turn inside the same run, and the fix's own words were drawn
-   * into the message box under the drafter's name.
+   * The holder as two primitives rather than the object, for the reason the
+   * chat list extracts them: `holder` is parsed out of a fresh JSON body every
+   * 1.5 seconds, and the fact it carries almost never changes.
    */
-  const draftingCommit = useMemo<string | null>(() => {
-    if (!runId) return null
-    const mine = turnEvents.filter((e) => e.runId === runId)
-    if (mine.some((e) => e.type === "commit.drafted")) return null
-    const drafting = mine.findLast((e) => e.type === "commit.drafting")
-    return drafting?.type === "commit.drafting" ? drafting.model : null
-  }, [turnEvents, runId])
+  const holderRunId = holder?.runId ?? null
+  const holderHeld = holder?.held ?? false
+  const commitRun = useMemo(
+    () => isCommitRun(turnEvents, runId, holderRunId, holderHeld),
+    [turnEvents, runId, holderRunId, holderHeld],
+  )
+  /** A turn worth watching is in flight — the commit is deliberately not one. */
+  const watching = busy && !commitRun
+
+  // The point of the whole conversation pane is that you leave it running and
+  // come back. Something has to say when to come back. Never for a commit: a
+  // chime for a run nothing on screen showed is an alarm with no visible cause.
+  useDoneChime(watching, runId)
 
   /**
    * A commit that stopped because the project's checks failed.
@@ -463,14 +464,25 @@ export function ConversationPane({
     return [...history, ...turnEvents]
   }, [view?.events, turnEvents])
 
+  /**
+   * What the transcript draws: everything, minus the commit while it is
+   * landing. The events keep accumulating underneath — `verifyRefused` and the
+   * derivations above read the unfiltered log — so when the run finishes this
+   * filter stands down and the closed record appears in one piece.
+   */
+  const shownEvents = useMemo(
+    () => (busy && commitRun ? events.filter((e) => e.runId !== runId) : events),
+    [events, busy, commitRun, runId],
+  )
+
   const [showAll, setShowAll] = useState(false)
-  const truncating = !showAll && events.length > VISIBLE_TAIL
+  const truncating = !showAll && shownEvents.length > VISIBLE_TAIL
 
   /**
    * The reply being typed, handed to the transcript rather than rendered after
    * it, so that the finished copy of it lands in the same element. See
-   * `LiveText`. A commit run is the exception: it streams a commit message, not
-   * a reply, and that has its own box below.
+   * `LiveText`. Never for a commit run: what it streams is a commit message,
+   * and what a repair turn under it says is part of the commit too.
    */
   /**
    * Whether the reply is revealed at a pace or dumped as it arrives.
@@ -510,22 +522,10 @@ export function ConversationPane({
    */
   const typing = useMemo<LiveText | null>(
     () =>
-      busy &&
-      runId &&
-      draftingCommit === null &&
-      (draft.text || draft.thinking || draft.tools.length)
+      watching && runId && (draft.text || draft.thinking || draft.tools.length)
         ? { runId, thinking: typedThinking, text: typedText, tools: draft.tools }
         : null,
-    [
-      busy,
-      runId,
-      draftingCommit,
-      draft.text,
-      draft.thinking,
-      draft.tools,
-      typedText,
-      typedThinking,
-    ],
+    [watching, runId, draft.text, draft.thinking, draft.tools, typedText, typedThinking],
   )
 
   const scroller = useRef<HTMLDivElement>(null)
@@ -644,9 +644,9 @@ export function ConversationPane({
               the first word of the answer, which reads as the page reloading
               under the turn. The live stream IS the conversation at that moment;
               there is nothing to wait for. */}
-          {events.length === 0 && openSessionId && view === null && !error ? (
+          {shownEvents.length === 0 && openSessionId && view === null && !error ? (
             <Empty>Reading…</Empty>
-          ) : events.length === 0 ? (
+          ) : shownEvents.length === 0 ? (
             <Empty>
               {projectId
                 ? "Say something. This runs in the project root and can edit it."
@@ -677,20 +677,16 @@ export function ConversationPane({
                 </div>
               )}
               <Transcript
-                events={events}
+                events={shownEvents}
                 onPermission={busy ? answer : undefined}
                 live={typing}
-                busy={busy}
+                busy={watching}
                 tail={showAll ? undefined : VISIBLE_TAIL}
                 // So the question you are under can pin itself to the top edge of
                 // this box. It is the only thing in there that needs to know where
                 // the box's edge is.
                 scroller={scroller}
-              >
-                {busy && draftingCommit !== null && draft.text ? (
-                  <CommitMessageDraft text={draft.text} model={draftingCommit} />
-                ) : null}
-              </Transcript>
+              />
             </div>
           )}
           {error && <p className="mt-2 font-sans text-[11px] text-err">{error}</p>}
@@ -714,7 +710,9 @@ export function ConversationPane({
         )}
       </div>
 
-      {busy && <WorkingBar events={turnEvents} runId={runId} outputTokens={draft.outputTokens} />}
+      {watching && (
+        <WorkingBar events={turnEvents} runId={runId} outputTokens={draft.outputTokens} />
+      )}
 
       {/* Between the transcript and the box, which is the order the decision is
           made in: you read what went wrong, then you decide whether to send it
@@ -733,7 +731,11 @@ export function ConversationPane({
 
       {projectId && (
         <Composer
-          busy={busy}
+          // `watching`, not `busy`: an adopted commit run must not put the box
+          // into its working state — a send under a commit queues, and a stop
+          // button for a run nothing on screen shows is a control with no
+          // visible referent.
+          busy={watching}
           usage={usage}
           sessionId={sessionId}
           // The open chat's box, whether it has a session yet or not: an
