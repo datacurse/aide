@@ -150,7 +150,11 @@ Decisions already taken, which are not gaps to fill:
   from that event — restored without data, it would silently resend a message
   that promised two files with neither. `pnpm smoke` pins the two halves that
   fail quietly: a filename that collides or escapes the folder, and a note that
-  lists the wrong paths.
+  lists the wrong paths. The transcript partitions `user.message.images` by
+  `isImageAttachment` instead of trusting the field: a daemon from before the
+  split filed every attachment under `images`, those logs are permanent, and an
+  `<img>` over an HTML file's bytes draws a broken icon captioned by its own
+  alt text — which is what "pasted screenshot" on a dropped file was.
 - **No merge, no `land`.** Recoverability is the checkpoint, not an unmerged
   branch.
 - **A history list, but no repository browser.** The uncommitted rail's lower

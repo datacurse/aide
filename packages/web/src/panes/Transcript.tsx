@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode, type RefObject } from "re
 import {
   classifyFailure,
   foldRows,
+  isImageAttachment,
   stripPartialTurnSummary,
   stripTurnSummary,
   timelineMeta,
@@ -1008,15 +1009,28 @@ function ToolRow({ line }: { line: ToolLine }) {
 function UserRow({ line }: { line: UserLine }) {
   const [zoom, setZoom] = useState(false)
 
+  // Partitioned by what the bytes ARE, never by which field carried them. The
+  // `images` field is trusted nowhere: logs written by a daemon from before the
+  // image/file split filed every attachment under it, and those logs are
+  // permanent — an <img> over an HTML file's bytes draws a broken icon
+  // captioned by its own alt text, which reads as the app lying about what was
+  // attached. A misfiled entry has no name to show, so its chip says the media
+  // type, which is everything the log kept.
+  const pictures = line.images.filter(isImageAttachment)
+  const chips = [
+    ...line.images.filter((i) => !isImageAttachment(i)).map((i) => i.mediaType),
+    ...line.files.map((f) => f.name),
+  ]
+
   return (
     <div
       data-question=""
       className="my-2 border-b-line border-l-syn-var border-b border-l-2 bg-chrome px-3 py-1.5"
     >
       <div className="mb-0.5 font-sans text-[10px] tracking-wide text-syn-var uppercase">you</div>
-      {line.images.length > 0 && (
+      {pictures.length > 0 && (
         <div className="mb-1.5 flex flex-wrap gap-1.5">
-          {line.images.map((img, i) => (
+          {pictures.map((img, i) => (
             <button
               key={i}
               type="button"
@@ -1026,7 +1040,7 @@ function UserRow({ line }: { line: UserLine }) {
             >
               <img
                 src={`data:${img.mediaType};base64,${img.data}`}
-                alt="pasted screenshot"
+                alt="attached image"
                 className={`w-auto rounded-sm border border-line ${zoom ? "max-h-80" : "h-12"}`}
               />
             </button>
@@ -1036,14 +1050,14 @@ function UserRow({ line }: { line: UserLine }) {
       {/* Files show as named chips, not pictures: their bytes went to a folder
           on the agent's machine, and which file it was is the whole answer a
           reader needs here. */}
-      {line.files.length > 0 && (
+      {chips.length > 0 && (
         <div className="mb-1.5 flex flex-wrap gap-1.5">
-          {line.files.map((f, i) => (
+          {chips.map((label, i) => (
             <span
               key={i}
               className="inline-flex items-center gap-1 rounded border border-line bg-input px-1.5 py-0.5 font-sans text-[11px] text-fg-muted"
             >
-              {f.name}
+              {label}
             </span>
           ))}
         </div>

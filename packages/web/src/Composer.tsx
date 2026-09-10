@@ -608,7 +608,7 @@ export function Composer({
             ? "Claude is working…"
             : blocked
               ? "Held — the line below says why."
-              : "Ask, paste a screenshot, or drop files in"
+              : "Ask, or attach any kind of file — paste, drop, or the clip"
         }
         className="w-full resize-none rounded border border-line-soft bg-input px-2 py-1.5 font-sans text-[13px] leading-relaxed outline-none placeholder:text-fg-dim focus:border-accent"
       />
@@ -635,7 +635,7 @@ export function Composer({
         <button
           type="button"
           onClick={() => picker.current?.click()}
-          title="Attach files — or drop them anywhere on this bar"
+          title="Attach files of any kind — images go to the model as pictures, everything else lands on the agent's disk for it to read. Or drop them anywhere on this bar"
           className="rounded p-1 text-fg-muted hover:bg-hover hover:text-fg"
         >
           <Paperclip className="size-3.5" />
