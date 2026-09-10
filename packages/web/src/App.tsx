@@ -446,16 +446,17 @@ export function App() {
       <aside className="flex w-80 shrink-0 flex-col border-r border-line bg-chrome">
         <PaneHeader title="chats">
           <Button
-            // The same sentence the ▶ on a parked row gets, because they are the
-            // same refusal: the daemon turns away a chat opened on top of work
-            // in flight or edits nobody has committed. Locked rather than
-            // hidden, and locked rather than merely dimmed — what is in the way
-            // is one pane over, and the padlock is what sends you to look at it.
+            // NOT locked while a run holds the checkout, and that is the point:
+            // this creates a local record, the same act as parking words in the
+            // capture box above — which has never been gated. The lock lands
+            // where the first turn is SENT: the ▶ on a parked row and the
+            // composer both go dark under a holder. Locking creation too made
+            // the two ways of making a chat disagree, and the capture box was
+            // right.
             //
             // `disabled` stays for having no project, which is not a lock: there
             // is nothing holding it and nothing to go and clear.
             disabled={!project}
-            locked={projectHeld}
             onClick={() => {
               if (!project) return
               navigate({ draftId: openNewChat(project.id) })
@@ -480,8 +481,9 @@ export function App() {
             are still editable — they are in the transcript and the next message
             is yours — and `survey.ts` is where they are changed for good.
 
-            Same lock as `new`, from the same `projectHeld`: one agent has the
-            checkout, and a survey is an agent.
+            Locked under a holder where `new` is not, because they make
+            different things: `new` parks a local record, this SENDS on the
+            press. One agent has the checkout, and a survey is an agent.
           */}
           <Button
             disabled={!project}

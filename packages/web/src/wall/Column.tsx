@@ -645,8 +645,10 @@ export function WallColumn({
             {openTitle}
           </span>
         </button>
+        {/* Not locked under a holder: this parks a local record, the same act
+            the panes' capture box has never gated. The lock is on the SEND —
+            the composer below goes dark under a holder. */}
         <Button
-          locked={gates.start}
           onClick={() => setOpen({ sessionId: null, draftId: openNewChat(project.id) })}
           title="An empty chat in this project"
         >

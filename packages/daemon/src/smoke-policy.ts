@@ -841,8 +841,12 @@ console.log("\nwhat a project's gates refuse")
   const free = projectGates({ holder: null, held })
   check("a free project refuses nothing", !free.start && !free.push && !free.send)
 
+  // `start` gates a chat's first SEND — the ▶ and the survey button. Creating
+  // a parked row is never gated: it is a local record, the same act as the
+  // capture box, and locking the `new` button on this rule is the bug where
+  // typing into the box was the workaround for the button beside it.
   const busy = projectGates({ holder, held })
-  check("a holder stops a new chat", busy.start === held("a chat"))
+  check("a holder stops a chat's first send", busy.start === held("a chat"))
   check(
     "and a push",
     busy.push === held("a chat"),
@@ -858,7 +862,7 @@ console.log("\nwhat a project's gates refuse")
   const elsewhere = projectGates({ holder, openRunId: "run-9", held })
   check("a run somewhere else does", elsewhere.send === held("a chat"))
   check(
-    "but even my own turn blocks a NEW chat",
+    "but even my own turn blocks another chat's first send",
     watching.start === held("a chat"),
     "the daemon refuses a fresh turn under any holder, ours included",
   )
@@ -870,7 +874,7 @@ console.log("\nwhat a project's gates refuse")
   // Committing was automated precisely so nobody waits on it.
   const committing = projectGates({ holder: { ...holder, held: true }, held })
   check("a commit landing does not stop a send", committing.send === null)
-  check("nor a new chat", committing.start === null)
+  check("nor a chat's first send", committing.start === null)
   check(
     "but it does hold the push",
     committing.push === held("a chat"),

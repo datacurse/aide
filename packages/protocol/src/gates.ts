@@ -56,12 +56,19 @@ export interface GateHolder {
 
 export interface ProjectGates {
   /**
-   * Why a new chat cannot be started here, or null.
+   * Why a chat's first turn cannot be SENT here, or null — the ▶ on a parked
+   * row, and the survey button, which sends on the press.
    *
    * One rule: something has the checkout. A run writes files nobody can
    * anticipate and the rail only learns of them a poll after they land, so a
    * chat admitted beside a run in flight takes a tree that is being written
    * under it as its baseline.
+   *
+   * What this deliberately does NOT gate is CREATING a chat. A parked row is a
+   * local record that touches nothing the lock protects, and the capture box
+   * has never been gated — so a `new` button reading this rule refused an act
+   * the box beside it allowed, and the workaround was to type into the box.
+   * Creation is free everywhere; the lock lands where the turn is sent.
    */
   start: string | null
   /**
