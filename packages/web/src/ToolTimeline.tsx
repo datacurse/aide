@@ -67,7 +67,13 @@ function Connector({ gid, w, segs }: { gid: string; w: number; segs: Segment[] }
               x2={s.x2}
               y2={0}
             >
+              {/* Through a neutral grey midpoint, not straight across: SVG
+                  gradients interpolate in sRGB, and the direct road from
+                  green to red passes through a muddy orange that reads as a
+                  third state the row never had. Desaturating down and back
+                  up reads as a CHANGE instead of a colour. */}
               <stop offset="0" style={{ stopColor: `var(${s.c1})` }} stopOpacity={0.5} />
+              <stop offset="0.5" style={{ stopColor: "var(--color-fg-dim)" }} stopOpacity={0.5} />
               <stop offset="1" style={{ stopColor: `var(${s.c2})` }} stopOpacity={0.5} />
             </linearGradient>
           ),
