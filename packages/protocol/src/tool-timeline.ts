@@ -55,8 +55,15 @@ export interface Timeline {
   rows: TimelineRow[]
   /** Messages whose calls are ALL retries: round trips a failure cost. */
   recovery: number[]
-  /** Messages with at least one failed call. */
+  /** Messages with at least one failed call — refusals included. */
   failed: number[]
+  /**
+   * Of those, the ones where EVERY failure was aide refusing — drawn amber
+   * rather than red. All of them, because one genuine fault in a column makes
+   * that column a fault: a message that was half refused and half broken must
+   * not be coloured as though nothing went wrong. See `isRefusal`.
+   */
+  refused: number[]
   total: number
 }
 
@@ -158,6 +165,25 @@ export function classifyFailure(tool: string, note: string): string | null {
     return "not found"
   return null
 }
+
+/**
+ * A failure that is aide REFUSING, rather than something breaking.
+ *
+ * The two deserve different colours and did not get them. A policy denial —
+ * the shell policy turning down `grep`, a Plan turn declining to edit — is the
+ * system working exactly as designed, and the run routes around it in one round
+ * trip. A tool that actually blew up is a fault. Drawn identically in red, the
+ * refusals read to a human as "errors in my tool", which is both wrong and the
+ * opposite of reassuring: the wall doing its job looked like the wall being
+ * broken.
+ *
+ * Derived from the tag rather than stored as a third `status`, because that is
+ * the field the grid, the flat row and the card all already agree on — a fourth
+ * status would mean four places deciding what counts as a refusal. Everything
+ * here still FAILED and still counts as a failure everywhere failures are
+ * counted; only its colour says which kind.
+ */
+export const isRefusal = (failTag: string | null): boolean => failTag === "denied"
 
 /**
  * Which assistant message each main-loop call belongs to, and whether it is a
@@ -273,6 +299,9 @@ export function buildTimeline(calls: readonly TimelineCall[]): Timeline {
   }
   const recovery = messages.filter((m) => (byMsg.get(m) ?? []).every((c) => c.retry))
   const failed = messages.filter((m) => (byMsg.get(m) ?? []).some((c) => c.status === "err"))
+  const refused = failed.filter((m) =>
+    (byMsg.get(m) ?? []).every((c) => c.status !== "err" || isRefusal(c.failTag)),
+  )
 
-  return { messages, rows, recovery, failed, total: resolved.length }
+  return { messages, rows, recovery, failed, refused, total: resolved.length }
 }

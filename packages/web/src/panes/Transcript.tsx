@@ -3,6 +3,7 @@ import {
   classifyFailure,
   foldRows,
   isImageAttachment,
+  isRefusal,
   stripPartialTurnSummary,
   stripTurnSummary,
   timelineMeta,
@@ -976,12 +977,17 @@ function StepsRow({ line }: { line: StepsLine }) {
 
 function ToolRow({ line }: { line: ToolLine }) {
   const running = line.ok === null
+  // Amber when aide refused the call rather than the call breaking — the same
+  // split the grid's dot draws, and it has to be the same here: this row and
+  // that dot are two readings of ONE call, so a red ✗ under an amber dot would
+  // be the two-readings disagreement this codebase keeps getting bitten by.
+  const refused = line.ok === false && isRefusal(classifyFailure(line.name, line.summary))
   const mark = running ? (
     <Spinner />
   ) : line.ok ? (
     <Check className={`${MARK} text-ok`} />
   ) : (
-    <X className={`${MARK} text-err`} />
+    <X className={`${MARK} ${refused ? "text-warn" : "text-err"}`} />
   )
   const [open, setOpen] = useState(false)
   /**

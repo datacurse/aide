@@ -1,5 +1,11 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react"
-import { buildTimeline, looksOnly, type TimelineCall, type TimelineRow } from "@aide/protocol"
+import {
+  buildTimeline,
+  isRefusal,
+  looksOnly,
+  type TimelineCall,
+  type TimelineRow,
+} from "@aide/protocol"
 
 /**
  * A turn's tool calls as a grid: one row per thing touched, one column per
@@ -112,20 +118,31 @@ function Dot({
   onPick: () => void
 }) {
   const looked = call.status !== "err" && call.status !== "busy" && looksOnly(call.tool)
+  // A refusal is amber, not red — aide declining a call is the system working,
+  // and drawn in the fault colour it reads as a broken tool. Same amber the
+  // recovery bracket uses, which is the same weight: expected, worth noticing,
+  // not an error. See `isRefusal`.
+  const refused = call.status === "err" && isRefusal(call.failTag)
   const shape =
     call.status === "busy"
       ? "border-2 border-info border-t-transparent bg-editor animate-spin"
-      : call.status === "err"
-        ? "bg-err"
-        : looked
-          ? // Opaque background, not transparent: the row's connecting line
-            // runs behind the dots, and a see-through ring would draw it
-            // straight through its own middle.
-            "border-2 border-ok bg-editor"
-          : "bg-ok"
+      : refused
+        ? "bg-warn"
+        : call.status === "err"
+          ? "bg-err"
+          : looked
+            ? // Opaque background, not transparent: the row's connecting line
+              // runs behind the dots, and a see-through ring would draw it
+              // straight through its own middle.
+              "border-2 border-ok bg-editor"
+            : "bg-ok"
   const state =
     call.status === "err"
-      ? `failed${call.failTag ? `: ${call.failTag}` : ""}`
+      ? // "refused" rather than "failed: denied" — the screen reader gets the
+        // same distinction the colour draws.
+        refused
+        ? "refused"
+        : `failed${call.failTag ? `: ${call.failTag}` : ""}`
       : call.status === "busy"
         ? "running"
         : "ok"
@@ -134,7 +151,11 @@ function Dot({
       {/* The classified reason, directly above the dot, on hover or focus.
           The scroll container carries top headroom so this never clips. */}
       {call.failTag && (
-        <span className="pointer-events-none absolute -top-[17px] left-1/2 z-10 -translate-x-1/2 text-[10px] whitespace-nowrap text-err opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
+        <span
+          className={`pointer-events-none absolute -top-[17px] left-1/2 z-10 -translate-x-1/2 text-[10px] whitespace-nowrap opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100 ${
+            refused ? "text-warn" : "text-err"
+          }`}
+        >
           {call.failTag}
         </span>
       )}
@@ -344,7 +365,33 @@ export function ToolTimeline({
 
   const failed = new Set(t.failed)
   const recovery = new Set(t.recovery)
+  /** Failed, but only ever because aide refused — amber rather than red. */
+  const refused = new Set(t.refused)
   const inBracket = (m: number) => failed.has(m) || recovery.has(m)
+
+  /**
+   * For each bracketed column, whether the whole RUN it belongs to was refusals.
+   *
+   * The bracket is one bar spanning a failure and the messages spent working
+   * around it, so its colour is a property of the run and not of the column the
+   * cell happens to be. Computed by walking each contiguous run once: red wins
+   * if any column in it failed for a reason other than a refusal, because a run
+   * holding a genuine fault must not be softened by the refusals beside it.
+   */
+  const softBracket = useMemo(() => {
+    const out = new Map<number, boolean>()
+    for (let i = 0; i < t.messages.length; i++) {
+      const start = t.messages[i]!
+      if (!inBracket(start)) continue
+      let end = i
+      while (end + 1 < t.messages.length && inBracket(t.messages[end + 1]!)) end++
+      const run = t.messages.slice(i, end + 1)
+      const soft = run.every((m) => !failed.has(m) || refused.has(m))
+      for (const m of run) out.set(m, soft)
+      i = end
+    }
+    return out
+  }, [t.messages, t.failed, t.recovery, t.refused])
   const callsIn = (m: number) => t.rows.reduce((n, r) => n + (cells.grid.get(r.key)?.get(m)?.length ?? 0), 0)
 
   const pick = (c: TimelineCall) => onSelect?.(selected === c.id ? null : c.id)
@@ -367,6 +414,17 @@ export function ToolTimeline({
             <span className="inline-block size-2 rounded-full bg-err" />
             failed
           </span>
+          {/* Only when there is one to explain. A permanent fourth entry would
+              spend legend width on a colour most turns never draw. */}
+          {t.refused.length > 0 && (
+            <span
+              className="flex items-center gap-1.5"
+              title="aide declined the call — a policy refusal, not a fault"
+            >
+              <span className="inline-block size-2 rounded-full bg-warn" />
+              refused
+            </span>
+          )}
         </span>
         <span className="min-w-0 truncate">
           {hover !== null
@@ -421,13 +479,18 @@ export function ToolTimeline({
               // rather than forcing the strip past its container and bringing
               // back the overflow this is meant to remove.
               className={`min-w-0 flex-1 basis-0 ${
-                failed.has(m)
-                  ? "h-3.5 bg-err"
-                  : recovery.has(m)
-                    ? "h-2 bg-warn/40"
-                    : cells.busy.has(m)
-                      ? "h-2 bg-info"
-                      : "h-[5px] bg-line"
+                refused.has(m)
+                  ? // Full height like a failure — it is one, and it is worth
+                    // finding — but amber, because aide refusing is the system
+                    // working rather than breaking.
+                    "h-3.5 bg-warn"
+                  : failed.has(m)
+                    ? "h-3.5 bg-err"
+                    : recovery.has(m)
+                      ? "h-2 bg-warn/40"
+                      : cells.busy.has(m)
+                        ? "h-2 bg-info"
+                        : "h-[5px] bg-line"
               }`}
             />
           ))}
@@ -465,6 +528,7 @@ export function ToolTimeline({
               <th className="sticky left-0 z-[2] bg-editor p-0" />
               {t.messages.map((m) => {
                 const br = inBracket(m)
+                const allRefused = softBracket.get(m) === true
                 // On a long turn only every fifth number, plus any column that
                 // failed or recovered — the ones somebody will look for.
                 const numbered = t.messages.length <= 20 || m % 5 === 0 || br
@@ -479,13 +543,22 @@ export function ToolTimeline({
                     } ${hover === m ? "bg-hover" : ""}`}
                   >
                     {numbered ? m : ""}
-                    {/* The failure→recovery bracket: one red bar from the
-                        message that failed through the messages spent redoing
-                        it, capped at each end. */}
+                    {/* The failure→recovery bracket: one bar from the message
+                        that failed through the messages spent redoing it,
+                        capped at each end. Amber when every failure it spans
+                        was aide refusing, red when any of them was a genuine
+                        fault — the bar is one continuous run across several
+                        columns, so it takes ONE colour and the stricter of the
+                        two wins. A run holding a real error must not be
+                        softened by the refusals beside it. */}
                     {br && (
                       <span
-                        title="a failure, and the messages spent redoing it"
-                        className={`absolute bottom-0 h-[2px] bg-err ${
+                        title={
+                          allRefused
+                            ? "a refused call, and the messages spent working around it"
+                            : "a failure, and the messages spent redoing it"
+                        }
+                        className={`absolute bottom-0 h-[2px] ${allRefused ? "bg-warn" : "bg-err"} ${
                           inBracket(m - 1) ? "left-0" : "left-1.5 rounded-l"
                         } ${inBracket(m + 1) ? "right-0" : "right-1.5 rounded-r"}`}
                       />

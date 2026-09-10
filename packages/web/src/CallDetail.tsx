@@ -2,6 +2,7 @@ import type { ReactNode } from "react"
 import {
   collapseUnchanged,
   diffLines,
+  isRefusal,
   pairWords,
   splitRows,
   type DiffRow,
@@ -474,13 +475,24 @@ export function CallDetail({
         {call.ok === null ? (
           <span className="size-2.5 shrink-0 animate-spin rounded-full border-2 border-info border-t-transparent" />
         ) : (
-          <span className={`size-2 shrink-0 rounded-full ${call.ok ? "bg-ok" : "bg-err"}`} />
+          // Amber for a refusal, the same distinction the grid's dot draws —
+          // the card is opened FROM that dot, so the two must agree or clicking
+          // an amber dot would open a red header for the same call.
+          <span
+            className={`size-2 shrink-0 rounded-full ${
+              call.ok ? "bg-ok" : isRefusal(call.failTag) ? "bg-warn" : "bg-err"
+            }`}
+          />
         )}
         <span className="shrink-0 text-syn-func">{call.name}</span>
         <span className="min-w-0 truncate text-syn-string" title={call.target}>
           {call.target}
         </span>
-        {call.failTag && <span className="shrink-0 text-err">{call.failTag}</span>}
+        {call.failTag && (
+          <span className={`shrink-0 ${isRefusal(call.failTag) ? "text-warn" : "text-err"}`}>
+            {call.failTag}
+          </span>
+        )}
         {call.retry && (
           <span
             className="shrink-0 text-warn"

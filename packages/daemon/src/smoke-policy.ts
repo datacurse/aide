@@ -35,6 +35,7 @@ import {
   currentActivity,
   isChatModel,
   isImageAttachment,
+  isRefusal,
   foldRows,
   partialToolTarget,
   timelineMeta,
@@ -2183,6 +2184,42 @@ console.log("\nthe tool timeline")
     classifyFailure("Bash", "Command timed out after 120000ms") === "timeout",
   )
   check("an unrecognised failure gets no tag", classifyFailure("Bash", "exit code 1") === null)
+
+  // Refusal vs fault. aide declining a call is the system working, and drawn in
+  // the fault colour it reads as a broken tool — so it is amber, and the split
+  // is derived from the tag rather than stored as a third status, or four
+  // surfaces would each decide what counts as a refusal.
+  check(
+    "a denial is a refusal, not a fault",
+    isRefusal(classifyFailure("Bash", "Permission to use Bash with command grep has been denied.")),
+  )
+  check(
+    "a real failure is not a refusal",
+    !isRefusal(classifyFailure("Read", "File does not exist.")) &&
+      !isRefusal(classifyFailure("Bash", "exit code 1")),
+    "an error drawn amber would understate the one thing the grid exists to make conspicuous",
+  )
+
+  const refusal = (over: Partial<TimelineCall>) =>
+    at({ status: "err", failTag: "denied", ...over })
+  const t4 = buildTimeline([
+    refusal({ message: 1 }),
+    at({ message: 2, status: "err", failTag: "not found" }),
+    // A column holding BOTH: one refusal and one genuine fault.
+    refusal({ message: 3 }),
+    at({ message: 3, status: "err", failTag: null }),
+  ])
+  check("every failure is still counted as one", t4.failed.join(",") === "1,2,3")
+  check(
+    "a column of nothing but refusals is drawn amber",
+    t4.refused.join(",") === "1",
+    "the denial that made the run route around it is not an error in anybody's tool",
+  )
+  check(
+    "a column holding one real fault stays red",
+    !t4.refused.includes(3),
+    "half refused and half broken must not be coloured as though nothing went wrong",
+  )
 
   // The retry identity reads the raw field, so two targets that would truncate
   // alike cannot read as one retried call.

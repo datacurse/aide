@@ -98,7 +98,7 @@ Decisions already taken, which are not gaps to fill:
   static import is hoisted and its output would print above `repo: <path>` — the
   run would still be correct and would read as though the sections had been
   shuffled. When changing any of this, the check that matters is that the
-  assertion count does not fall: `pnpm smoke` prints 800 `ok` lines as of
+  assertion count does not fall: `pnpm smoke` prints 805 `ok` lines as of
   2026-09-10, and a refactor that quietly drops some is the failure this number
   exists to catch.
   It fell once on purpose — the card view was removed and took ~30 of its own
@@ -905,6 +905,27 @@ Decisions already taken, which are not gaps to fill:
   header slot: the model is thinking or composing, and without the mark a
   grid whose last column has settled is indistinguishable from a stale one.
   It sits in the header and draws no dot, because it claims no call.
+- **A refusal is amber; only a fault is red.** aide declining a call — the shell
+  policy turning down `grep`, a Plan turn declining to edit — is the system
+  working exactly as designed, and the run routes around it in one round trip. A
+  tool that actually broke is a fault. Drawn identically in red, the refusals
+  read to a human as "an error in my tool", which is both wrong and the opposite
+  of reassuring: the wall doing its job looked like the wall being broken.
+  `isRefusal` in protocol derives it from the tag `classifyFailure` already
+  produces, rather than adding a third `status` — that field is what the grid,
+  the flat row and the card all agree on, and a fourth value would be four places
+  deciding what counts as a refusal. Everything refused still FAILED and is still
+  counted wherever failures are counted; only the colour says which kind. Four
+  surfaces draw it and all four had to move together, because they are readings
+  of one call and a red ✗ under an amber dot is the two-readings wedge in
+  miniature: the grid dot, the hover tag, the flat `ToolRow`'s ✗, and the card
+  header the dot opens. `Timeline.refused` marks a COLUMN only when every failure
+  in it was a refusal — one genuine fault makes the column a fault — and the
+  bracket spanning a failure and its recovery takes one colour for the whole run,
+  the stricter of the two winning, since a run holding a real error must not be
+  softened by the refusals beside it. `VerifyRow` is deliberately untouched: a
+  commit check that fails is a fault, not a policy. `pnpm smoke` pins the split
+  and the mixed column, which is the case that would otherwise silently go amber.
 - **The overview strip is the grid's only scrollbar, and its ticks SHARE the
   width.** It appears exactly when the grid overflows, seeks by drag, and says
   what is in the part you cannot see — which message failed, which is still
