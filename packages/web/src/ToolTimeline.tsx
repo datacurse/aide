@@ -13,6 +13,7 @@ import {
   type TimelineCall,
   type TimelineRow,
 } from "@aide/protocol"
+import { Hint } from "./Hint.js"
 
 /**
  * A turn's tool calls as a grid: one row per thing touched, one column per
@@ -166,28 +167,33 @@ function Dot({
           {call.failTag}
         </span>
       )}
-      <span
-        role="button"
-        tabIndex={0}
-        data-dotid={call.id}
-        aria-label={`${call.tool} ${call.target}, message ${call.message}, ${state}`}
-        title={`${call.tool} ${call.target}`.trim()}
-        // No `onClick`: the CELL handles clicks, so a press on the dot bubbles
-        // up and lands on the same nearest-call path as a press beside it. Two
-        // click handlers for one dot would be two answers to one question, and
-        // the inner one would silently win. The keyboard keeps its own — a
-        // keypress has no coordinates for the cell to be nearest to, and this
-        // is how the grid is reachable without a mouse.
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault()
-            onPick()
-          }
-        }}
-        className={`block size-[15px] cursor-pointer rounded-full focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-info ${shape} ${
-          selected ? "outline-2 outline-offset-1 outline-fg" : ""
-        }`}
-      />
+      {/* `display: contents`, so the dot's own click still reaches the cell —
+          the hint listens for the hover and adds nothing the press can land
+          on. A wrapper with a box here would be the second click handler the
+          comment below rules out. */}
+      <Hint hint={`${call.tool} ${call.target}`.trim()}>
+        <span
+          role="button"
+          tabIndex={0}
+          data-dotid={call.id}
+          aria-label={`${call.tool} ${call.target}, message ${call.message}, ${state}`}
+          // No `onClick`: the CELL handles clicks, so a press on the dot bubbles
+          // up and lands on the same nearest-call path as a press beside it. Two
+          // click handlers for one dot would be two answers to one question, and
+          // the inner one would silently win. The keyboard keeps its own — a
+          // keypress has no coordinates for the cell to be nearest to, and this
+          // is how the grid is reachable without a mouse.
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault()
+              onPick()
+            }
+          }}
+          className={`block size-[15px] cursor-pointer rounded-full focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-info ${shape} ${
+            selected ? "outline-2 outline-offset-1 outline-fg" : ""
+          }`}
+        />
+      </Hint>
     </span>
   )
 }
@@ -500,13 +506,12 @@ export function ToolTimeline({
           {/* Only when there is one to explain. A permanent fourth entry would
               spend legend width on a colour most turns never draw. */}
           {t.refused.length > 0 && (
-            <span
-              className="flex items-center gap-1.5"
-              title="aide declined the call — a policy refusal, not a fault"
-            >
-              <span className="inline-block size-2 rounded-full bg-warn" />
-              refused
-            </span>
+            <Hint hint="aide declined the call — a policy refusal, not a fault">
+              <span className="flex items-center gap-1.5">
+                <span className="inline-block size-2 rounded-full bg-warn" />
+                refused
+              </span>
+            </Hint>
           )}
         </span>
         <span className="min-w-0 truncate">
@@ -635,16 +640,19 @@ export function ToolTimeline({
                         two wins. A run holding a real error must not be
                         softened by the refusals beside it. */}
                     {br && (
-                      <span
-                        title={
+                      <Hint
+                        hint={
                           allRefused
                             ? "a refused call, and the messages spent working around it"
                             : "a failure, and the messages spent redoing it"
                         }
-                        className={`absolute bottom-0 h-[2px] ${allRefused ? "bg-warn" : "bg-err"} ${
-                          inBracket(m - 1) ? "left-0" : "left-1.5 rounded-l"
-                        } ${inBracket(m + 1) ? "right-0" : "right-1.5 rounded-r"}`}
-                      />
+                      >
+                        <span
+                          className={`absolute bottom-0 h-[2px] ${allRefused ? "bg-warn" : "bg-err"} ${
+                            inBracket(m - 1) ? "left-0" : "left-1.5 rounded-l"
+                          } ${inBracket(m + 1) ? "right-0" : "right-1.5 rounded-r"}`}
+                        />
+                      </Hint>
                     )}
                   </th>
                 )
@@ -653,9 +661,10 @@ export function ToolTimeline({
                 <th
                   style={{ width: 24, minWidth: 24 }}
                   className="h-5 p-0 text-center align-middle"
-                  title="Claude is thinking — the next message has not arrived"
                 >
-                  <span className="mx-auto block size-2.5 animate-spin rounded-full border-[1.5px] border-info border-t-transparent" />
+                  <Hint hint="Claude is thinking — the next message has not arrived">
+                    <span className="mx-auto block size-2.5 animate-spin rounded-full border-[1.5px] border-info border-t-transparent" />
+                  </Hint>
                 </th>
               )}
             </tr>
@@ -693,12 +702,18 @@ export function ToolTimeline({
               return (
                 <tr key={r.key}>
                   <td
-                    title={r.key}
                     className={`sticky left-0 z-[2] h-6 bg-editor p-0 pr-3 text-[11px] ${
                       r.sys ? "text-fg-dim" : "text-syn-string"
                     }`}
                   >
-                    <span className="block max-w-52 truncate">{shortLabel(r)}</span>
+                    {/* The hint wraps the label rather than the cell: a
+                        `display: contents` span is invisible to layout, but a
+                        table's own children are not — a wrapper between `tr`
+                        and `td` would be pulled out into an anonymous row and
+                        the sticky column would stop lining up. */}
+                    <Hint hint={r.key}>
+                      <span className="block max-w-52 truncate">{shortLabel(r)}</span>
+                    </Hint>
                   </td>
                   {t.messages.map((m) => {
                     const cs = byMsg?.get(m) ?? []

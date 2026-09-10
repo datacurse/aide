@@ -41,6 +41,7 @@ record. They are all rows in the same list, in that order of urgency.
 | What is left to commit, and the two readings under it | `packages/web/src/panes/Pending.tsx` |
 | The project's files, one directory at a time | `packages/web/src/panes/Files.tsx` |
 | What kind of file a name is, and its colour | `packages/web/src/filetypes.ts` |
+| Every hover hint in the app, and where it lands | `packages/web/src/Hint.tsx`, `packages/protocol/src/hint.ts` |
 | Where the graph's lines go, and the SVG that draws them | `packages/web/src/graph.ts`, `packages/web/src/GitGraph.tsx` |
 | Branch, history and lanes, read off the repo | `packages/daemon/src/repo.ts` |
 | Which machine a git call lands on, and batching them | `packages/daemon/src/git.ts` |
@@ -98,7 +99,7 @@ Decisions already taken, which are not gaps to fill:
   static import is hoisted and its output would print above `repo: <path>` — the
   run would still be correct and would read as though the sections had been
   shuffled. When changing any of this, the check that matters is that the
-  assertion count does not fall: `pnpm smoke` prints 805 `ok` lines as of
+  assertion count does not fall: `pnpm smoke` prints 822 `ok` lines as of
   2026-09-10, and a refactor that quietly drops some is the failure this number
   exists to catch.
   It fell once on purpose — the card view was removed and took ~30 of its own
@@ -508,6 +509,45 @@ Decisions already taken, which are not gaps to fill:
   slash putting `src2/`'s files under `src`, a deleted file left as a row that
   opens nothing, a rename showing under both names, and a collapsed folder that
   fails to mark a change three levels below it.
+- **There are no native tooltips left; `Hint` draws every one.** A `title`
+  attribute is the one piece of UI the theme could never reach — the OS draws
+  it, in its own font, in a light box on a dark app, after a delay nobody
+  chose — and there were ~120 of them, all appearing at exactly the moment
+  somebody was reading closely enough to hover. `Hint.tsx` replaces them all.
+  Four things about it are decisions rather than details. (1) It PORTALS to
+  `document.body` and positions `fixed`. An absolutely-positioned box in a
+  wrapper is the obvious cheaper version and is unusable here: nearly every
+  hint in aide is inside something that clips — the chat list's
+  `OverlayScroller`, the timeline's `overflow-y-hidden` grid, the settings
+  popover, the `w-64` rail, a `w-[24rem]` wall column — so it would be cut off
+  in most of the places it is most needed. (2) The wrapper is `display:
+  contents` by default, which is what let ~120 call sites be wrapped without
+  moving a single layout; the cost is that a contents element HAS no box, so
+  `anchorRect` falls back to measuring its children — placed against the zeros
+  `getBoundingClientRect` answers with, every hint in the app would open in the
+  window's top-left corner pointing at nothing. Inside a table it wraps the
+  CELL'S CONTENT and never the cell, because a wrapper between `tr` and `td` is
+  pulled out into an anonymous row and the timeline's sticky column stops
+  lining up. (3) `placeHint` lives in `protocol/hint.ts` rather than beside the
+  component, for the reason `parseLocation` does: the flipping and the clamping
+  fail SILENTLY — a hint half off the screen still renders, nothing throws, and
+  the only report is somebody unable to read it — and a React component cannot
+  be reached from `pnpm smoke`. The two that bit are pinned there: the flip
+  compares the two ROOMS rather than testing the default, or a hint near the
+  top of the window stays above and gets clipped; and the arrow tracks the
+  ANCHOR after the box has been clamped sideways, or a hint pushed off the
+  right edge points at its own middle. (4) The 400ms delay is shared, not
+  per-hint: `warmUntil` is a module-level stamp, so once you have read one the
+  next opens at once — the delay exists to decide whether you MEANT to hover,
+  and having just read one is that decision already made. Without it, moving
+  along a row of controls is a 400ms wait at every stop. `Button`, `Pill`,
+  `Tab`, `Stat` and `pushButton` render the Hint INTERNALLY, so their call
+  sites still pass a `title` prop and did not change — and `PaneHeader`'s
+  `title` is visible heading text and was never a tooltip at all. The
+  `aria-disabled`-rather-than-`disabled` trick in `Button` and on the
+  composer's send survives unchanged and for the same reason: a disabled
+  element emits no `pointerenter` either, so the sentence naming what has the
+  repo would once again be the one thing on screen you cannot read.
 - **File icons are drawn, not installed, and there are eight of them.** A pack
   (Seti, Material, vscode-icons) is a few thousand SVGs plus a font or sprite
   sheet, which is the trade `icons.tsx` already refused for Phosphor — so these

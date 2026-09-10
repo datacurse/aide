@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react"
 import { api, type DaemonStatus, type Health } from "./api.js"
+import { Hint } from "./Hint.js"
 import { Button } from "./ui.js"
 import { PlanUsageMeter } from "./Usage.js"
 
@@ -144,9 +145,8 @@ export function DaemonBar({
     // line, the status and the buttons each get their own row rather than
     // fighting over one.
     <div className="relative flex flex-col gap-1.5">
-      <span
-        className="flex items-center gap-1.5 text-[11px] text-fg-muted"
-        title={
+      <Hint
+        hint={
           status?.pid
             ? `pid ${status.pid} on port ${status.port}`
             : status?.state === "adopted"
@@ -154,17 +154,18 @@ export function DaemonBar({
               : `port ${status?.port ?? "?"}`
         }
       >
-        <span className={`inline-block size-1.5 shrink-0 rounded-full ${DOT[state]}`} />
-        <span className="truncate">{LABEL[state]}</span>
-      </span>
+        <span className="flex items-center gap-1.5 text-[11px] text-fg-muted">
+          <span className={`inline-block size-1.5 shrink-0 rounded-full ${DOT[state]}`} />
+          <span className="truncate">{LABEL[state]}</span>
+        </span>
+      </Hint>
 
       {health && state !== "stopped" && (
-        <span
-          className="truncate text-[11px] text-fg-dim"
-          title={`${health.taskModel} · one run at a time`}
-        >
-          {health.taskModel} · one run at a time
-        </span>
+        <Hint hint={`${health.taskModel} · one run at a time`}>
+          <span className="truncate text-[11px] text-fg-dim">
+            {health.taskModel} · one run at a time
+          </span>
+        </Hint>
       )}
 
       {/* Under the model line, because it answers the same question that line
@@ -172,9 +173,9 @@ export function DaemonBar({
       <PlanUsageMeter enabled={state !== "stopped"} />
 
       {staleNote && (
-        <span className="text-[11px] leading-relaxed text-warn" title={staleNote.title}>
-          {staleNote.text}
-        </span>
+        <Hint hint={staleNote.title}>
+          <span className="text-[11px] leading-relaxed text-warn">{staleNote.text}</span>
+        </Hint>
       )}
 
       <div className="flex flex-wrap items-center gap-1.5">

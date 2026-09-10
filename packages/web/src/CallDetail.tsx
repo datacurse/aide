@@ -9,6 +9,7 @@ import {
   type WordSpan,
 } from "@aide/protocol"
 import { highlightCode, highlightWithDim, langOfPath } from "./highlight.js"
+import { Hint } from "./Hint.js"
 import { X } from "./icons.js"
 import { useRemembered } from "./useRemembered.js"
 
@@ -485,31 +486,29 @@ export function CallDetail({
           />
         )}
         <span className="shrink-0 text-syn-func">{call.name}</span>
-        <span className="min-w-0 truncate text-syn-string" title={call.target}>
-          {call.target}
-        </span>
+        <Hint hint={call.target}>
+          <span className="min-w-0 truncate text-syn-string">{call.target}</span>
+        </Hint>
         {call.failTag && (
           <span className={`shrink-0 ${isRefusal(call.failTag) ? "text-warn" : "text-err"}`}>
             {call.failTag}
           </span>
         )}
         {call.retry && (
-          <span
-            className="shrink-0 text-warn"
-            title="Re-attempts a call that failed in an earlier message"
-          >
-            retry
-          </span>
+          <Hint hint="Re-attempts a call that failed in an earlier message">
+            <span className="shrink-0 text-warn">retry</span>
+          </Hint>
         )}
         {duration !== null && <span className="shrink-0 text-fg-dim">{duration}</span>}
-        <button
-          type="button"
-          onClick={onClose}
-          title="Close"
-          className="ml-auto shrink-0 text-fg-dim hover:text-fg"
-        >
-          <X className="size-3" />
-        </button>
+        <Hint hint="Close">
+          <button
+            type="button"
+            onClick={onClose}
+            className="ml-auto shrink-0 text-fg-dim hover:text-fg"
+          >
+            <X className="size-3" />
+          </button>
+        </Hint>
       </div>
       <div className="px-2 py-1.5">
         <CallBlocks call={call} />

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
 import { api, type PlanUsage } from "./api.js"
+import { Hint } from "./Hint.js"
 import type { UsageWindow } from "@aide/protocol"
 
 /**
@@ -53,12 +54,13 @@ export function PlanUsageMeter({ enabled }: { enabled: boolean }) {
 
   return (
     <div className="flex flex-col gap-1">
-      <span
-        className="truncate text-[11px] text-fg-dim"
-        title={`Windows on your Claude ${usage.plan ?? ""} plan, as a share still unspent. Read ${readAt(usage.readAt)}.`}
+      <Hint
+        hint={`Windows on your Claude ${usage.plan ?? ""} plan, as a share still unspent. Read ${readAt(usage.readAt)}.`}
       >
-        {usage.plan ? `${usage.plan} plan` : "plan"} · usage left
-      </span>
+        <span className="truncate text-[11px] text-fg-dim">
+          {usage.plan ? `${usage.plan} plan` : "plan"} · usage left
+        </span>
+      </Hint>
       {usage.windows.map((w) => (
         <Meter key={w.id} window={w} />
       ))}
@@ -69,21 +71,23 @@ export function PlanUsageMeter({ enabled }: { enabled: boolean }) {
 function Meter({ window: w }: { window: UsageWindow }) {
   const left = 100 - w.used
   return (
-    // Tabular figures and fixed columns for the same reason the chat rows have
-    // them: three of these are read down, not across, and a percentage that
-    // shuffles sideways between rows cannot be compared at a glance.
-    <div className="flex items-center gap-1.5 text-[10px] tabular-nums" title={hover(w)}>
-      <span className="w-8 shrink-0 truncate text-fg-dim">{w.label}</span>
-      <span className="h-1 min-w-4 flex-1 rounded-full bg-input">
-        {/* The bar drains rather than fills. It is showing what is LEFT — the
-            number beside it says so too, and the two must not disagree. */}
-        <span className={`block h-1 rounded-full ${tone(left)}`} style={{ width: `${left}%` }} />
-      </span>
-      <span className="w-7 shrink-0 text-right text-fg-muted">{left}%</span>
-      <span className="w-9 shrink-0 truncate text-right text-fg-dim">
-        {w.resetsAt === null ? "" : until(w.resetsAt)}
-      </span>
-    </div>
+    <Hint hint={hover(w)}>
+      {/* Tabular figures and fixed columns for the same reason the chat rows
+          have them: three of these are read down, not across, and a percentage
+          that shuffles sideways between rows cannot be compared at a glance. */}
+      <div className="flex items-center gap-1.5 text-[10px] tabular-nums">
+        <span className="w-8 shrink-0 truncate text-fg-dim">{w.label}</span>
+        <span className="h-1 min-w-4 flex-1 rounded-full bg-input">
+          {/* The bar drains rather than fills. It is showing what is LEFT — the
+              number beside it says so too, and the two must not disagree. */}
+          <span className={`block h-1 rounded-full ${tone(left)}`} style={{ width: `${left}%` }} />
+        </span>
+        <span className="w-7 shrink-0 text-right text-fg-muted">{left}%</span>
+        <span className="w-9 shrink-0 truncate text-right text-fg-dim">
+          {w.resetsAt === null ? "" : until(w.resetsAt)}
+        </span>
+      </div>
+    </Hint>
   )
 }
 

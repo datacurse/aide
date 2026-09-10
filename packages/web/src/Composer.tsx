@@ -3,6 +3,7 @@ import { MAX_ATTACHMENT_BYTES, collectAttachments } from "./attachments.js"
 import { useChatChoice, useChatDefaults } from "./chatSettings.js"
 import { readDraft, saveDraft, useDraft } from "./drafts.js"
 import { File as FileGlyph, Lightning, Lock, Paperclip, X } from "./icons.js"
+import { Hint } from "./Hint.js"
 import { ImageViewer, useImageViewer } from "./ImageViewer.js"
 import { LOCKED } from "./ui.js"
 import { TYPING_KEY } from "./typing.js"
@@ -47,18 +48,19 @@ function ContextMeter({ usage }: { usage: ContextUsage | null }) {
   const remaining = Math.max(0, 100 - usage.percentage)
   const tone = remaining < 15 ? "text-err" : remaining < 35 ? "text-warn" : "text-fg-dim"
   return (
-    <span
-      className={`flex items-center gap-1.5 text-[11px] ${tone}`}
-      title={`${usage.totalTokens.toLocaleString()} of ${usage.maxTokens.toLocaleString()} tokens used`}
+    <Hint
+      hint={`${usage.totalTokens.toLocaleString()} of ${usage.maxTokens.toLocaleString()} tokens used`}
     >
-      <span className="relative inline-block h-1 w-10 overflow-hidden rounded-full bg-input">
-        <span
-          className="absolute inset-y-0 left-0 bg-current"
-          style={{ width: `${Math.min(100, Math.max(0, remaining))}%` }}
-        />
+      <span className={`flex items-center gap-1.5 text-[11px] ${tone}`}>
+        <span className="relative inline-block h-1 w-10 overflow-hidden rounded-full bg-input">
+          <span
+            className="absolute inset-y-0 left-0 bg-current"
+            style={{ width: `${Math.min(100, Math.max(0, remaining))}%` }}
+          />
+        </span>
+        {Math.round(remaining)}% context left
       </span>
-      {Math.round(remaining)}% context left
-    </span>
+    </Hint>
   )
 }
 
@@ -84,14 +86,15 @@ function ModelPicker({ model, onModel }: { model: ChatModel; onModel: (m: ChatMo
 
   return (
     <div ref={box} className="relative">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        title="Which model answers this turn"
-        className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-fg-muted hover:bg-hover hover:text-fg"
-      >
-        {chatModelLabel(model)}
-      </button>
+      <Hint hint="Which model answers this turn">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-fg-muted hover:bg-hover hover:text-fg"
+        >
+          {chatModelLabel(model)}
+        </button>
+      </Hint>
       {open && (
         <div className="absolute bottom-7 left-0 z-20 w-[22rem] rounded border border-line bg-chrome py-1 shadow-lg">
           <div className="px-3 py-1 font-sans text-[11px] text-fg-dim">Model</div>
@@ -202,21 +205,24 @@ function ModePicker({
  */
 function ThinkingToggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
   return (
-    <button
-      type="button"
-      onClick={onToggle}
-      aria-pressed={on}
-      title={
+    <Hint
+      hint={
         on
           ? "Thinking is on. Turn it off for a small ask, where the thinking is most of the wait and none of the work"
           : "Thinking is off — faster, and worse at anything it has to work out. The profile records which turns ran this way"
       }
-      className={`rounded px-1.5 py-0.5 text-[11px] italic hover:bg-hover ${
-        on ? "text-fg-muted hover:text-fg" : "text-fg-dim line-through hover:text-fg-muted"
-      }`}
     >
-      thinking
-    </button>
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-pressed={on}
+        className={`rounded px-1.5 py-0.5 text-[11px] italic hover:bg-hover ${
+          on ? "text-fg-muted hover:text-fg" : "text-fg-dim line-through hover:text-fg-muted"
+        }`}
+      >
+        thinking
+      </button>
+    </Hint>
   )
 }
 
@@ -237,21 +243,24 @@ function ThinkingToggle({ on, onToggle }: { on: boolean; onToggle: () => void })
  */
 function TypingToggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
   return (
-    <button
-      type="button"
-      onClick={onToggle}
-      aria-pressed={on}
-      title={
+    <Hint
+      hint={
         on
           ? "The reply is revealed at a readable pace instead of in the bursts it arrives in. Click for raw speed."
           : "The reply appears as fast as it arrives. Click to have it typed out instead."
       }
-      className={`rounded px-1.5 py-0.5 text-[11px] hover:bg-hover ${
-        on ? "text-fg-muted hover:text-fg" : "text-fg-dim hover:text-fg-muted"
-      }`}
     >
-      typing
-    </button>
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-pressed={on}
+        className={`rounded px-1.5 py-0.5 text-[11px] hover:bg-hover ${
+          on ? "text-fg-muted hover:text-fg" : "text-fg-dim hover:text-fg-muted"
+        }`}
+      >
+        typing
+      </button>
+    </Hint>
   )
 }
 
@@ -566,18 +575,19 @@ export function Composer({
                 className="flex items-center gap-1.5 rounded border border-line bg-input px-1.5 py-0.5 font-sans text-[11px] text-fg-muted"
               >
                 {seat >= 0 ? (
-                  <button
-                    type="button"
-                    onClick={() => viewer.show(seat)}
-                    title="See what this is, full size"
-                    className="cursor-zoom-in"
-                  >
-                    <img
-                      src={`data:${a.mediaType};base64,${a.data}`}
-                      alt=""
-                      className="size-4 rounded-sm object-cover"
-                    />
-                  </button>
+                  <Hint hint="See what this is, full size">
+                    <button
+                      type="button"
+                      onClick={() => viewer.show(seat)}
+                      className="cursor-zoom-in"
+                    >
+                      <img
+                        src={`data:${a.mediaType};base64,${a.data}`}
+                        alt=""
+                        className="size-4 rounded-sm object-cover"
+                      />
+                    </button>
+                  </Hint>
                 ) : (
                   <FileGlyph className="size-3.5 shrink-0 text-fg-dim" />
                 )}
@@ -585,14 +595,15 @@ export function Composer({
                   {a.name ?? a.mediaType.replace("image/", "")}
                 </span>
                 {kb(a.bytes)}
-                <button
-                  type="button"
-                  onClick={() => edit({ attachments: attachments.filter((x) => x.id !== a.id) })}
-                  className="text-fg-dim hover:text-err"
-                  title="Remove"
-                >
-                  <X className="size-3" />
-                </button>
+                <Hint hint="Remove">
+                  <button
+                    type="button"
+                    onClick={() => edit({ attachments: attachments.filter((x) => x.id !== a.id) })}
+                    className="text-fg-dim hover:text-err"
+                  >
+                    <X className="size-3" />
+                  </button>
+                </Hint>
               </span>
             )
           })}
@@ -668,14 +679,15 @@ export function Composer({
             e.target.value = ""
           }}
         />
-        <button
-          type="button"
-          onClick={() => picker.current?.click()}
-          title="Attach files of any kind — images go to the model as pictures, everything else lands on the agent's disk for it to read. Or drop them anywhere on this bar"
-          className="rounded p-1 text-fg-muted hover:bg-hover hover:text-fg"
-        >
-          <Paperclip className="size-3.5" />
-        </button>
+        <Hint hint="Attach files of any kind — images go to the model as pictures, everything else lands on the agent's disk for it to read. Or drop them anywhere on this bar">
+          <button
+            type="button"
+            onClick={() => picker.current?.click()}
+            className="rounded p-1 text-fg-muted hover:bg-hover hover:text-fg"
+          >
+            <Paperclip className="size-3.5" />
+          </button>
+        </Hint>
         <ModePicker
           mode={mode}
           effort={effort}
@@ -703,42 +715,54 @@ export function Composer({
                   row, so a list of chats called "proceed" is a list of
                   nothing. */}
               {sessionId && (
+                <Hint hint={blocked ?? `Send “${PROCEED}” — for when the answer is just carry on`}>
+                  <button
+                    type="button"
+                    // Locked on the same terms as `send` beside it. It did not
+                    // use to need this: `blocked` only ever landed on a chat
+                    // that had never run, and this button is drawn only on one
+                    // that has. A run holding the checkout refuses both, and
+                    // two buttons side by side refused by one thing must not
+                    // read as one blocked and one merely empty.
+                    //
+                    // `aria-disabled` rather than `disabled` when blocked, so
+                    // the hint saying WHY still opens: a disabled element emits
+                    // no `pointerenter`, so the one state whose explanation is
+                    // worth reading would be the one state with no hint.
+                    aria-disabled={blocked ? true : undefined}
+                    onClick={blocked ? undefined : proceed}
+                    disabled={blocked ? undefined : !canProceed}
+                    className={`inline-flex items-center gap-1 rounded-sm px-2.5 py-1 font-sans text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                      blocked ? LOCKED : "bg-input text-fg hover:bg-raised"
+                    }`}
+                  >
+                    {blocked && <Lock className="size-3 shrink-0" />}
+                    {PROCEED}
+                  </button>
+                </Hint>
+              )}
+              <Hint hint={blocked ?? "Enter to send, Shift+Enter for a newline"}>
                 <button
                   type="button"
-                  // Locked on the same terms as `send` beside it. It did not use
-                  // to need this: `blocked` only ever landed on a chat that had
-                  // never run, and this button is drawn only on one that has. A
-                  // run holding the checkout refuses both, and two buttons
-                  // side by side refused by one thing must not read as one
-                  // blocked and one merely empty.
+                  // Locked by work in the way, merely disabled by an empty box.
+                  // The distinction is the whole point of the padlock: one is
+                  // something to go and clear, the other is something to type.
+                  //
+                  // Blocked is `aria-disabled` and not `disabled` so the hint
+                  // naming what is in the way still opens — a disabled element
+                  // emits no `pointerenter`, so the padlock would have nothing
+                  // to explain itself with.
                   aria-disabled={blocked ? true : undefined}
-                  onClick={blocked ? undefined : proceed}
-                  disabled={blocked ? undefined : !canProceed}
-                  title={blocked ?? `Send “${PROCEED}” — for when the answer is just carry on`}
-                  className={`inline-flex items-center gap-1 rounded-sm px-2.5 py-1 font-sans text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
-                    blocked ? LOCKED : "bg-input text-fg hover:bg-raised"
+                  onClick={blocked ? undefined : send}
+                  disabled={blocked ? undefined : !canSend}
+                  className={`inline-flex items-center gap-1 rounded-sm px-3 py-1 font-sans text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                    blocked ? LOCKED : "bg-accent text-white hover:bg-accent-hover"
                   }`}
                 >
                   {blocked && <Lock className="size-3 shrink-0" />}
-                  {PROCEED}
+                  send
                 </button>
-              )}
-              <button
-                type="button"
-                // Locked by work in the way, merely disabled by an empty box.
-                // The distinction is the whole point of the padlock: one is
-                // something to go and clear, the other is something to type.
-                aria-disabled={blocked ? true : undefined}
-                onClick={blocked ? undefined : send}
-                disabled={blocked ? undefined : !canSend}
-                title={blocked ?? "Enter to send, Shift+Enter for a newline"}
-                className={`inline-flex items-center gap-1 rounded-sm px-3 py-1 font-sans text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
-                  blocked ? LOCKED : "bg-accent text-white hover:bg-accent-hover"
-                }`}
-              >
-                {blocked && <Lock className="size-3 shrink-0" />}
-                send
-              </button>
+              </Hint>
             </>
           )}
         </div>

@@ -6,6 +6,7 @@ import {
   EFFORT_LEVELS,
 } from "@aide/protocol"
 import { CARD_EXPAND_KEY, CARD_SPLIT_KEY } from "./CallDetail.js"
+import { Hint } from "./Hint.js"
 import { useChatDefaults } from "./chatSettings.js"
 import { useClickAway } from "./useClickAway.js"
 import { useRemembered } from "./useRemembered.js"
@@ -35,16 +36,17 @@ export function SettingsButton() {
 
   return (
     <div ref={box} className="relative">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        title="What every chat starts on — mode, model, effort, thinking. A chat's own bar overrides these for that chat alone."
-        className={`text-[11px] underline-offset-2 hover:underline ${
-          open ? "text-fg" : "text-fg-muted"
-        }`}
-      >
-        settings
-      </button>
+      <Hint hint="What every chat starts on — mode, model, effort, thinking. A chat's own bar overrides these for that chat alone.">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className={`text-[11px] underline-offset-2 hover:underline ${
+            open ? "text-fg" : "text-fg-muted"
+          }`}
+        >
+          settings
+        </button>
+      </Hint>
       {open && (
         // Upwards and out over the panes, like the daemon log beside it:
         // anchored to the foot of a 16rem rail, a panel has nowhere else to go.
@@ -168,15 +170,16 @@ function Pill({
   children: React.ReactNode
 }) {
   return (
-    <button
-      type="button"
-      title={title}
-      onClick={onClick}
-      className={`rounded px-2 py-0.5 text-[11px] ${
-        on ? "bg-active text-white" : "bg-input text-fg-muted hover:bg-hover hover:text-fg"
-      }`}
-    >
-      {children}
-    </button>
+    <Hint hint={title}>
+      <button
+        type="button"
+        onClick={onClick}
+        className={`rounded px-2 py-0.5 text-[11px] ${
+          on ? "bg-active text-white" : "bg-input text-fg-muted hover:bg-hover hover:text-fg"
+        }`}
+      >
+        {children}
+      </button>
+    </Hint>
   )
 }

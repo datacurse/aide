@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
 import { currentActivity, type RunEvent } from "@aide/protocol"
+import { Hint } from "./Hint.js"
 
 /**
  * What the turn is doing right now, in one line.
@@ -128,9 +129,9 @@ export function WorkingBar({
         {seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`}
       </span>
       {outputTokens > 0 && (
-        <span className="shrink-0 text-fg-dim" title="Output tokens in the message being written">
-          {outputTokens.toLocaleString()} tokens
-        </span>
+        <Hint hint="Output tokens in the message being written">
+          <span className="shrink-0 text-fg-dim">{outputTokens.toLocaleString()} tokens</span>
+        </Hint>
       )}
     </div>
   )

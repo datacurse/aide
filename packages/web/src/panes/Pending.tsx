@@ -10,6 +10,7 @@ import type {
 } from "@aide/protocol"
 import { api, type GitHistory } from "../api.js"
 import { GraphCell, ROW_H, graphWidth } from "../GitGraph.js"
+import { Hint } from "../Hint.js"
 import { ArrowDown, ArrowUp, Tag } from "../icons.js"
 import { Button, Empty, PaneHeader } from "../ui.js"
 import { useKeyed } from "../useKeyed.js"
@@ -316,17 +317,18 @@ function Tab({
 }) {
   const on = now === me
   return (
-    <button
-      type="button"
-      onClick={() => onPick(me)}
-      title={title}
-      aria-pressed={on}
-      className={`shrink-0 cursor-pointer font-sans text-[11px] font-semibold tracking-wide uppercase underline-offset-4 transition-colors outline-none focus-visible:underline ${
-        on ? "text-fg-muted underline" : "text-fg-dim hover:text-fg-muted"
-      }`}
-    >
-      {children}
-    </button>
+    <Hint hint={title}>
+      <button
+        type="button"
+        onClick={() => onPick(me)}
+        aria-pressed={on}
+        className={`shrink-0 cursor-pointer font-sans text-[11px] font-semibold tracking-wide uppercase underline-offset-4 transition-colors outline-none focus-visible:underline ${
+          on ? "text-fg-muted underline" : "text-fg-dim hover:text-fg-muted"
+        }`}
+      >
+        {children}
+      </button>
+    </Hint>
   )
 }
 
@@ -338,20 +340,19 @@ function PendingRow({ file }: { file: GitFileChange }) {
   const dir = cut === -1 ? "" : file.path.slice(0, cut + 1)
   const name = cut === -1 ? file.path : file.path.slice(cut + 1)
   return (
-    <div
-      className="flex items-baseline gap-2 px-3 py-[3px] font-sans text-[12px]"
-      title={`${file.from ? `${file.from} → ` : ""}${file.path} · ${STATE_STYLE[state].label}`}
-    >
-      <span className="min-w-0 flex-1 truncate text-fg-muted">
-        {/* Directory first and dimmed, so the eye lands on the filename — the
-            column is too narrow to show both at full weight. */}
-        {dir && <span className="text-fg-dim">{dir}</span>}
-        {name}
-      </span>
-      <span className={`shrink-0 font-mono text-[10px] ${STATE_STYLE[state].text}`}>
-        {MARK[state]}
-      </span>
-    </div>
+    <Hint hint={`${file.from ? `${file.from} → ` : ""}${file.path} · ${STATE_STYLE[state].label}`}>
+      <div className="flex items-baseline gap-2 px-3 py-[3px] font-sans text-[12px]">
+        <span className="min-w-0 flex-1 truncate text-fg-muted">
+          {/* Directory first and dimmed, so the eye lands on the filename — the
+              column is too narrow to show both at full weight. */}
+          {dir && <span className="text-fg-dim">{dir}</span>}
+          {name}
+        </span>
+        <span className={`shrink-0 font-mono text-[10px] ${STATE_STYLE[state].text}`}>
+          {MARK[state]}
+        </span>
+      </div>
+    </Hint>
   )
 }
 
@@ -547,15 +548,18 @@ function Commits({
           press is how. */}
       {log.more &&
         (onMore ? (
-          <button
-            type="button"
-            onClick={onMore}
-            title={`Show another ${PAGE} commits. The rail re-reads this longer page every few seconds from now on.`}
-            className="w-full cursor-pointer py-1 pr-3 text-left font-sans text-[10px] text-fg-dim transition-colors outline-none hover:text-fg-muted focus-visible:text-fg-muted"
-            style={{ paddingLeft: graphWidth(log.lanes) + 16 }}
+          <Hint
+            hint={`Show another ${PAGE} commits. The rail re-reads this longer page every few seconds from now on.`}
           >
-            show {PAGE} more
-          </button>
+            <button
+              type="button"
+              onClick={onMore}
+              className="w-full cursor-pointer py-1 pr-3 text-left font-sans text-[10px] text-fg-dim transition-colors outline-none hover:text-fg-muted focus-visible:text-fg-muted"
+              style={{ paddingLeft: graphWidth(log.lanes) + 16 }}
+            >
+              show {PAGE} more
+            </button>
+          </Hint>
         ) : (
           /* At the ceiling. The list still stops, so it still has to say so —
              what it must not do is keep offering a press that would return the
@@ -586,21 +590,23 @@ function Upstream({ overview }: { overview: GitOverview }) {
     ? `${where}, against ${upstream}: ${ahead} ahead, ${behind} behind.\n${overview.root}`
     : `${where}, tracking nothing. Nothing here has been pushed anywhere.\n${overview.root}`
   return (
-    <span className="ml-auto flex min-w-0 items-center gap-1.5 font-sans text-[11px]" title={title}>
-      {ahead > 0 && (
-        <span className="flex shrink-0 items-center gap-0.5 text-diff-add-fg">
-          <ArrowUp className="size-3" />
-          {ahead}
-        </span>
-      )}
-      {behind > 0 && (
-        <span className="flex shrink-0 items-center gap-0.5 text-warn">
-          <ArrowDown className="size-3" />
-          {behind}
-        </span>
-      )}
-      <span className="min-w-0 truncate text-fg-dim">{upstream ?? "no upstream"}</span>
-    </span>
+    <Hint hint={title}>
+      <span className="ml-auto flex min-w-0 items-center gap-1.5 font-sans text-[11px]">
+        {ahead > 0 && (
+          <span className="flex shrink-0 items-center gap-0.5 text-diff-add-fg">
+            <ArrowUp className="size-3" />
+            {ahead}
+          </span>
+        )}
+        {behind > 0 && (
+          <span className="flex shrink-0 items-center gap-0.5 text-warn">
+            <ArrowDown className="size-3" />
+            {behind}
+          </span>
+        )}
+        <span className="min-w-0 truncate text-fg-dim">{upstream ?? "no upstream"}</span>
+      </span>
+    </Hint>
   )
 }
 
@@ -641,51 +647,54 @@ function CommitRow({
       ? "not a step along this branch's line, so it has no number"
       : `commit #${number} along this branch`
   return (
-    <div
-      title={`${commit.subject}\n\n${place} · ${commit.short} · ${commit.author} · ${new Date(commit.date).toLocaleString()}`}
-      style={{ height: ROW_H }}
-      className="flex w-full items-stretch gap-2 pr-3 pl-2 font-sans"
+    <Hint
+      hint={`${commit.subject}\n\n${place} · ${commit.short} · ${commit.author} · ${new Date(commit.date).toLocaleString()}`}
     >
-      {row ? (
-        <GraphCell row={row} lanes={lanes} head={head} />
-      ) : (
-        <div className="shrink-0" style={{ width: graphWidth(lanes) }} />
-      )}
-      <div className="flex min-w-0 flex-1 flex-col justify-center">
-        {/* Subject first, badges after, the way VS Code lays out the same row:
-            the badges are `shrink-0`, so a long subject truncates and the name
-            of the branch — the thing you are scanning for — never does. */}
-        <div className="flex items-center gap-1">
-          <span
-            className={`min-w-0 flex-1 truncate text-[12px] leading-[15px] ${
-              head ? "text-fg" : "text-fg-muted"
-            }`}
-          >
-            {commit.subject}
-          </span>
-          {commit.refs.map((r) => (
-            <RefBadge key={`${r.kind}:${r.name}`} gitRef={r} />
-          ))}
-        </div>
-        <div className="flex items-baseline gap-2 text-[10px] leading-[13px] text-fg-dim">
-          {/* A column of its own, fixed width and never dropped. Held open even
-              when a commit has no number: letting the row close the gap would
-              shunt every sha under it half a column left and turn the one list
-              on screen you scan vertically into a ragged edge.
+      <div
+        style={{ height: ROW_H }}
+        className="flex w-full items-stretch gap-2 pr-3 pl-2 font-sans"
+      >
+        {row ? (
+          <GraphCell row={row} lanes={lanes} head={head} />
+        ) : (
+          <div className="shrink-0" style={{ width: graphWidth(lanes) }} />
+        )}
+        <div className="flex min-w-0 flex-1 flex-col justify-center">
+          {/* Subject first, badges after, the way VS Code lays out the same row:
+              the badges are `shrink-0`, so a long subject truncates and the name
+              of the branch — the thing you are scanning for — never does. */}
+          <div className="flex items-center gap-1">
+            <span
+              className={`min-w-0 flex-1 truncate text-[12px] leading-[15px] ${
+                head ? "text-fg" : "text-fg-muted"
+              }`}
+            >
+              {commit.subject}
+            </span>
+            {commit.refs.map((r) => (
+              <RefBadge key={`${r.kind}:${r.name}`} gitRef={r} />
+            ))}
+          </div>
+          <div className="flex items-baseline gap-2 text-[10px] leading-[13px] text-fg-dim">
+            {/* A column of its own, fixed width and never dropped. Held open even
+                when a commit has no number: letting the row close the gap would
+                shunt every sha under it half a column left and turn the one list
+                on screen you scan vertically into a ragged edge.
 
-              Left-aligned, not right: right-aligning parked the digits against
-              the far edge of the box, so the number started a few pixels in
-              from the subject above it and the whole column read as crooked.
-              The `#` is what makes a bare integer next to a sha legible as a
-              position at all. */}
-          <span className="min-w-[2rem] shrink-0 font-mono text-fg-muted">
-            {number === undefined ? "" : `#${number}`}
-          </span>
-          <span className="shrink-0 font-mono">{commit.short}</span>
-          <span className="ml-auto shrink-0">{ago(commit.date)}</span>
+                Left-aligned, not right: right-aligning parked the digits against
+                the far edge of the box, so the number started a few pixels in
+                from the subject above it and the whole column read as crooked.
+                The `#` is what makes a bare integer next to a sha legible as a
+                position at all. */}
+            <span className="min-w-[2rem] shrink-0 font-mono text-fg-muted">
+              {number === undefined ? "" : `#${number}`}
+            </span>
+            <span className="shrink-0 font-mono">{commit.short}</span>
+            <span className="ml-auto shrink-0">{ago(commit.date)}</span>
+          </div>
         </div>
       </div>
-    </div>
+    </Hint>
   )
 }
 
@@ -709,15 +718,16 @@ function RefBadge({ gitRef: r }: { gitRef: GitRef }) {
         ? "border-line-soft text-fg-dim"
         : "border-syn-var/40 text-syn-var"
   return (
-    <span
-      title={`${r.kind}${r.head ? ", checked out" : ""}: ${r.name}`}
-      className={`max-w-[6rem] shrink-0 truncate rounded-sm border px-1 text-[10px] leading-[14px] ${tone}`}
-    >
-      {/* Inline, and not a flex row: `truncate` is what keeps a long branch name
-          from widening the row it shares with the subject, and it only works on
-          text that is still text. */}
-      {r.kind === "tag" && <Tag className="mr-0.5 inline size-2.5 align-[-0.15em]" />}
-      {r.name}
-    </span>
+    <Hint hint={`${r.kind}${r.head ? ", checked out" : ""}: ${r.name}`}>
+      <span
+        className={`max-w-[6rem] shrink-0 truncate rounded-sm border px-1 text-[10px] leading-[14px] ${tone}`}
+      >
+        {/* Inline, and not a flex row: `truncate` is what keeps a long branch name
+            from widening the row it shares with the subject, and it only works on
+            text that is still text. */}
+        {r.kind === "tag" && <Tag className="mr-0.5 inline size-2.5 align-[-0.15em]" />}
+        {r.name}
+      </span>
+    </Hint>
   )
 }

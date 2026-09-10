@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react"
 import type { ActivityDay, HourCell, ProjectActivity } from "@aide/protocol"
 import { api, type Activity } from "./api.js"
+import { Hint } from "./Hint.js"
 import { ArrowClockwise } from "./icons.js"
 import { Button, Empty, money } from "./ui.js"
 
@@ -148,10 +149,12 @@ function Stat({
   tone?: string
 }) {
   return (
-    <div className="flex flex-col gap-0.5 rounded border border-line bg-chrome px-3 py-2.5" title={hint}>
-      <span className={`font-sans text-[19px] leading-none ${tone ?? "text-fg"}`}>{value}</span>
-      <span className="font-sans text-[10px] tracking-wide text-fg-dim uppercase">{label}</span>
-    </div>
+    <Hint hint={hint}>
+      <div className="flex flex-col gap-0.5 rounded border border-line bg-chrome px-3 py-2.5">
+        <span className={`font-sans text-[19px] leading-none ${tone ?? "text-fg"}`}>{value}</span>
+        <span className="font-sans text-[10px] tracking-wide text-fg-dim uppercase">{label}</span>
+      </div>
+    </Hint>
   )
 }
 
@@ -214,23 +217,24 @@ function DailyBars({ days }: { days: ActivityDay[] }) {
         {shown.map((day) => {
           const height = day.runs === 0 ? 0 : Math.max(3, (day.runs / peak) * 100)
           return (
-            <div
+            // The whole column is the hit target, not the bar — a 3px bar on a
+            // quiet day is unhoverable, and those are the days you most want
+            // to ask about.
+            <Hint
               key={day.day}
-              className="group relative flex h-full flex-1 flex-col justify-end"
-              // The whole column is the hit target, not the bar — a 3px bar on a
-              // quiet day is unhoverable, and those are the days you most want
-              // to ask about.
-              title={`${shortDay(day.day)} — ${day.runs} turn${day.runs === 1 ? "" : "s"}, ${duration(day.activeMs)}, ${money(day.costUsd)}`}
+              hint={`${shortDay(day.day)} — ${day.runs} turn${day.runs === 1 ? "" : "s"}, ${duration(day.activeMs)}, ${money(day.costUsd)}`}
             >
-              <div
-                // rounded-t only: the data end is rounded, the baseline end is
-                // square, so the bar reads as growing out of the axis.
-                className={`w-full rounded-t-[2px] transition-colors ${
-                  isToday(day.day) ? "bg-graph-2" : "bg-graph-1"
-                } group-hover:brightness-125`}
-                style={{ height: `${height}%` }}
-              />
-            </div>
+              <div className="group relative flex h-full flex-1 flex-col justify-end">
+                <div
+                  // rounded-t only: the data end is rounded, the baseline end is
+                  // square, so the bar reads as growing out of the axis.
+                  className={`w-full rounded-t-[2px] transition-colors ${
+                    isToday(day.day) ? "bg-graph-2" : "bg-graph-1"
+                  } group-hover:brightness-125`}
+                  style={{ height: `${height}%` }}
+                />
+              </div>
+            </Hint>
           )
         })}
       </div>
@@ -325,12 +329,15 @@ function Punchcard({ cells }: { cells: HourCell[] }) {
             {Array.from({ length: 24 }, (_, hour) => {
               const runs = at.get(`${weekday}:${hour}`) ?? 0
               return (
-                <span
+                <Hint
                   key={hour}
-                  className="h-3.5 flex-1 rounded-[1px]"
-                  style={{ background: step(runs) }}
-                  title={`${label} ${`${hour}`.padStart(2, "0")}:00 — ${runs} turn${runs === 1 ? "" : "s"}`}
-                />
+                  hint={`${label} ${`${hour}`.padStart(2, "0")}:00 — ${runs} turn${runs === 1 ? "" : "s"}`}
+                >
+                  <span
+                    className="h-3.5 flex-1 rounded-[1px]"
+                    style={{ background: step(runs) }}
+                  />
+                </Hint>
               )
             })}
           </div>
@@ -398,13 +405,14 @@ function Score({ time }: { time: Activity["time"] }) {
         <h3 className="font-sans text-[11px] font-semibold tracking-wide text-fg-muted uppercase">
           how much of your working time aide is running
         </h3>
-        <span
-          className="font-sans text-[10px] text-fg-dim"
-          title={`Measured over the ${time.activeDayCount} day${time.activeDayCount === 1 ? "" : "s"} in this window that had any work, from the first turn to the last, with sleeping hours taken out. Days you did not work at all are excluded — see 'not counted' below.`}
+        <Hint
+          hint={`Measured over the ${time.activeDayCount} day${time.activeDayCount === 1 ? "" : "s"} in this window that had any work, from the first turn to the last, with sleeping hours taken out. Days you did not work at all are excluded — see 'not counted' below.`}
         >
-          {time.activeDayCount} working day{time.activeDayCount === 1 ? "" : "s"} of{" "}
-          {time.windowDays}
-        </span>
+          <span className="font-sans text-[10px] text-fg-dim">
+            {time.activeDayCount} working day{time.activeDayCount === 1 ? "" : "s"} of{" "}
+            {time.windowDays}
+          </span>
+        </Hint>
       </div>
 
       {/* The number, big. This is the one figure the page exists to move, so it
@@ -428,21 +436,26 @@ function Score({ time }: { time: Activity["time"] }) {
           finished with nothing queued. On this machine that is 15.6h against
           96.8h. They partition the span exactly; `pnpm smoke` asserts it. */}
       <div className="mt-3 flex h-2.5 gap-[2px] overflow-hidden">
-        <span
-          className="rounded-[2px] bg-graph-1"
-          style={{ width: `${share(activeMs)}%` }}
-          title={`${duration(activeMs)} — a turn was running`}
-        />
-        <span
-          className="rounded-[2px] bg-graph-4"
-          style={{ width: `${share(reviewMs)}%` }}
-          title={`${duration(reviewMs)} — between turns in a sitting: reading, typing, deciding`}
-        />
-        <span
-          className="rounded-[2px] bg-warn"
-          style={{ width: `${share(deadMs)}%` }}
-          title={`${duration(deadMs)} — aide finished, nothing queued`}
-        />
+        <Hint hint={`${duration(activeMs)} — a turn was running`}>
+          <span
+            className="rounded-[2px] bg-graph-1"
+            style={{ width: `${share(activeMs)}%` }}
+          />
+        </Hint>
+        <Hint
+          hint={`${duration(reviewMs)} — between turns in a sitting: reading, typing, deciding`}
+        >
+          <span
+            className="rounded-[2px] bg-graph-4"
+            style={{ width: `${share(reviewMs)}%` }}
+          />
+        </Hint>
+        <Hint hint={`${duration(deadMs)} — aide finished, nothing queued`}>
+          <span
+            className="rounded-[2px] bg-warn"
+            style={{ width: `${share(deadMs)}%` }}
+          />
+        </Hint>
       </div>
 
       <div className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-1 font-sans text-[11px]">
@@ -462,12 +475,9 @@ function Score({ time }: { time: Activity["time"] }) {
           <span className="text-fg-dim">dead — the target</span>
         </span>
         <span className="flex-1" />
-        <span
-          className="text-fg-dim"
-          title="Days with no work at all, and the hours between 1am and 8am. Neither is something aide can win back, so neither is counted against the score."
-        >
-          {duration(awayMs)} not counted
-        </span>
+        <Hint hint="Days with no work at all, and the hours between 1am and 8am. Neither is something aide can win back, so neither is counted against the score.">
+          <span className="text-fg-dim">{duration(awayMs)} not counted</span>
+        </Hint>
       </div>
 
       {/* The reading in a sentence, because the three-way split is the one
@@ -511,21 +521,22 @@ function ScoreByDay({ days }: { days: Activity["time"]["activeDays"] }) {
         {days.map((day) => {
           const pct = day.spanMs ? (day.activeMs / day.spanMs) * 100 : 0
           return (
-            <div
+            <Hint
               key={day.day}
-              className="group flex h-full flex-1 flex-col justify-end"
-              title={`${shortDay(day.day)} — aide ran ${duration(day.activeMs)} of ${duration(day.spanMs)} working (${pct.toFixed(0)}%), leaving ${duration(day.idleMs)} idle. ${day.turns} turns over ${day.sittings} sitting${day.sittings === 1 ? "" : "s"}.`}
+              hint={`${shortDay(day.day)} — aide ran ${duration(day.activeMs)} of ${duration(day.spanMs)} working (${pct.toFixed(0)}%), leaving ${duration(day.idleMs)} idle. ${day.turns} turns over ${day.sittings} sitting${day.sittings === 1 ? "" : "s"}.`}
             >
-              {/* The column is the day's working span; the filled part at the
-                  bottom is aide. Anchored to the baseline so the fill grows the
-                  way the bar does. */}
-              <div
-                className="flex w-full flex-col justify-end overflow-hidden rounded-t-[2px] bg-input"
-                style={{ height: `${Math.max(4, (day.spanMs / peak) * 100)}%` }}
-              >
-                <div className="w-full bg-graph-1" style={{ height: `${pct}%` }} />
+              <div className="group flex h-full flex-1 flex-col justify-end">
+                {/* The column is the day's working span; the filled part at the
+                    bottom is aide. Anchored to the baseline so the fill grows the
+                    way the bar does. */}
+                <div
+                  className="flex w-full flex-col justify-end overflow-hidden rounded-t-[2px] bg-input"
+                  style={{ height: `${Math.max(4, (day.spanMs / peak) * 100)}%` }}
+                >
+                  <div className="w-full bg-graph-1" style={{ height: `${pct}%` }} />
+                </div>
               </div>
-            </div>
+            </Hint>
           )
         })}
       </div>
@@ -570,70 +581,74 @@ function Projects({
         {rows.map((row, i) => {
           const known = row.name !== null
           return (
-            <button
+            <Hint
               key={row.projectId}
-              type="button"
-              // A removed project has nothing to open — the registry entry it
-              // would navigate to is gone, and the four panes would land on an
-              // empty shell. It stays as a row because the totals above include
-              // it, but it is not a link.
-              disabled={!known}
-              onClick={() => known && onOpen(row.projectId)}
-              className="group flex flex-col gap-1 rounded-sm px-2 py-1.5 text-left enabled:hover:bg-hover disabled:cursor-default"
-              title={
+              hint={
                 known
                   ? `${row.runs} turn${row.runs === 1 ? "" : "s"} over ${row.chats} conversation${row.chats === 1 ? "" : "s"}. Open this project.`
                   : "This project has been removed from aide. Its history is still counted above."
               }
             >
-              <span className="flex items-baseline gap-2 font-sans text-[12px]">
-                {/* No separate host badge. A remote project's registry name is
-                    already `<dir> · <host>` — see `addRemoteProject` — so one
-                    drew `games42_mono · tg` followed by a second `tg`. The name
-                    is what every other list in aide shows, and it says it. */}
-                <span className={`truncate ${known ? "text-fg" : "text-fg-dim italic"}`}>
-                  {/* A removed project is identified by the id its logs carry,
-                      because there can be several and "removed project" three
-                      times over is a list you cannot tell apart — and that id is
-                      the only handle left to grep the run logs with. */}
-                  {row.name ?? `removed · ${row.projectId}`}
+              <button
+                type="button"
+                // A removed project has nothing to open — the registry entry it
+                // would navigate to is gone, and the four panes would land on an
+                // empty shell. It stays as a row because the totals above include
+                // it, but it is not a link.
+                disabled={!known}
+                onClick={() => known && onOpen(row.projectId)}
+                className="group flex flex-col gap-1 rounded-sm px-2 py-1.5 text-left enabled:hover:bg-hover disabled:cursor-default"
+              >
+                <span className="flex items-baseline gap-2 font-sans text-[12px]">
+                  {/* No separate host badge. A remote project's registry name is
+                      already `<dir> · <host>` — see `addRemoteProject` — so one
+                      drew `games42_mono · tg` followed by a second `tg`. The name
+                      is what every other list in aide shows, and it says it. */}
+                  <span className={`truncate ${known ? "text-fg" : "text-fg-dim italic"}`}>
+                    {/* A removed project is identified by the id its logs carry,
+                        because there can be several and "removed project" three
+                        times over is a list you cannot tell apart — and that id is
+                        the only handle left to grep the run logs with. */}
+                    {row.name ?? `removed · ${row.projectId}`}
+                  </span>
+                  <span className="flex-1" />
+                  {/* Text tokens, not the series colour: the mark beside them
+                      carries identity, and a number painted the series hue stops
+                      reading as a number. */}
+                  <span className="w-16 shrink-0 text-right tabular-nums text-fg-muted">
+                    {columnMoney(row.costUsd)}
+                  </span>
+                  <span className="w-12 shrink-0 text-right tabular-nums text-fg-dim">
+                    {duration(row.activeMs)}
+                  </span>
+                  {/* This project's own busy share, which is the reason the row
+                      carries `engagedMs` at all: the machine-wide 66% is an
+                      average over projects that differ enormously — 62% here
+                      against 36% on one that is mostly read-and-think. A project
+                      with no sittings yet shows nothing rather than 0%. */}
+                  <Hint
+                    hint={
+                      row.engagedMs
+                        ? `${duration(row.engagedMs)} at this project, of which ${duration(row.busyMs)} was a turn running.`
+                        : undefined
+                    }
+                  >
+                    <span className="w-10 shrink-0 text-right tabular-nums text-fg-dim">
+                      {row.engagedMs ? `${Math.round((row.busyMs / row.engagedMs) * 100)}%` : "·"}
+                    </span>
+                  </Hint>
+                  <span className="w-10 shrink-0 text-right tabular-nums text-fg-dim">
+                    {row.chats} ch
+                  </span>
                 </span>
-                <span className="flex-1" />
-                {/* Text tokens, not the series colour: the mark beside them
-                    carries identity, and a number painted the series hue stops
-                    reading as a number. */}
-                <span className="w-16 shrink-0 text-right tabular-nums text-fg-muted">
-                  {columnMoney(row.costUsd)}
+                <span className="flex h-1 w-full overflow-hidden rounded-full bg-input">
+                  <span
+                    className={`h-full rounded-full ${SERIES[i % SERIES.length]}`}
+                    style={{ width: `${Math.max(1, row.share * 100)}%` }}
+                  />
                 </span>
-                <span className="w-12 shrink-0 text-right tabular-nums text-fg-dim">
-                  {duration(row.activeMs)}
-                </span>
-                {/* This project's own busy share, which is the reason the row
-                    carries `engagedMs` at all: the machine-wide 66% is an
-                    average over projects that differ enormously — 62% here
-                    against 36% on one that is mostly read-and-think. A project
-                    with no sittings yet shows nothing rather than 0%. */}
-                <span
-                  className="w-10 shrink-0 text-right tabular-nums text-fg-dim"
-                  title={
-                    row.engagedMs
-                      ? `${duration(row.engagedMs)} at this project, of which ${duration(row.busyMs)} was a turn running.`
-                      : undefined
-                  }
-                >
-                  {row.engagedMs ? `${Math.round((row.busyMs / row.engagedMs) * 100)}%` : "·"}
-                </span>
-                <span className="w-10 shrink-0 text-right tabular-nums text-fg-dim">
-                  {row.chats} ch
-                </span>
-              </span>
-              <span className="flex h-1 w-full overflow-hidden rounded-full bg-input">
-                <span
-                  className={`h-full rounded-full ${SERIES[i % SERIES.length]}`}
-                  style={{ width: `${Math.max(1, row.share * 100)}%` }}
-                />
-              </span>
-            </button>
+              </button>
+            </Hint>
           )
         })}
       </div>
@@ -680,12 +695,12 @@ function Outcomes({ activity }: { activity: Activity }) {
               adjacent fills read as two rather than as one two-tone bar. */}
           <div className="mt-3 flex h-2.5 gap-[2px] overflow-hidden">
             {parts.map((p) => (
-              <span
-                key={p.key}
-                className={`${p.bg} rounded-[2px]`}
-                style={{ width: `${(p.n / total) * 100}%` }}
-                title={`${p.n} ${p.key} — ${((p.n / total) * 100).toFixed(0)}%`}
-              />
+              <Hint key={p.key} hint={`${p.n} ${p.key} — ${((p.n / total) * 100).toFixed(0)}%`}>
+                <span
+                  className={`${p.bg} rounded-[2px]`}
+                  style={{ width: `${(p.n / total) * 100}%` }}
+                />
+              </Hint>
             ))}
           </div>
           <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 font-sans text-[11px]">
@@ -773,15 +788,16 @@ function Checks({ rows }: { rows: Activity["checks"] }) {
                 its four siblings are identical for 30 characters and differ only
                 at the tail, so a normal truncate drew five rows reading
                 `node_modules/.bin/tsx chec…` and made them one row repeated. */}
-            <span
-              dir="rtl"
-              className={`w-44 shrink-0 truncate text-left ${
-                row.failed > 0 ? "text-fg" : "text-fg-muted"
-              }`}
-              title={row.command}
-            >
-              {row.command}
-            </span>
+            <Hint hint={row.command}>
+              <span
+                dir="rtl"
+                className={`w-44 shrink-0 truncate text-left ${
+                  row.failed > 0 ? "text-fg" : "text-fg-muted"
+                }`}
+              >
+                {row.command}
+              </span>
+            </Hint>
             <span className="flex h-2 flex-1 overflow-hidden rounded-sm bg-input">
               <span
                 // Time, not pass rate: the pass/fail counts are already printed
@@ -795,16 +811,17 @@ function Checks({ rows }: { rows: Activity["checks"] }) {
               {duration(row.medianMs)}
             </span>
             <span className="w-10 shrink-0 text-right tabular-nums text-ok">{row.passed}</span>
-            <span
-              className={`w-12 shrink-0 text-right tabular-nums ${
-                row.failed > 0 ? "text-err" : "text-transparent"
-              }`}
-              title={row.failed > 0 ? `${row.failed} refused a commit` : undefined}
-            >
-              {/* The word, for the reason the tools column uses one: this mono
-                  stack has no ✗ glyph and falls back to a capital X. */}
-              {row.failed > 0 ? `${row.failed} fail` : "·"}
-            </span>
+            <Hint hint={row.failed > 0 ? `${row.failed} refused a commit` : undefined}>
+              <span
+                className={`w-12 shrink-0 text-right tabular-nums ${
+                  row.failed > 0 ? "text-err" : "text-transparent"
+                }`}
+              >
+                {/* The word, for the reason the tools column uses one: this mono
+                    stack has no ✗ glyph and falls back to a capital X. */}
+                {row.failed > 0 ? `${row.failed} fail` : "·"}
+              </span>
+            </Hint>
           </div>
         ))}
       </div>
@@ -845,14 +862,15 @@ function ToolsAndModels({ activity }: { activity: Activity }) {
                     and falls back to a capital X, so `148✗` rendered as `148X`
                     — which reads as a multiplier, and as a count of successes
                     rather than of failures. */}
-                <span
-                  className={`w-14 shrink-0 text-right font-sans text-[10px] tabular-nums ${
-                    tool.failed > 0 ? "text-warn" : "text-transparent"
-                  }`}
-                  title={tool.failed > 0 ? `${tool.failed} came back an error` : undefined}
-                >
-                  {tool.failed > 0 ? `${tool.failed} err` : "·"}
-                </span>
+                <Hint hint={tool.failed > 0 ? `${tool.failed} came back an error` : undefined}>
+                  <span
+                    className={`w-14 shrink-0 text-right font-sans text-[10px] tabular-nums ${
+                      tool.failed > 0 ? "text-warn" : "text-transparent"
+                    }`}
+                  >
+                    {tool.failed > 0 ? `${tool.failed} err` : "·"}
+                  </span>
+                </Hint>
               </div>
             ))
           )}
@@ -873,11 +891,13 @@ function ToolsAndModels({ activity }: { activity: Activity }) {
                   className={`size-2 shrink-0 rounded-sm ${SERIES[i % SERIES.length]}`}
                   aria-hidden="true"
                 />
-                <span className="flex-1 truncate font-sans text-[11px] text-fg-muted" title={model.model}>
-                  {/* The date suffix on a model id is noise in a list of three.
-                      The full id is on the title, for when it is not. */}
-                  {model.model.replace(/-\d{8}$/, "")}
-                </span>
+                <Hint hint={model.model}>
+                  <span className="flex-1 truncate font-sans text-[11px] text-fg-muted">
+                    {/* The date suffix on a model id is noise in a list of three.
+                        The full id is on the hint, for when it is not. */}
+                    {model.model.replace(/-\d{8}$/, "")}
+                  </span>
+                </Hint>
                 <span className="w-16 shrink-0 text-right font-sans text-[11px] tabular-nums text-fg-muted">
                   {columnMoney(model.costUsd)}
                 </span>
@@ -1062,10 +1082,12 @@ export function Dashboard({
               </span>
               {/* Shown only when non-zero: a count of nothing is noise. */}
               {activity.unattributed > 0 && (
-                <span title="Turns whose log never named a session — the daemon stopped between the first event and the model's reply. Their spend is not counted above.">
-                  {activity.unattributed} turn{activity.unattributed === 1 ? "" : "s"} ended before
-                  they were attributed.
-                </span>
+                <Hint hint="Turns whose log never named a session — the daemon stopped between the first event and the model's reply. Their spend is not counted above.">
+                  <span>
+                    {activity.unattributed} turn{activity.unattributed === 1 ? "" : "s"} ended before
+                    they were attributed.
+                  </span>
+                </Hint>
               )}
             </footer>
           </div>

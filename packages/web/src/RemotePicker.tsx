@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useState } from "react"
 import type { SshHost, SshListing } from "@aide/protocol"
 import { api } from "./api"
+import { Hint } from "./Hint"
 import { Button } from "./ui"
 
 /** The parent of a POSIX path, or null at the root. */
@@ -142,9 +143,9 @@ export function RemotePicker({
             >
               up
             </Button>
-            <span className="truncate font-mono text-[11px] text-fg-dim" title={listing.path}>
-              {listing.path}
-            </span>
+            <Hint hint={listing.path}>
+              <span className="truncate font-mono text-[11px] text-fg-dim">{listing.path}</span>
+            </Hint>
           </div>
         )}
 

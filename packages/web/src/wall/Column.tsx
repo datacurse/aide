@@ -22,6 +22,7 @@ import {
   useUnstartedChats,
   type Draft,
 } from "../drafts.js"
+import { Hint } from "../Hint.js"
 import { ArrowDown, CaretRight, Check, EyeSlash, GitCommit, Lock, X } from "../icons.js"
 import { isCommitRun } from "../liveCommit.js"
 import { draftName } from "../naming.js"
@@ -614,20 +615,23 @@ export function WallColumn({
             holder ? "animate-pulse bg-info" : "bg-fg-dim"
           }`}
         />
-        <button
-          type="button"
-          onClick={() => onOpen({ wall: false, projectId: project.id, ...open })}
-          // The way out, for the questions a column cannot answer: the files,
-          // the history, the whole of a long transcript.
-          title={`${project.root} — open the panes on this project`}
-          className="min-w-0 flex-1 truncate text-left font-sans text-[12px] text-fg hover:underline"
-        >
-          {project.name}
-        </button>
+        {/* The way out, for the questions a column cannot answer: the files,
+            the history, the whole of a long transcript. */}
+        <Hint hint={`${project.root} — open the panes on this project`}>
+          <button
+            type="button"
+            onClick={() => onOpen({ wall: false, projectId: project.id, ...open })}
+            className="min-w-0 flex-1 truncate text-left font-sans text-[12px] text-fg hover:underline"
+          >
+            {project.name}
+          </button>
+        </Hint>
         {holder && (
-          <span className="max-w-[7rem] truncate font-sans text-[10px] text-info" title={heldBy(holder.title)}>
-            {holder.title}
-          </span>
+          <Hint hint={heldBy(holder.title)}>
+            <span className="max-w-[7rem] truncate font-sans text-[10px] text-info">
+              {holder.title}
+            </span>
+          </Hint>
         )}
         {/* Take this column off the wall. One press and no confirmation: it
             changes nothing, the count in the wall's header names it immediately,
@@ -635,14 +639,15 @@ export function WallColumn({
             armed would charge the price of a destructive act for a reversible
             one — and the two sit next to each other, so the difference in
             friction is itself what says they are different kinds of thing. */}
-        <button
-          type="button"
-          onClick={onHide}
-          title={`Hide ${project.name} from the wall. Nothing stops; any turn keeps running.`}
-          className="shrink-0 rounded-sm p-1 text-fg-dim hover:bg-hover hover:text-fg"
-        >
-          <EyeSlash className="size-3" />
-        </button>
+        <Hint hint={`Hide ${project.name} from the wall. Nothing stops; any turn keeps running.`}>
+          <button
+            type="button"
+            onClick={onHide}
+            className="shrink-0 rounded-sm p-1 text-fg-dim hover:bg-hover hover:text-fg"
+          >
+            <EyeSlash className="size-3" />
+          </button>
+        </Hint>
         {/* Forget this project. Two presses, and the second one says what it
             does rather than asking a question — see `RemoveProject`. */}
         <RemoveProject
@@ -655,17 +660,18 @@ export function WallColumn({
       {/* Which chat this column is about. A dropdown rather than a list, because
           the column's height belongs to the chat. */}
       <div className="relative flex shrink-0 items-center gap-1 border-b border-line bg-chrome px-2 py-1">
-        <button
-          type="button"
-          onClick={() => setPicking((v) => !v)}
-          className="flex min-w-0 flex-1 items-center gap-1.5 rounded px-1.5 py-0.5 text-left hover:bg-hover"
-          title="Which chat this column is showing"
-        >
-          <CaretRight className="size-3 shrink-0 rotate-90 text-fg-dim" />
-          <span className={`min-w-0 truncate font-sans text-[12px] ${open.sessionId || open.draftId ? "text-fg" : "text-fg-dim italic"}`}>
-            {openTitle}
-          </span>
-        </button>
+        <Hint hint="Which chat this column is showing">
+          <button
+            type="button"
+            onClick={() => setPicking((v) => !v)}
+            className="flex min-w-0 flex-1 items-center gap-1.5 rounded px-1.5 py-0.5 text-left hover:bg-hover"
+          >
+            <CaretRight className="size-3 shrink-0 rotate-90 text-fg-dim" />
+            <span className={`min-w-0 truncate font-sans text-[12px] ${open.sessionId || open.draftId ? "text-fg" : "text-fg-dim italic"}`}>
+              {openTitle}
+            </span>
+          </button>
+        </Hint>
         {/* Not locked under a holder: this parks a local record, the same act
             the panes' capture box has never gated. The lock is on the SEND —
             the composer below goes dark under a holder. */}
@@ -1045,14 +1051,15 @@ function ChatPicker({
             around a bare ✕ were a miss that discarded nothing.
           */}
           {row.kind === "draft" && (
-            <button
-              type="button"
-              onClick={() => onDiscard(row.key)}
-              title="Discard this unsent chat"
-              className="flex size-6 shrink-0 items-center justify-center rounded-sm text-fg-dim opacity-0 group-hover:opacity-100 hover:bg-hover hover:text-err"
-            >
-              <X className="size-3" />
-            </button>
+            <Hint hint="Discard this unsent chat">
+              <button
+                type="button"
+                onClick={() => onDiscard(row.key)}
+                className="flex size-6 shrink-0 items-center justify-center rounded-sm text-fg-dim opacity-0 group-hover:opacity-100 hover:bg-hover hover:text-err"
+              >
+                <X className="size-3" />
+              </button>
+            </Hint>
           )}
           {/* The started rows keep the ✕'s width, or the titles above and below
               a draft would sit at a different right edge and the list would look
@@ -1088,19 +1095,20 @@ function CommitFoot({
 }) {
   const canPush = ahead === null || ahead > 0
   const pushButton = (label: string, squash: boolean, title: string) => (
-    <button
-      type="button"
-      aria-disabled={blocked ? true : undefined}
-      onClick={blocked ? undefined : () => onPush(squash)}
-      disabled={blocked ? undefined : busy}
-      title={blocked ?? title}
-      className={`inline-flex shrink-0 items-center gap-1 rounded-sm px-2 py-0.5 font-sans text-[10px] transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
-        blocked ? LOCKED : "bg-accent text-white hover:bg-accent-hover"
-      }`}
-    >
-      {blocked && <Lock className="size-3 shrink-0" />}
-      {busy ? "pushing…" : label}
-    </button>
+    <Hint hint={blocked ?? title}>
+      <button
+        type="button"
+        aria-disabled={blocked ? true : undefined}
+        onClick={blocked ? undefined : () => onPush(squash)}
+        disabled={blocked ? undefined : busy}
+        className={`inline-flex shrink-0 items-center gap-1 rounded-sm px-2 py-0.5 font-sans text-[10px] transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+          blocked ? LOCKED : "bg-accent text-white hover:bg-accent-hover"
+        }`}
+      >
+        {blocked && <Lock className="size-3 shrink-0" />}
+        {busy ? "pushing…" : label}
+      </button>
+    </Hint>
   )
   return (
     <div className="flex h-8 shrink-0 items-center gap-2 border-t border-line bg-chrome px-3 font-sans text-[11px] text-fg-dim">
@@ -1114,12 +1122,11 @@ function CommitFoot({
           <GitCommit className="size-3 shrink-0" />
           {/* What WILL happen rather than what to do: the list clears itself
               when the next turn ends and the checks pass. */}
-          <span
-            className="min-w-0 flex-1 truncate text-fg-muted"
-            title="Committed automatically when the next turn ends and the checks pass"
-          >
-            {uncommitted} {uncommitted === 1 ? "file" : "files"} to auto-commit
-          </span>
+          <Hint hint="Committed automatically when the next turn ends and the checks pass">
+            <span className="min-w-0 flex-1 truncate text-fg-muted">
+              {uncommitted} {uncommitted === 1 ? "file" : "files"} to auto-commit
+            </span>
+          </Hint>
         </>
       )}
       {canPush && (
@@ -1194,33 +1201,37 @@ function RemoveProject({
 
   if (blocked) {
     return (
-      <span className={`inline-flex shrink-0 items-center rounded-sm p-1 ${LOCKED}`} title={blocked}>
-        <Lock className="size-3" />
-      </span>
+      <Hint hint={blocked}>
+        <span className={`inline-flex shrink-0 items-center rounded-sm p-1 ${LOCKED}`}>
+          <Lock className="size-3" />
+        </span>
+      </Hint>
     )
   }
 
   if (armed) {
     return (
-      <button
-        type="button"
-        onClick={onRemove}
-        title={`Drop ${name} from aide's list. The repository and its files are untouched.`}
-        className="shrink-0 rounded-sm bg-diff-del-fg/85 px-1.5 py-0.5 font-sans text-[10px] text-white hover:bg-diff-del-fg"
-      >
-        forget {name}
-      </button>
+      <Hint hint={`Drop ${name} from aide's list. The repository and its files are untouched.`}>
+        <button
+          type="button"
+          onClick={onRemove}
+          className="shrink-0 rounded-sm bg-diff-del-fg/85 px-1.5 py-0.5 font-sans text-[10px] text-white hover:bg-diff-del-fg"
+        >
+          forget {name}
+        </button>
+      </Hint>
     )
   }
 
   return (
-    <button
-      type="button"
-      onClick={() => setArmed(true)}
-      title="Remove this project from aide. Nothing on disk is deleted."
-      className="shrink-0 rounded-sm p-1 text-fg-dim hover:bg-hover hover:text-err"
-    >
-      <X className="size-3" />
-    </button>
+    <Hint hint="Remove this project from aide. Nothing on disk is deleted.">
+      <button
+        type="button"
+        onClick={() => setArmed(true)}
+        className="shrink-0 rounded-sm p-1 text-fg-dim hover:bg-hover hover:text-err"
+      >
+        <X className="size-3" />
+      </button>
+    </Hint>
   )
 }

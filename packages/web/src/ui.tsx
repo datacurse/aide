@@ -1,3 +1,4 @@
+import { Hint } from "./Hint.js"
 import { Lock } from "./icons.js"
 
 /**
@@ -90,23 +91,26 @@ export function Button({
     danger: "bg-diff-del-fg/85 text-white hover:bg-diff-del-fg",
   }
   return (
-    <button
-      type="button"
-      title={locked ?? title}
-      // `aria-disabled` and a dropped press, not `disabled`. A disabled button
-      // takes no pointer events, so its `title` never opens — which is how the
-      // one sentence naming what has the repo became the one thing on screen you
-      // could not read. Every `locked` here is a sentence written to be read.
-      aria-disabled={locked ? true : undefined}
-      onClick={locked ? undefined : onClick}
-      disabled={locked ? undefined : disabled}
-      className={`inline-flex items-center gap-1 rounded-sm px-2.5 py-1 text-xs transition-colors outline-none focus-visible:ring-1 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-40 ${
-        locked ? LOCKED : tones[tone]
-      }`}
-    >
-      {locked && <Lock className="size-3 shrink-0" />}
-      {children}
-    </button>
+    <Hint hint={locked ?? title}>
+      <button
+        type="button"
+        // `aria-disabled` and a dropped press, not `disabled`. A disabled button
+        // takes no pointer events, so nothing hovering it ever fires — which is
+        // how the one sentence naming what has the repo became the one thing on
+        // screen you could not read. Every `locked` here is a sentence written
+        // to be read. Still true now the hint is aide's own: `Hint` opens on
+        // `pointerenter`, which a disabled button does not emit either.
+        aria-disabled={locked ? true : undefined}
+        onClick={locked ? undefined : onClick}
+        disabled={locked ? undefined : disabled}
+        className={`inline-flex items-center gap-1 rounded-sm px-2.5 py-1 text-xs transition-colors outline-none focus-visible:ring-1 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-40 ${
+          locked ? LOCKED : tones[tone]
+        }`}
+      >
+        {locked && <Lock className="size-3 shrink-0" />}
+        {children}
+      </button>
+    </Hint>
   )
 }
 

@@ -44,6 +44,7 @@ import {
   parseLocation,
   parseTurnSummary,
   PerProjectMemo,
+  placeHint,
   planChecks,
   projectGates,
   restartDecision,
@@ -764,6 +765,71 @@ console.log("\na snapshot that is stable across projects")
   check("a new store recomputes", after !== first && computed === before + 1)
 
   check("no project is not an empty list", memo.read(source, null, rows) === null)
+}
+
+console.log("\nwhere a hover hint goes")
+{
+  // Every one of these is a silent failure. A hint placed off the right edge of
+  // the window, or flipped under the pointer, or with its arrow pointing at its
+  // own middle instead of at the thing it describes, still RENDERS — nothing
+  // throws and nothing logs. The only report is somebody noticing they cannot
+  // read it, which is why the arithmetic is in protocol rather than in the
+  // component that paints it.
+  const view = { width: 1000, height: 800 }
+  const box = { width: 200, height: 40 }
+  /** A 20x20 anchor with its top-left at (x, y). */
+  const at = (x: number, y: number) => ({ left: x, top: y, right: x + 20, bottom: y + 20 })
+
+  const mid = placeHint(at(500, 400), box, view)
+  check("a hint opens above what it describes", mid.side === "top")
+  check("clear of it by the offset", mid.top === 400 - 40 - 6, `${mid.top}`)
+  check("centred on it", mid.left === 510 - 100, `${mid.left}`)
+  check("with the arrow at its own centre", mid.arrow === 100, `${mid.arrow}`)
+
+  // The flip, and the reason it is a comparison rather than a test of the
+  // default: near the TOP there is room below and the hint must go there.
+  const top = placeHint(at(500, 5), box, view)
+  check("no room above flips it under", top.side === "bottom")
+  check("clear of it downwards", top.top === 25 + 6, `${top.top}`)
+
+  // Near the BOTTOM there is room above, so it stays above — the ordinary case
+  // for the working bar and the rail's foot, which sit on a window edge.
+  const bottom = placeHint(at(500, 770), box, view)
+  check("an element at the bottom edge keeps its hint above", bottom.side === "top")
+
+  // Neither side fits, and above is the roomier of the two. Flipping here would
+  // trade a clipped top for a MORE clipped bottom, so the comparison has to be
+  // between the two rooms rather than a test of the default alone.
+  const squeezed = placeHint(at(500, 40), box, { width: 1000, height: 80 })
+  check("when neither side fits it takes the roomier one", squeezed.side === "top")
+  // And the same shape the other way up: barely any room above, more below.
+  const squeezedDown = placeHint(at(500, 10), box, { width: 1000, height: 80 })
+  check("and flips when below is the roomier one", squeezedDown.side === "bottom")
+
+  // The horizontal clamp, and the arrow following the anchor out of the box's
+  // centre — this is what stops a clamped hint pointing at nothing.
+  const right = placeHint(at(980, 400), box, view)
+  check("a hint near the right edge is pulled back", right.left === 1000 - 200 - 8, `${right.left}`)
+  check("and stays on screen", right.left + box.width <= view.width)
+  check("its arrow follows the anchor, not the box", right.arrow > 100, `${right.arrow}`)
+  check("and stays inside the box", right.arrow <= box.width - 8)
+
+  const left = placeHint(at(0, 400), box, view)
+  check("a hint near the left edge is pushed in", left.left === 8, `${left.left}`)
+  // The anchor's centre (x=10) is only 2px into a box pushed to x=8, which is
+  // inside the corner the box's own border and rounding occupy. The arrow pins
+  // at the inset rather than being drawn half-cut — the guard doing its job.
+  check("an arrow that would land in the corner pins to the inset", left.arrow === 8, `${left.arrow}`)
+
+  // A box wider than the window pins LEFT, because the start of a sentence is
+  // the half worth keeping. Clamping the other way round loses the beginning.
+  const wide = placeHint(at(500, 400), { width: 1200, height: 40 }, view)
+  check("a hint wider than the window pins to the left", wide.left === 8, `${wide.left}`)
+
+  // A zero-width box is what a hint measured before its first paint looks like;
+  // the arrow must not come out negative and land outside its own element.
+  const empty = placeHint(at(500, 400), { width: 0, height: 0 }, view)
+  check("an unmeasured hint still places an arrow", empty.arrow >= 0, `${empty.arrow}`)
 }
 
 console.log("\nwhere you are, as a URL")

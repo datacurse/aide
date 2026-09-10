@@ -16,6 +16,7 @@ import {
   useUnstartedChats,
   type Draft,
 } from "../drafts.js"
+import { Hint } from "../Hint.js"
 import { Check, Lock, Play, X } from "../icons.js"
 import { ImageViewer, useImageViewer } from "../ImageViewer.js"
 import { draftName, useAutoNames } from "../naming.js"
@@ -178,59 +179,61 @@ function UnstartedRow({
         selected ? `${SELECTED} text-fg` : "border-transparent text-fg-muted"
       }`}
     >
-      <button
-        type="button"
-        onClick={onOpen}
-        // What was actually parked, in full. The line above is a name a model
-        // wrote once the request outgrew the column, so without this there is no
-        // way to check it against your own words short of opening the chat.
-        title={said || undefined}
-        className="flex min-w-0 flex-1 flex-col gap-0.5 pr-1.5 text-left"
-      >
-        <span className="truncate text-[13px]">{preview || "New chat"}</span>
-        <div className="flex items-baseline gap-2 text-[10px] tabular-nums text-fg-dim">
-          {/* First in the line, the column a started chat puts its own time in —
-              a parked chat is the same list at an earlier age, and a date that
-              moves between the two would be a date you have to hunt for. Which
-              date follows the sort, for the same reason `born` gives: printing
-              one and ordering by the other reads as a broken sort. */}
-          <span
-            title={
-              draft.updatedAt !== draft.createdAt
-                ? `Parked ${fullDate(draft.createdAt)}\nLast edited ${fullDate(draft.updatedAt)}`
-                : `Parked ${fullDate(draft.createdAt)}`
-            }
-          >
-            {when(order === "activity" ? draft.updatedAt : draft.createdAt)}
-          </span>
-          {/* The same lie as the blank title, in the line underneath: a chat
-              whose first turn is in flight has plainly been sent. It says so
-              until the handoff lands and this row becomes the conversation,
-              which is where the run mark takes over. */}
-          <span>{starting ? "starting…" : "not sent yet"}</span>
-          {draft.attachments.length > 0 && (
-            <span>
-              {draft.attachments.length} image{draft.attachments.length > 1 ? "s" : ""}
-            </span>
-          )}
-        </div>
-      </button>
-      <button
-        type="button"
-        onClick={onDiscard}
-        title="Discard this chat"
-        // Still hover-only, and still unfilled — discarding a row is not what
-        // you came to the list to do — but a real target rather than the size
-        // of the glyph: the ✕ was 12px, and the pixels either side of it were a
-        // miss that discarded nothing and cost a second to notice.
-        //
-        // `mr-1` now that the row itself has no gap: this one is a bare glyph
-        // rather than a plate, so without it the ✕ sits flush against the ▶'s
-        // border and the two read as one control.
-        className="mr-1 flex size-7 shrink-0 items-center justify-center text-fg-dim opacity-0 group-hover:opacity-100 hover:text-err"
-      >
-        <X className="size-4" />
-      </button>
+      {/* What was actually parked, in full. The line above is a name a model
+          wrote once the request outgrew the column, so without this there is no
+          way to check it against your own words short of opening the chat. */}
+      <Hint hint={said || undefined}>
+        <button
+          type="button"
+          onClick={onOpen}
+          className="flex min-w-0 flex-1 flex-col gap-0.5 pr-1.5 text-left"
+        >
+          <span className="truncate text-[13px]">{preview || "New chat"}</span>
+          <div className="flex items-baseline gap-2 text-[10px] tabular-nums text-fg-dim">
+            {/* First in the line, the column a started chat puts its own time in —
+                a parked chat is the same list at an earlier age, and a date that
+                moves between the two would be a date you have to hunt for. Which
+                date follows the sort, for the same reason `born` gives: printing
+                one and ordering by the other reads as a broken sort. */}
+            <Hint
+              hint={
+                draft.updatedAt !== draft.createdAt
+                  ? `Parked ${fullDate(draft.createdAt)}\nLast edited ${fullDate(draft.updatedAt)}`
+                  : `Parked ${fullDate(draft.createdAt)}`
+              }
+            >
+              <span>{when(order === "activity" ? draft.updatedAt : draft.createdAt)}</span>
+            </Hint>
+            {/* The same lie as the blank title, in the line underneath: a chat
+                whose first turn is in flight has plainly been sent. It says so
+                until the handoff lands and this row becomes the conversation,
+                which is where the run mark takes over. */}
+            <span>{starting ? "starting…" : "not sent yet"}</span>
+            {draft.attachments.length > 0 && (
+              <span>
+                {draft.attachments.length} image{draft.attachments.length > 1 ? "s" : ""}
+              </span>
+            )}
+          </div>
+        </button>
+      </Hint>
+      <Hint hint="Discard this chat">
+        <button
+          type="button"
+          onClick={onDiscard}
+          // Still hover-only, and still unfilled — discarding a row is not what
+          // you came to the list to do — but a real target rather than the size
+          // of the glyph: the ✕ was 12px, and the pixels either side of it were a
+          // miss that discarded nothing and cost a second to notice.
+          //
+          // `mr-1` now that the row itself has no gap: this one is a bare glyph
+          // rather than a plate, so without it the ✕ sits flush against the ▶'s
+          // border and the two read as one control.
+          className="mr-1 flex size-7 shrink-0 items-center justify-center text-fg-dim opacity-0 group-hover:opacity-100 hover:text-err"
+        >
+          <X className="size-4" />
+        </button>
+      </Hint>
       {/*
         Start it, in one press.
 
@@ -265,21 +268,24 @@ function UnstartedRow({
         a few pixels from the ✕ that throws the same row away.
       */}
       {written && (
-        <button
-          type="button"
-          // Not `disabled`: the title is the only place this row can say WHY,
-          // and a disabled button never opens one. See `Button` in ui.tsx.
-          aria-disabled={blocked ? true : undefined}
-          onClick={blocked ? undefined : onStart}
-          title={blocked ?? "Start this chat — opens it and sends it"}
-          className={`flex size-9 shrink-0 items-center justify-center rounded-sm border ${
-            blocked
-              ? `border-diff-del-fg/40 ${LOCKED}`
-              : "border-line-soft bg-input text-fg-muted hover:border-ok hover:bg-raised hover:text-ok"
-          }`}
-        >
-          {blocked ? <Lock className="size-5" /> : <Play className="size-5" />}
-        </button>
+        <Hint hint={blocked ?? "Start this chat — opens it and sends it"}>
+          <button
+            type="button"
+            // Not `disabled`: the hint is the only place this row can say WHY,
+            // and a disabled element emits no `pointerenter`, which is what
+            // opens one — so the reason would be unreachable exactly when it is
+            // the only thing worth reading. See `Button` in ui.tsx.
+            aria-disabled={blocked ? true : undefined}
+            onClick={blocked ? undefined : onStart}
+            className={`flex size-9 shrink-0 items-center justify-center rounded-sm border ${
+              blocked
+                ? `border-diff-del-fg/40 ${LOCKED}`
+                : "border-line-soft bg-input text-fg-muted hover:border-ok hover:bg-raised hover:text-ok"
+            }`}
+          >
+            {blocked ? <Lock className="size-5" /> : <Play className="size-5" />}
+          </button>
+        </Hint>
       )}
     </div>
   )
@@ -384,28 +390,30 @@ function CaptureBox({ projectId }: { projectId: string }) {
                 className="inline-flex items-center gap-1 rounded border border-line-soft px-1.5 py-0.5 font-sans text-[10px] text-fg-dim"
               >
                 {seat >= 0 && (
-                  <button
-                    type="button"
-                    onClick={() => viewer.show(seat)}
-                    title="See what this is, full size"
-                    className="cursor-zoom-in"
-                  >
-                    <img
-                      src={`data:${a.mediaType};base64,${a.data}`}
-                      alt=""
-                      className="size-3.5 rounded-sm object-cover"
-                    />
-                  </button>
+                  <Hint hint="See what this is, full size">
+                    <button
+                      type="button"
+                      onClick={() => viewer.show(seat)}
+                      className="cursor-zoom-in"
+                    >
+                      <img
+                        src={`data:${a.mediaType};base64,${a.data}`}
+                        alt=""
+                        className="size-3.5 rounded-sm object-cover"
+                      />
+                    </button>
+                  </Hint>
                 )}
                 <span className="max-w-32 truncate">{a.name ?? "image"}</span>
-                <button
-                  type="button"
-                  onClick={() => edit({ attachments: attachments.filter((x) => x.id !== a.id) })}
-                  title="Remove this attachment"
-                  className="hover:text-err"
-                >
-                  <X className="size-2.5" />
-                </button>
+                <Hint hint="Remove this attachment">
+                  <button
+                    type="button"
+                    onClick={() => edit({ attachments: attachments.filter((x) => x.id !== a.id) })}
+                    className="hover:text-err"
+                  >
+                    <X className="size-2.5" />
+                  </button>
+                </Hint>
               </span>
             )
           })}
@@ -602,10 +610,8 @@ function DoneCheck({
   onToggle: () => void
 }) {
   return (
-    <button
-      type="button"
-      onClick={onToggle}
-      title={
+    <Hint
+      hint={
         working
           ? HAS_THE_REPO(heldSince)
           : ranLast
@@ -614,43 +620,48 @@ function DoneCheck({
               ? "Served its purpose. Click to reopen it."
               : "Mark this chat done"
       }
-      // The same 36px filled square the ▶ on a parked chat wears, because the
-      // two are the same slot at two ages — see `UnstartedRow`, which is also
-      // where the size is argued.
-      //
-      // `relative`, because the run dial is drawn on this square rather than
-      // beside it.
-      className={`relative flex size-9 shrink-0 items-center justify-center rounded-sm border bg-input ${
-        // Gold outline, and it outranks the two below. Where the last run
-        // happened is the row you most often want next, and a green tick or a
-        // grey plate is what that row looks like the rest of the time — so the
-        // mark has to survive being on either. It is the border alone: this
-        // square is a control with three other things to say, and a fill would
-        // leave it saying one.
-        ranLast && !working
-          ? `border-found ${done ? "text-ok/45" : "text-transparent group-hover:text-fg-muted"}`
-          : done
-            ? // Dimmer than it was. A project with seventy archived chats draws
-              // a solid column of these, and at full strength that wall of green
-              // was the loudest thing in the pane — shouting the one fact you
-              // have already dealt with, over the two rows that still want
-              // something. A tick you have to be looking at to see is right for
-              // a state whose whole meaning is "no longer your problem".
-              "border-ok/25 text-ok/45 hover:border-ok/60 hover:text-ok"
-            : // `text-transparent` rather than `invisible`: the tick is still
-              // there to be hovered, and `currentColor` on the icon means it
-              // vanishes with the text colour it inherits.
-              "border-line-soft text-transparent group-hover:text-fg-muted hover:border-fg-muted"
-      }`}
     >
-      {/* `hidden`, not `opacity-0`. An invisible tick is still a 20px flex item,
-          so the row centred the PAIR of it and the elapsed count — which put the
-          number visibly right of the dial it is supposed to sit in the middle of.
-          The square's own size is fixed either way, so taking the tick out of the
-          layout costs nothing and is what lets the digits centre. */}
-      <Check className={`size-5 ${working ? "hidden" : ""}`} />
-      {working && <RunDial since={heldSince} />}
-    </button>
+      <button
+        type="button"
+        onClick={onToggle}
+        // The same 36px filled square the ▶ on a parked chat wears, because the
+        // two are the same slot at two ages — see `UnstartedRow`, which is also
+        // where the size is argued.
+        //
+        // `relative`, because the run dial is drawn on this square rather than
+        // beside it.
+        className={`relative flex size-9 shrink-0 items-center justify-center rounded-sm border bg-input ${
+          // Gold outline, and it outranks the two below. Where the last run
+          // happened is the row you most often want next, and a green tick or a
+          // grey plate is what that row looks like the rest of the time — so the
+          // mark has to survive being on either. It is the border alone: this
+          // square is a control with three other things to say, and a fill would
+          // leave it saying one.
+          ranLast && !working
+            ? `border-found ${done ? "text-ok/45" : "text-transparent group-hover:text-fg-muted"}`
+            : done
+              ? // Dimmer than it was. A project with seventy archived chats draws
+                // a solid column of these, and at full strength that wall of green
+                // was the loudest thing in the pane — shouting the one fact you
+                // have already dealt with, over the two rows that still want
+                // something. A tick you have to be looking at to see is right for
+                // a state whose whole meaning is "no longer your problem".
+                "border-ok/25 text-ok/45 hover:border-ok/60 hover:text-ok"
+              : // `text-transparent` rather than `invisible`: the tick is still
+                // there to be hovered, and `currentColor` on the icon means it
+                // vanishes with the text colour it inherits.
+                "border-line-soft text-transparent group-hover:text-fg-muted hover:border-fg-muted"
+        }`}
+      >
+        {/* `hidden`, not `opacity-0`. An invisible tick is still a 20px flex item,
+            so the row centred the PAIR of it and the elapsed count — which put the
+            number visibly right of the dial it is supposed to sit in the middle of.
+            The square's own size is fixed either way, so taking the tick out of the
+            layout costs nothing and is what lets the digits centre. */}
+        <Check className={`size-5 ${working ? "hidden" : ""}`} />
+        {working && <RunDial since={heldSince} />}
+      </button>
+    </Hint>
   )
 }
 
@@ -693,21 +704,24 @@ function GroupLabel({
   }`
   if (!onToggle) return <div className={base}>{line}</div>
   return (
-    <button
-      type="button"
-      onClick={onToggle}
-      title={
+    <Hint
+      hint={
         folded
           ? `${count} archived chat${count === 1 ? "" : "s"} hidden. Click to show them.`
           : "Hide the archived chats. The heading and the count stay."
       }
-      className={`${base} w-full text-left hover:text-fg-muted`}
     >
-      {line}
-      <span className="ml-auto font-normal normal-case tracking-normal">
-        {folded ? "show" : "hide"}
-      </span>
-    </button>
+      <button
+        type="button"
+        onClick={onToggle}
+        className={`${base} w-full text-left hover:text-fg-muted`}
+      >
+        {line}
+        <span className="ml-auto font-normal normal-case tracking-normal">
+          {folded ? "show" : "hide"}
+        </span>
+      </button>
+    </Hint>
   )
 }
 
@@ -731,16 +745,17 @@ function OrderPicker({
   onChange: (next: ChatOrder) => void
 }) {
   const opt = (value: ChatOrder, label: string, hint: string) => (
-    <button
-      type="button"
-      onClick={() => onChange(value)}
-      title={hint}
-      className={`font-normal normal-case tracking-normal ${
-        order === value ? "text-fg-muted underline underline-offset-2" : "hover:text-fg-muted"
-      }`}
-    >
-      {label}
-    </button>
+    <Hint hint={hint}>
+      <button
+        type="button"
+        onClick={() => onChange(value)}
+        className={`font-normal normal-case tracking-normal ${
+          order === value ? "text-fg-muted underline underline-offset-2" : "hover:text-fg-muted"
+        }`}
+      >
+        {label}
+      </button>
+    </Hint>
   )
   return (
     <div className="flex items-baseline gap-2 border-b border-line px-3 py-1 font-sans text-[10px] font-semibold tracking-wide text-fg-dim uppercase">
@@ -833,58 +848,65 @@ function ChatRow({
         selected ? SELECTED : "border-transparent"
       } ${selected || working ? "text-fg" : "text-fg-muted"}`}
     >
-      <button
-        type="button"
-        onClick={onOpen}
-        title={chat.gitBranch ? `${chat.cwd} · ${chat.gitBranch}` : chat.cwd}
-        // Just enough that a truncating title's ellipsis does not touch the
-        // plate beside it. The row's own gap used to be doing this, at four
-        // times the width.
-        className="flex min-w-0 flex-1 flex-col gap-0.5 pr-1.5 text-left"
-      >
-        <div className="flex items-baseline gap-2">
-          {chat.kind !== "chat" && (
-            <span className={`shrink-0 text-[10px] ${kindColor(chat)}`}>{kindLabel(chat)}</span>
-          )}
-          <span
-            className={`flex-1 truncate text-[13px] ${
-              closed ? "line-through decoration-1 opacity-60" : ""
-            }`}
-          >
-            {chat.title}
-          </span>
-        </div>
-        {/* Tabular figures, so the money column does not shuffle sideways as you
-            read down a list of costs that differ only in the cents. */}
-        <div className={`flex items-baseline gap-1.5 text-[10px] tabular-nums ${meta}`}>
-          {/* First, and only while a run is in flight: it is the one figure on
-              the line that is CHANGING, and the rest of the line is a record of
-              what the chat has already cost. It reads as the same kind of thing
-              as the numbers beside it — which it is — rather than as a badge
-              needing its own furniture. */}
-          <span title={dateTitle(chat)}>
-            {when(order === "activity" ? chat.lastModified : born(chat))}
-          </span>
-          {spend && spend.activeMs > 0 && (
-            <>
-              <Dot />
-              <span title={WORKING_TIME(spend.turns)}>{dur(spend.activeMs)}</span>
-            </>
-          )}
-          {spend && spend.costUsd > 0 && (
-            <>
-              <Dot />
-              <span title={COST_IS_AN_ESTIMATE}>{money(spend.costUsd)}</span>
-            </>
-          )}
-          {spend && spend.usageShare > 0 && (
-            <>
-              <Dot />
-              <span title={USAGE_SHARE(spend.tokens)}>{share(spend.usageShare)}</span>
-            </>
-          )}
-        </div>
-      </button>
+      <Hint hint={chat.gitBranch ? `${chat.cwd} · ${chat.gitBranch}` : chat.cwd}>
+        <button
+          type="button"
+          onClick={onOpen}
+          // Just enough that a truncating title's ellipsis does not touch the
+          // plate beside it. The row's own gap used to be doing this, at four
+          // times the width.
+          className="flex min-w-0 flex-1 flex-col gap-0.5 pr-1.5 text-left"
+        >
+          <div className="flex items-baseline gap-2">
+            {chat.kind !== "chat" && (
+              <span className={`shrink-0 text-[10px] ${kindColor(chat)}`}>{kindLabel(chat)}</span>
+            )}
+            <span
+              className={`flex-1 truncate text-[13px] ${
+                closed ? "line-through decoration-1 opacity-60" : ""
+              }`}
+            >
+              {chat.title}
+            </span>
+          </div>
+          {/* Tabular figures, so the money column does not shuffle sideways as you
+              read down a list of costs that differ only in the cents. */}
+          <div className={`flex items-baseline gap-1.5 text-[10px] tabular-nums ${meta}`}>
+            {/* First, and only while a run is in flight: it is the one figure on
+                the line that is CHANGING, and the rest of the line is a record of
+                what the chat has already cost. It reads as the same kind of thing
+                as the numbers beside it — which it is — rather than as a badge
+                needing its own furniture. */}
+            <Hint hint={dateTitle(chat)}>
+              <span>{when(order === "activity" ? chat.lastModified : born(chat))}</span>
+            </Hint>
+            {spend && spend.activeMs > 0 && (
+              <>
+                <Dot />
+                <Hint hint={WORKING_TIME(spend.turns)}>
+                  <span>{dur(spend.activeMs)}</span>
+                </Hint>
+              </>
+            )}
+            {spend && spend.costUsd > 0 && (
+              <>
+                <Dot />
+                <Hint hint={COST_IS_AN_ESTIMATE}>
+                  <span>{money(spend.costUsd)}</span>
+                </Hint>
+              </>
+            )}
+            {spend && spend.usageShare > 0 && (
+              <>
+                <Dot />
+                <Hint hint={USAGE_SHARE(spend.tokens)}>
+                  <span>{share(spend.usageShare)}</span>
+                </Hint>
+              </>
+            )}
+          </div>
+        </button>
+      </Hint>
       {/* On `done`, not on `closed`: `closed` is a derivation that running
           outranks, and the box is the bit's own control. They used to differ on
           a ticked chat with a turn in flight — the box drew empty over a

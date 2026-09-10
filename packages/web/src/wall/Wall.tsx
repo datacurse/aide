@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react"
 import { splitHiddenColumns } from "@aide/protocol"
 import { api, type ProjectView } from "../api.js"
+import { Hint } from "../Hint.js"
 import { Eye } from "../icons.js"
 import { Button, Empty } from "../ui.js"
 import { usePoll } from "../usePoll.js"
@@ -115,15 +116,18 @@ export function Wall({
             A hidden column that the page never mentions is the wall quietly
             under-reporting what exists — see the note at the top. */}
         {hiddenCount > 0 && (
-          <button
-            type="button"
-            onClick={hidden.showAll}
-            title={`Show ${hiddenCount === 1 ? "the hidden column" : `all ${hiddenCount} hidden columns`} again`}
-            className="flex shrink-0 items-center gap-1 rounded-sm px-1.5 py-0.5 font-sans text-[11px] text-fg-dim hover:bg-hover hover:text-fg"
+          <Hint
+            hint={`Show ${hiddenCount === 1 ? "the hidden column" : `all ${hiddenCount} hidden columns`} again`}
           >
-            <Eye className="size-3 shrink-0" />
-            {hiddenCount} hidden
-          </button>
+            <button
+              type="button"
+              onClick={hidden.showAll}
+              className="flex shrink-0 items-center gap-1 rounded-sm px-1.5 py-0.5 font-sans text-[11px] text-fg-dim hover:bg-hover hover:text-fg"
+            >
+              <Eye className="size-3 shrink-0" />
+              {hiddenCount} hidden
+            </button>
+          </Hint>
         )}
         {error && <span className="font-sans text-[11px] text-err">{error}</span>}
         <div className="ml-auto">

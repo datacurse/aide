@@ -26,6 +26,7 @@ import {
   Warning,
   X,
 } from "../icons.js"
+import { Hint } from "../Hint.js"
 import { ImageViewer, useImageViewer } from "../ImageViewer.js"
 import { Markdown } from "../Markdown.js"
 import { CallBlocks, CallDetail } from "../CallDetail.js"
@@ -1099,19 +1100,15 @@ function UserRow({ line }: { line: UserLine }) {
       {pictures.length > 0 && (
         <div className="mb-1.5 flex flex-wrap gap-1.5">
           {pictures.map((img, i) => (
-            <button
-              key={i}
-              type="button"
-              onClick={() => viewer.show(i)}
-              title="See what this is, full size"
-              className="cursor-zoom-in"
-            >
-              <img
-                src={`data:${img.mediaType};base64,${img.data}`}
-                alt="attached image"
-                className="h-12 w-auto rounded-sm border border-line"
-              />
-            </button>
+            <Hint key={i} hint="See what this is, full size">
+              <button type="button" onClick={() => viewer.show(i)} className="cursor-zoom-in">
+                <img
+                  src={`data:${img.mediaType};base64,${img.data}`}
+                  alt="attached image"
+                  className="h-12 w-auto rounded-sm border border-line"
+                />
+              </button>
+            </Hint>
           ))}
         </div>
       )}
@@ -1593,26 +1590,30 @@ function renderLine(
     )
   if (line.kind === "error")
     return (
-      <p key={line.key} className="px-1 break-words text-err" title={line.text}>
-        <Warning className={INLINE_MARK} />
-        {humanizeError(line.text)}
-      </p>
+      <Hint key={line.key} hint={line.text}>
+        <p className="px-1 break-words text-err">
+          <Warning className={INLINE_MARK} />
+          {humanizeError(line.text)}
+        </p>
+      </Hint>
     )
   if (line.kind === "outcome") {
     const outcome = describeOutcome(line)
     return (
       <div key={line.key} className="mt-3 border-t border-line px-1 pt-2">
-        <p title={`SDK result subtype: ${line.subtype}`} className={outcome.className}>
-          <Circle className={INLINE_MARK} />
-          {outcome.label}
-          <span className="text-fg-dim">
-            {" — "}
-            {/* A commit run has no SDK steps to count, and "0 turns" on the end of
-                one reads as a failure rather than as a category difference. */}
-            {line.turns > 0 && `${line.turns} turns · `}
-            {(line.ms / 1000).toFixed(1)}s · ~{money(line.cost)} est.
-          </span>
-        </p>
+        <Hint hint={`SDK result subtype: ${line.subtype}`}>
+          <p className={outcome.className}>
+            <Circle className={INLINE_MARK} />
+            {outcome.label}
+            <span className="text-fg-dim">
+              {" — "}
+              {/* A commit run has no SDK steps to count, and "0 turns" on the end of
+                  one reads as a failure rather than as a category difference. */}
+              {line.turns > 0 && `${line.turns} turns · `}
+              {(line.ms / 1000).toFixed(1)}s · ~{money(line.cost)} est.
+            </span>
+          </p>
+        </Hint>
         {/* What the SDK said, under the line that says it failed. The subtype
             names the wall that was hit and is already in the label; these are
             the only place the actual reason appears.
@@ -1624,12 +1625,12 @@ function renderLine(
             a conversation that never got a reply: a turn interrupted a second
             in read as `[ede_diagnostic] result_type=user last_content_type=n/a
             stop_reason=null`, which is indistinguishable from the model having
-            answered with nonsense. The raw text stays on `title` for anyone
+            answered with nonsense. The raw text stays on the hint for anyone
             debugging. */}
         {line.errors.map((text, i) => (
-          <p key={i} className="mt-1 break-words text-err" title={text}>
-            {humanizeError(text)}
-          </p>
+          <Hint key={i} hint={text}>
+            <p className="mt-1 break-words text-err">{humanizeError(text)}</p>
+          </Hint>
         ))}
       </div>
     )
