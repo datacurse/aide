@@ -257,6 +257,36 @@ export function ToolTimeline({
     return () => window.removeEventListener("resize", onResize)
   }, [])
 
+  /**
+   * The wheel scrolls the grid SIDEWAYS while the pointer is over it. A
+   * horizontal scroller inside a vertical one has no wheel axis of its own —
+   * without this, reaching column 30 means grabbing a thin scrollbar or the
+   * overview strip. Two escapes keep it polite: a grid that FITS never takes
+   * the wheel at all, and one scrolled to either edge hands the wheel back to
+   * the page instead of going dead under the pointer. A manual listener
+   * because React registers `onWheel` passively, and a passive listener
+   * cannot preventDefault — the page would scroll as well, which is worse
+   * than either behaviour alone.
+   */
+  useEffect(() => {
+    const el = wrap.current
+    if (!el) return
+    const onWheel = (e: WheelEvent) => {
+      // Shift+wheel is the browser's own horizontal scroll; leave it alone.
+      if (e.deltaY === 0 || e.shiftKey) return
+      if (el.scrollWidth <= el.clientWidth) return
+      // Firefox reports line-based deltas; ~16px a line.
+      const delta = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY
+      const max = el.scrollWidth - el.clientWidth
+      const next = Math.max(0, Math.min(max, el.scrollLeft + delta))
+      if (next === el.scrollLeft) return
+      e.preventDefault()
+      el.scrollLeft = next
+    }
+    el.addEventListener("wheel", onWheel, { passive: false })
+    return () => el.removeEventListener("wheel", onWheel)
+  }, [])
+
   const seek = (clientX: number) => {
     const el = wrap.current
     const st = strip.current
