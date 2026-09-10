@@ -807,11 +807,17 @@ Decisions already taken, which are not gaps to fill:
   become; a column exists only once the model has actually sent it, and
   nothing queued or predicted is ever drawn. Clicking a dot opens a CARD
   under the grid for that one call — a per-tool body: an Edit as old and new
-  blocks in the diff colours, a Bash as its command over its output, a Grep
-  as the pattern beside its filter chips, anything unrecognised as JSON —
-  instead of unfolding the whole flat list to find one row. The card renders
-  the same recorded fields the flat row holds, so the two readings cannot
-  disagree, and `show N steps` stays the unchanged full reading. Two live details
+  blocks where a red or green BORDER carries the direction and the text keeps
+  the editor's own syntax colours (filled diff backgrounds were tried and
+  fought the tokens), a Bash as its command over its output, a Grep as the
+  pattern beside its filter chips, anything unrecognised as JSON — instead of
+  unfolding the whole flat list to find one row. The card renders the same
+  recorded fields the flat row holds, so the two readings cannot disagree,
+  and `show N steps` stays the unchanged full reading. The colouring is
+  `highlight.tsx`, drawn rather than installed — the `filetypes.ts` trade
+  again: seven token classes over the `--color-syn-*` palette buy most of
+  "looks like VS Code" for none of a grammar pack, and a language it does not
+  know renders plain, never wrong. Two live details
   came from watching it. A call announced mid-stream now learns its TARGET
   before its event — the `tool.target` delta, emitted the moment the target
   field's closing quote arrives in the streaming JSON (`partialToolTarget`,

@@ -1,4 +1,5 @@
 import type { ReactNode } from "react"
+import { highlightCode, langOfPath } from "./highlight.js"
 import { X } from "./icons.js"
 
 /**
@@ -9,8 +10,10 @@ import { X } from "./icons.js"
  * readings cannot disagree; what it adds is shape. The expansion was
  * `JSON.stringify` of the input, which made the reader parse an Edit with
  * their eyes to find what changed. The fields are structured enough to be
- * drawn as what they are: old and new in the diff colours, a command above
- * its output, a pattern beside its filters. A tool without a dedicated body
+ * drawn as what they are: old and new blocks whose BORDERS carry the diff
+ * colours while the text keeps the editor's own syntax colours (a wash of
+ * red under code made the code the hard thing to read), a command above its
+ * output, a pattern beside its filters. A tool without a dedicated body
  * falls back to the arguments as JSON — degraded and honest, so a new tool
  * is never invisible here.
  */
@@ -30,10 +33,23 @@ export interface CallDetailData {
 const PRE =
   "max-h-48 overflow-auto rounded-sm p-2 text-[11px] leading-relaxed whitespace-pre-wrap text-fg-muted"
 
-function Labeled({ label, children }: { label: string; children: ReactNode }) {
+/** Code blocks read in the editor's default fg, with the tokens coloured over it. */
+const CODE =
+  "max-h-48 overflow-auto rounded-sm bg-editor p-2 text-[11px] leading-relaxed whitespace-pre-wrap text-fg"
+
+function Labeled({
+  label,
+  tone = "text-fg-dim",
+  children,
+}: {
+  label: string
+  /** The old/new labels take the diff colours the borders carry. */
+  tone?: string
+  children: ReactNode
+}) {
   return (
     <div>
-      <div className="mb-0.5 font-sans text-[10px] tracking-wide text-fg-dim uppercase">{label}</div>
+      <div className={`mb-0.5 font-sans text-[10px] tracking-wide uppercase ${tone}`}>{label}</div>
       {children}
     </div>
   )
@@ -52,6 +68,7 @@ function Body({ call }: { call: CallDetailData }) {
     return <p className="font-sans text-[11px] text-fg-dim">arguments still streaming…</p>
   }
   const o = (call.input ?? {}) as Record<string, unknown>
+  const lang = langOfPath(call.target)
 
   if (call.name === "Edit") {
     return (
@@ -59,23 +76,30 @@ function Body({ call }: { call: CallDetailData }) {
         {o["replace_all"] === true && (
           <p className="font-sans text-[10px] text-fg-dim">replaces every occurrence</p>
         )}
-        {/* The two blocks in the diff colours the rail already taught: what
-            left in red, what arrived in green. This IS the call's meaning —
-            the file path is in the header above. */}
-        <Labeled label="old">
-          <pre className={`${PRE} bg-diff-del`}>{str(o, "old_string") ?? ""}</pre>
+        {/* The BORDER carries what left and what arrived; the text keeps the
+            editor's own syntax colours. Filled red and green backgrounds were
+            tried first and fought the tokens — the direction of the change
+            was loud and the change itself was the hard thing to read. */}
+        <Labeled label="old" tone="text-diff-del-fg">
+          <pre className={`${CODE} border-l-2 border-diff-del-fg/70`}>
+            {highlightCode(str(o, "old_string") ?? "", lang)}
+          </pre>
         </Labeled>
-        <Labeled label="new">
-          <pre className={`${PRE} bg-diff-add`}>{str(o, "new_string") ?? ""}</pre>
+        <Labeled label="new" tone="text-diff-add-fg">
+          <pre className={`${CODE} border-l-2 border-diff-add-fg/70`}>
+            {highlightCode(str(o, "new_string") ?? "", lang)}
+          </pre>
         </Labeled>
       </>
     )
   }
   if (call.name === "Write") {
     return (
-      <Labeled label="content">
-        {/* Add-coloured whole: a Write is all arrival, whatever it replaced. */}
-        <pre className={`${PRE} bg-diff-add`}>{str(o, "content") ?? ""}</pre>
+      // The add border whole: a Write is all arrival, whatever it replaced.
+      <Labeled label="content" tone="text-diff-add-fg">
+        <pre className={`${CODE} border-l-2 border-diff-add-fg/70`}>
+          {highlightCode(str(o, "content") ?? "", lang)}
+        </pre>
       </Labeled>
     )
   }
@@ -83,7 +107,7 @@ function Body({ call }: { call: CallDetailData }) {
     return (
       // The header truncates a long command; this is the whole of it.
       <Labeled label="command">
-        <pre className={`${PRE} bg-editor text-syn-string`}>{str(o, "command") ?? ""}</pre>
+        <pre className={CODE}>{highlightCode(str(o, "command") ?? "", "sh")}</pre>
       </Labeled>
     )
   }
@@ -123,7 +147,7 @@ function Body({ call }: { call: CallDetailData }) {
   }
   return (
     <Labeled label="arguments">
-      <pre className={`${PRE} bg-editor`}>{JSON.stringify(call.input, null, 2)}</pre>
+      <pre className={CODE}>{highlightCode(JSON.stringify(call.input, null, 2), "json")}</pre>
     </Labeled>
   )
 }
@@ -176,7 +200,15 @@ export function CallDetail({
         <Body call={call} />
         {call.summary !== "" && (
           <Labeled label="result">
-            <pre className={`${PRE} bg-editor`}>{call.summary}</pre>
+            {/* A Read's result IS file content, so it reads in that file's
+                colours. Every other tool's result is output, and stays plain
+                — colouring a stack trace as TypeScript would be decoration
+                claiming to be meaning. */}
+            {call.name === "Read" ? (
+              <pre className={CODE}>{highlightCode(call.summary, langOfPath(call.target))}</pre>
+            ) : (
+              <pre className={`${PRE} bg-editor`}>{call.summary}</pre>
+            )}
           </Labeled>
         )}
       </div>
