@@ -1246,7 +1246,11 @@ export function ConversationList({
       {error && (
         <p className="border-b border-line px-3 py-1.5 font-sans text-[11px] text-err">{error}</p>
       )}
-      <div className="flex-1 overflow-auto py-1">
+      {/* The gutter is reserved whether or not there is enough to scroll:
+          folding the archived group usually takes the scrollbar with it, and
+          without this every row got 10px wider on the press — the whole list
+          shifted for a control that promised to only hide some rows. */}
+      <div className="flex-1 overflow-auto py-1 [scrollbar-gutter:stable]">
         {items === null && rows.length === 0 && <Empty>Reading the session store…</Empty>}
         {items !== null && rows.length === 0 && (
           <Empty>
