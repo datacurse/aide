@@ -1018,6 +1018,27 @@ app.post(
         // optional and "not chosen" is the state it is optional for.
         ...(model ? { model } : {}),
       })
+      // Asking a ticked-off chat for one more thing unticks it. The tick means
+      // "this served its purpose"; a message in it is the human saying it has
+      // not, so leaving the tick would make `done` a claim the list keeps
+      // making about a conversation that is visibly still going.
+      //
+      // AFTER the send rather than before, so a turn refused by the lock does
+      // not reopen a chat it never ran in. And here rather than in `chat.send`,
+      // because the lane holds no board — the same split `chatStatuses` already
+      // has, where aide's own bookkeeping is attached around the lane rather
+      // than inside it. That also keeps it out of the commit gate's one repair
+      // attempt, which builds `SendOptions` itself and never comes through this
+      // route: nobody typed that turn, so it must not overturn a human verdict.
+      //
+      // Not awaited, and failures are swallowed: the turn is already admitted
+      // and the run id is what the browser needs. A `board.json` write that
+      // failed here would otherwise turn a successful send into a 409.
+      if (body.sessionId) {
+        void reopenChat(project, body.sessionId).catch((err) => {
+          app.log.warn({ err, sessionId: body.sessionId }, "could not untick chat on send")
+        })
+      }
       return { runId }
     } catch (err) {
       return reply.code(409).send({ message: err instanceof Error ? err.message : String(err) })

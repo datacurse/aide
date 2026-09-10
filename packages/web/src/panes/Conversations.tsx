@@ -885,11 +885,12 @@ function ChatRow({
           )}
         </div>
       </button>
-      {/* On `done`, not on `closed`. They differ in one case and it is a real
-          one: a chat you ticked off and then asked one more thing of reports
-          `working` so that it sorts as work, which drew an EMPTY box on a
-          conversation you had plainly ticked — and then took a press to say the
-          thing the box was already showing. */}
+      {/* On `done`, not on `closed`: `closed` is a derivation that running
+          outranks, and the box is the bit's own control. They used to differ on
+          a ticked chat with a turn in flight — the box drew empty over a
+          conversation you had plainly ticked. That case is gone from the other
+          end now: a send into a ticked chat unticks it, so `done` is genuinely
+          false there and an empty box is the truth rather than a display bug. */}
       <DoneCheck
         done={status.done}
         working={working}
@@ -972,14 +973,21 @@ const NOTHING_TYPED: Attachment[] = []
  *
  * The lock IS polled, with the projects, and one agent per project makes it a
  * complete answer rather than a hint: if this session is not the holder then
- * nothing is running in it, whatever the row was told earlier. `done` is the
- * other half and it is the half that does not move on its own — a human sets it,
- * and setting it refetches — so it is taken from the row as fetched.
+ * nothing is running in it, whatever the row was told earlier.
+ *
+ * `done` used to be taken from the row as fetched, on the grounds that a human
+ * sets it and setting it refetches. That stopped being the whole story when
+ * sending into a ticked-off chat began UNTICKING it daemon-side: the row was
+ * fetched before the send, so it goes on carrying `done: true` for the length of
+ * the turn, and the box beside it draws a tick over a bit the daemon has already
+ * cleared. Nothing refetches during a turn, so it is cleared here from the same
+ * poll that already answers "is it running" — a chat with a turn in flight is
+ * one somebody has just asked for more, which is exactly the condition the
+ * untick fires on.
  *
  * The reconstruction is `chatStatuses`' own rule, in the same order: running
- * outranks done, because a chat you ticked off and then asked one more thing of
- * is running whatever the tick says — and that is what keeps it out of the
- * archived group while the turn is in flight.
+ * outranks done — which now agrees with `done` rather than overriding it, since
+ * the send that made it run is the send that cleared the tick.
  */
 function withLock(
   status: ChatStatus,
@@ -993,7 +1001,7 @@ function withLock(
     // Only ever true of the run in flight, so a row that is not the holder
     // cannot be left wearing a prompt that was answered while you were away.
     blocked: running && holderBlocked,
-    done: status.done,
+    done: running ? false : status.done,
   }
 }
 

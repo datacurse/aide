@@ -178,7 +178,23 @@ async function checkpointNotice(project: Project, sessionId: string): Promise<st
   return `the tree as it was before this conversation is kept at ${found.ref} — undo with \`${restoreCommand(found.ref)}\``
 }
 
-/** Untick it, for when it was the wrong button. */
+/**
+ * Untick it — for when it was the wrong button, and for when it stopped being
+ * true.
+ *
+ * Two callers, and the second is the interesting one. The `reopen` route is the
+ * undo. The chat route calls it too, on any send into a conversation: the tick
+ * says "this served its purpose", and a message in it is the human saying it has
+ * not, so a tick that survived would be a claim the list keeps making about work
+ * that is visibly still going — and it would leave the archived group as the
+ * place your live conversation was hiding.
+ *
+ * That is not the agent reaching the gate above. Both callers are a person
+ * acting: one presses a button, the other types a message. What no run can do is
+ * SET the bit, and the commit gate's one repair attempt does not come through
+ * the chat route at all — it builds its own `SendOptions` and goes straight to
+ * the lane — so the one turn nobody typed cannot overturn a human verdict.
+ */
 export async function reopenChat(project: Project, sessionId: string): Promise<void> {
   const links = await readLinks()
   const board = boardFor(links, project.id)

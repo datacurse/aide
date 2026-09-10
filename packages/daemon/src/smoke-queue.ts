@@ -609,7 +609,11 @@ console.log("\ndone, and undone")
     statuses["sess-done"]?.state === "working",
     "the tick is not a lock",
   )
-  check("though it is still marked done", statuses["sess-done"]?.done === true)
+  // Deliberately still `done` HERE. The untick is the chat route's, on the send
+  // — `chatStatuses` is a reader and must not quietly clear a bit nobody wrote
+  // to, or the board and the list would be two answers to one question. This
+  // asserts the reader stays a reader; the send's own untick is below.
+  check("the reader does not untick it by itself", statuses["sess-done"]?.done === true)
 
   // The other half of what the lock carries, and the half that used to travel in
   // a projection of its own: a turn stopped on a permission prompt is the one
@@ -631,6 +635,34 @@ console.log("\ndone, and undone")
     "unticking it undoes the whole thing",
     statuses["sess-done"]?.state === null && statuses["sess-done"]?.done === false,
     "nothing was deleted, so there is nothing that cannot come back",
+  )
+
+  // The chat route calls this on EVERY send with a session id, not only on the
+  // ticked ones — asking first would be a board read in front of every message
+  // to save a write that is already a no-op. So it has to be safe on a chat that
+  // was never ticked and on one already unticked: a throw here would surface as
+  // a warning line under a turn that went out perfectly well.
+  await reopenChat(project, "sess-done")
+  await reopenChat(project, "sess-open")
+  statuses = await chatStatuses(project, sessions, NO_TURNS)
+  check(
+    "unticking an already-open chat changes nothing",
+    statuses["sess-done"]?.done === false && statuses["sess-open"]?.done === false,
+    "a send into an untouched chat must not error on the board",
+  )
+
+  // And it survives the round trip to disk. `board.json` is the only record of
+  // the tick, so an untick that lived in memory would come back on a restart —
+  // a chat you had reopened by writing in it, marked finished again by nothing.
+  await closeChat(project, "sess-open")
+  statuses = await chatStatuses(project, sessions, NO_TURNS)
+  check("ticked, and on disk", statuses["sess-open"]?.done === true)
+  await reopenChat(project, "sess-open")
+  statuses = await chatStatuses(project, sessions, NO_TURNS)
+  check(
+    "and unticked, on disk",
+    statuses["sess-open"]?.done === false,
+    "the untick is a write, not a view",
   )
 }
 

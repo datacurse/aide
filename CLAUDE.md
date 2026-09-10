@@ -436,6 +436,34 @@ Decisions already taken, which are not gaps to fill:
   with no record, and a send starts a chat from a row the list no longer draws.
   It clears rather than selecting a neighbour, because which chat to show next is
   a choice the human just made by deleting one.
+- **A send into a ticked-off chat unticks it, and that does not weaken the
+  gate.** The tick means "this served its purpose"; a message in it is the human
+  saying it has not, so a tick that survived would be a claim the list keeps
+  making about work that is visibly still going — and the archived group would be
+  where your live conversation was hiding. `board.ts` says the tick is the one
+  thing an agent cannot reach, and that is still exactly true: no run can SET it,
+  and CLEARING it is a person typing rather than a model deciding. The placement
+  carries the whole argument. It is in the chat ROUTE, after `chat.send` resolves
+  — not in `chat.send`, because the lane holds no board (the same split
+  `chatStatuses` already has, aide's bookkeeping attached around the lane rather
+  than inside it), and because the commit gate's one repair attempt builds its own
+  `SendOptions` and goes straight to `turnUnderHold`, so the single turn nobody
+  typed cannot come through here and overturn a verdict. After rather than before,
+  so a send refused by the lock does not reopen a chat it never ran in; not
+  awaited and its failure swallowed to a log line, so a `board.json` write cannot
+  turn an admitted turn into a 409. Called on EVERY send with a session id rather
+  than only the ticked ones — asking first is a board read in front of every
+  message to save a write that is already a no-op. The web half is one character
+  of `withLock`: nothing refetches the chat list during a turn, so a row fetched
+  before the send goes on carrying `done: true` for the length of it and draws a
+  tick over a bit the daemon has already cleared. The holder is read from the poll
+  that is already running, and a chat with a turn in flight is one somebody has
+  just asked for more — which is the untick's own condition, so the two cannot
+  disagree. `pnpm smoke:queue` pins that `chatStatuses` does NOT untick by itself
+  (a reader that cleared a bit nobody wrote would be a second answer to one
+  question), that unticking an already-open chat is a safe no-op, and that the
+  untick reaches disk — one that lived in memory would come back on a restart, as
+  a chat marked finished again by nothing.
 - **The gates are one function, and they have shrunk to the lock.**
   `projectGates` in protocol answers why a project cannot take a chat, a push or
   a send. Those lived inline in `App.tsx`, computed for the one open project,
