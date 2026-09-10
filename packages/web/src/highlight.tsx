@@ -177,8 +177,13 @@ export function highlightWithDim(
   dim: Array<[number, number]>,
 ): ReactNode {
   if (dim.length === 0) return highlightCode(code, lang)
+  // FLATTENED, and this is not defensive tidying: `markdown()` returns nested
+  // arrays (a per-line map whose entries are themselves split into inline-code
+  // parts), and a walk that assumed one level deep read those as neither
+  // string nor element — every character of a markdown line silently rendered
+  // as nothing. Seen as an Edit card with an empty `-` and an empty `+`.
   const nodes = highlightCode(code, lang)
-  const parts = Array.isArray(nodes) ? nodes : [nodes]
+  const parts = (Array.isArray(nodes) ? nodes.flat(Infinity) : [nodes]) as ReactNode[]
   const isDim = (at: number) => dim.some(([from, to]) => at >= from && at < to)
 
   const out: ReactNode[] = []
@@ -221,11 +226,30 @@ export function highlightWithDim(
       emit(part, undefined)
       continue
     }
-    // A tokenizer span: keep its class, subdivide by the dim ranges.
+    if (typeof part === "number") {
+      emit(String(part), undefined)
+      continue
+    }
+    // A tokenizer span: keep its class, subdivide by the dim ranges. Its
+    // children are a string by construction — but if a renderer ever nests
+    // something here, falling back to the SOURCE slice keeps the characters
+    // on screen rather than dropping them. Losing colour is a blemish;
+    // losing the text is the bug this whole function was rewritten for.
     const el = part as { props?: { className?: string; children?: unknown } }
-    const text = String(el.props?.children ?? "")
-    emit(text, el.props?.className)
+    const kids = el.props?.children
+    if (typeof kids === "string") {
+      emit(kids, el.props?.className)
+      continue
+    }
+    emit(code.slice(at), el.props?.className)
   }
+  // The one invariant that matters: every character of the line reached the
+  // screen. `at` advances by exactly the text emitted, so a highlighter whose
+  // output does not reconstruct its input is caught here and the line is
+  // drawn plain instead — degraded and honest, rather than a card showing an
+  // empty change. This is the check that would have caught the markdown
+  // nesting bug the moment it rendered.
+  if (at !== code.length) return code
   return out
 }
 
