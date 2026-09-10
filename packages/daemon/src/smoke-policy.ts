@@ -30,6 +30,8 @@ import {
   classifyFailure,
   collapseUnchanged,
   diffLines,
+  pairWords,
+  splitRows,
   currentActivity,
   isChatModel,
   isImageAttachment,
@@ -1949,6 +1951,61 @@ console.log("\nan edit, as a diff")
       { tag: "add", text: "y" },
     ]).some((r) => r.tag === "gap"),
     "a fold the same height as what it replaces trades readable lines for a rule",
+  )
+
+  // The two-column pairing. An off-by-one in the zip puts a deletion beside
+  // the wrong insertion, which draws a change nobody made.
+  const pairs = splitRows([
+    { tag: "keep", text: "a" },
+    { tag: "del", text: "x1" },
+    { tag: "del", text: "x2" },
+    { tag: "del", text: "x3" },
+    { tag: "add", text: "y1" },
+    { tag: "keep", text: "b" },
+  ])
+  check(
+    "context spans both columns rather than printing twice",
+    pairs[0]?.tag === "keep" && pairs[0].text === "a",
+  )
+  check(
+    "a lopsided change keeps the columns aligned",
+    pairs.length === 5 &&
+      pairs[1]?.tag === "change" &&
+      pairs[1].left === "x1" &&
+      pairs[1].right === "y1" &&
+      pairs[2]?.tag === "change" &&
+      pairs[2].left === "x2" &&
+      pairs[2].right === null,
+    "three lines out against one in is three rows, two with an empty right",
+  )
+  check(
+    "an insertion with no deletion has an empty left",
+    splitRows([{ tag: "add", text: "only" }])[0]?.tag === "change" &&
+      (splitRows([{ tag: "add", text: "only" }])[0] as { left: string | null }).left === null,
+  )
+
+  // Word-level marking inside a changed line — the reason a one-identifier
+  // change no longer means comparing two lines character by character.
+  const words = pairWords("const a = compute(x)", "const a = compute(y)")
+  check("a one-word change marks only that word", words !== null && words.right !== undefined)
+  check(
+    "the unchanged prefix is not marked",
+    words?.left.filter((s) => s.changed).map((s) => s.text).join("") === "x",
+    words?.left.filter((s) => s.changed).map((s) => s.text).join("") ?? "null",
+  )
+  check(
+    "and the spans reconstruct their own line",
+    words?.right.map((s) => s.text).join("") === "const a = compute(y)",
+    "a span dropped or duplicated silently rewrites the line on screen",
+  )
+  check(
+    "two unrelated lines are not word-diffed into a mosaic",
+    pairWords("import { X } from './x.js'", "return notEvenClose(1, 2, 3)") === null,
+    "marking 90% of both lines as changed says less than the plain +/- pair",
+  )
+  check(
+    "an empty line pairs with nothing",
+    pairWords("", "something") === null,
   )
 }
 

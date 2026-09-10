@@ -98,7 +98,7 @@ Decisions already taken, which are not gaps to fill:
   static import is hoisted and its output would print above `repo: <path>` — the
   run would still be correct and would read as though the sections had been
   shuffled. When changing any of this, the check that matters is that the
-  assertion count does not fall: `pnpm smoke` prints 790 `ok` lines as of
+  assertion count does not fall: `pnpm smoke` prints 798 `ok` lines as of
   2026-09-10, and a refactor that quietly drops some is the failure this number
   exists to catch.
   It fell once on purpose — the card view was removed and took ~30 of its own
@@ -816,9 +816,20 @@ Decisions already taken, which are not gaps to fill:
   LCS over lines, shared lines drawn once as context, long unchanged runs
   collapsed to a rule with a count, and `pnpm smoke` pins the property that
   catches a diff silently losing a line: dropping the insertions must
-  reconstruct the old text and dropping the deletions the new one. Side by
-  side was the version before it and left the reader finding the change by
-  eye. The card and a flat row's
+  reconstruct the old text and dropping the deletions the new one. Inside a
+  changed line the words that actually MOVED are found the same way
+  (`pairWords`, LCS over tokens) and the ones that survived are DIMMED rather
+  than the changed span tinted — the code already carries syntax colour, so a
+  third colour over the same glyphs is two systems fighting; fading what
+  survived leaves the highlight to be the absence of dimming. Two lines
+  sharing under 30% of their characters are not word-diffed at all, because
+  marking 90% of both says less than the plain +/- pair. `split` in
+  `settings` draws the same diff as two aligned columns — `splitRows` zips a
+  run of deletions against the insertions that follow it, so three-out
+  against one-in is three rows with two empty rights — and it is the toggle
+  rather than the default because it halves the width available for code,
+  which a wall column has none of to give. Unified is what suits a few
+  changed lines in a stable neighbourhood, which is nearly every edit here. The card and a flat row's
   own expansion render through ONE component (`CallBlocks`), so the two
   readings cannot diverge — opening a row behind `show N steps` gets the same
   structured blocks, and the JSON dump it used to show is gone with its

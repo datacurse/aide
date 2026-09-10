@@ -1,5 +1,12 @@
 import type { ReactNode } from "react"
-import { collapseUnchanged, diffLines } from "@aide/protocol"
+import {
+  collapseUnchanged,
+  diffLines,
+  pairWords,
+  splitRows,
+  type DiffRow,
+  type WordSpan,
+} from "@aide/protocol"
 import { highlightCode, langOfPath } from "./highlight.js"
 import { X } from "./icons.js"
 import { useRemembered } from "./useRemembered.js"
@@ -12,6 +19,19 @@ import { useRemembered } from "./useRemembered.js"
  * property of any chat — and edited from `settings` in the rail's foot.
  */
 export const CARD_EXPAND_KEY = "aide.card.expand"
+
+/**
+ * Whether an Edit draws as one unified diff or as two aligned columns.
+ *
+ * Unified is the default and the right one for most edits here — context
+ * appears once, and a few changed lines inside a stable neighbourhood is the
+ * shape of nearly every edit in this repo. Split earns its width on a block
+ * REWRITE, where unified stacks N deletions above N insertions and comparing
+ * line 3 to line 3 means crossing the boundary between two piles. It costs
+ * half the card's width, which is why it is the toggle rather than the
+ * default: in a wall column there is not enough room for two columns of code.
+ */
+export const CARD_SPLIT_KEY = "aide.card.split"
 
 const isBool = (v: unknown): v is boolean => typeof v === "boolean"
 
@@ -176,6 +196,152 @@ const num = (o: Record<string, unknown>, key: string): number | null =>
  * pins them: a line attributed to the wrong side reads as a change that
  * never happened, and nothing about that is visible to the compiler.
  */
+/** The elision rule, shared by both layouts and the shell output's cut. */
+function GapRule({ hidden }: { hidden: number }) {
+  return (
+    <span className="flex items-center gap-2 py-0.5 text-[10px] text-fg-dim select-none">
+      <span className="h-px flex-1 bg-line" />
+      {hidden} unchanged
+      <span className="h-px flex-1 bg-line" />
+    </span>
+  )
+}
+
+/**
+ * One changed line, with the words that did not move DIMMED.
+ *
+ * The dimming is the highlight, inverted: the code carries syntax colour
+ * already, so tinting the changed span would be a third colour system over
+ * the same glyphs. Fading what survived leaves the eye on what did not.
+ * `spans` is null when the two lines share too little to be a rewrite of each
+ * other — then the line is drawn whole, because marking 90% of it as changed
+ * says less than the plain +/- pair.
+ */
+function DiffText({ spans, text, lang }: { spans: WordSpan[] | null; text: string; lang: string | null }) {
+  if (spans === null) return <>{highlightCode(text, lang)}</>
+  return (
+    <>
+      {spans.map((s, i) => (
+        <span key={i} className={s.changed ? "" : "opacity-45"}>
+          {highlightCode(s.text, lang)}
+        </span>
+      ))}
+    </>
+  )
+}
+
+const rowTint = (tag: "add" | "del") => (tag === "add" ? "bg-diff-add-fg/10" : "bg-diff-del-fg/10")
+const markTone = (tag: "add" | "del") => (tag === "add" ? "text-diff-add-fg" : "text-diff-del-fg")
+
+/**
+ * A unified diff: context once, changes marked, and the words inside a
+ * changed line that actually moved left undimmed.
+ *
+ * Word pairing needs BOTH lines, so a deletion is paired with the insertion
+ * at the matching offset in its own changed stretch — the same zip
+ * `splitRows` does for two columns, done here so both layouts mark the same
+ * spans. Without it the pairing would differ between views and the same edit
+ * would highlight differently depending on a setting.
+ */
+function UnifiedDiff({ rows, lang }: { rows: DiffRow[]; lang: string | null }) {
+  const pairs = splitRows(rows)
+  // Which insertion answers which deletion, by text — built from the pairing
+  // so a lookup here cannot disagree with the split view's alignment.
+  const partner = new Map<string, string>()
+  for (const p of pairs) {
+    if (p.tag === "change" && p.left !== null && p.right !== null) {
+      partner.set(`l${p.left}`, p.right)
+      partner.set(`r${p.right}`, p.left)
+    }
+  }
+  return (
+    <>
+      {rows.map((row, i) => {
+        if (row.tag === "gap") return <GapRule key={i} hidden={row.hidden} />
+        if (row.tag === "keep") {
+          return (
+            <span key={i} className="block">
+              <span className="text-fg-dim select-none">{"  "}</span>
+              {highlightCode(row.text, lang)}
+              {"\n"}
+            </span>
+          )
+        }
+        const other = partner.get(`${row.tag === "del" ? "l" : "r"}${row.text}`)
+        const paired =
+          other === undefined
+            ? null
+            : row.tag === "del"
+              ? (pairWords(row.text, other)?.left ?? null)
+              : (pairWords(other, row.text)?.right ?? null)
+        return (
+          <span key={i} className={`block ${rowTint(row.tag)}`}>
+            <span className={`select-none ${markTone(row.tag)}`}>
+              {row.tag === "add" ? "+ " : "- "}
+            </span>
+            <DiffText spans={paired} text={row.text} lang={lang} />
+            {"\n"}
+          </span>
+        )
+      })}
+    </>
+  )
+}
+
+/** The same diff in two aligned columns — for a block rewrite, where unified stacks. */
+function SplitDiff({ rows, lang }: { rows: DiffRow[]; lang: string | null }) {
+  const pairs = splitRows(rows)
+  const side = (text: string | null, spans: WordSpan[] | null, tag: "add" | "del") =>
+    text === null ? (
+      // An empty half of a lopsided change: tinted, so the column reads as
+      // "nothing here" rather than as a line that happens to be blank.
+      <span className="block bg-fg-dim/5">{"\n"}</span>
+    ) : (
+      <span className={`block ${rowTint(tag)}`}>
+        <span className={`select-none ${markTone(tag)}`}>{tag === "add" ? "+ " : "- "}</span>
+        <DiffText spans={spans} text={text} lang={lang} />
+        {"\n"}
+      </span>
+    )
+  return (
+    <div className="grid grid-cols-2 gap-x-1.5">
+      {pairs.map((p, i) => {
+        if (p.tag === "gap") {
+          return (
+            <div key={i} className="col-span-2">
+              <GapRule hidden={p.hidden} />
+            </div>
+          )
+        }
+        if (p.tag === "keep") {
+          // Context spans BOTH columns rather than being printed twice: the
+          // reason to use two columns is the changed stretches, and repeating
+          // every unchanged line is the cost that made side-by-side worse.
+          return (
+            <div key={i} className="col-span-2">
+              <span className="block">
+                <span className="text-fg-dim select-none">{"  "}</span>
+                {highlightCode(p.text, lang)}
+                {"\n"}
+              </span>
+            </div>
+          )
+        }
+        const words =
+          p.left !== null && p.right !== null ? pairWords(p.left, p.right) : null
+        return (
+          <div key={i} className="contents">
+            <div className="min-w-0 overflow-x-auto">{side(p.left, words?.left ?? null, "del")}</div>
+            <div className="min-w-0 overflow-x-auto">
+              {side(p.right, words?.right ?? null, "add")}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 function DiffBlock({
   old,
   next,
@@ -187,46 +353,11 @@ function DiffBlock({
   lang: string | null
   clamp: string
 }) {
+  const [split] = useRemembered<boolean>(CARD_SPLIT_KEY, false, isBool)
   const rows = collapseUnchanged(diffLines(old, next))
   return (
     <pre className={`${CODE} ${clamp}`}>
-      {rows.map((row, i) =>
-        row.tag === "gap" ? (
-          <span
-            key={i}
-            className="flex items-center gap-2 py-0.5 text-[10px] text-fg-dim select-none"
-          >
-            <span className="h-px flex-1 bg-line" />
-            {row.hidden} unchanged
-            <span className="h-px flex-1 bg-line" />
-          </span>
-        ) : (
-          <span
-            key={i}
-            className={`block ${
-              row.tag === "add"
-                ? "bg-diff-add-fg/10"
-                : row.tag === "del"
-                  ? "bg-diff-del-fg/10"
-                  : ""
-            }`}
-          >
-            <span
-              className={`select-none ${
-                row.tag === "add"
-                  ? "text-diff-add-fg"
-                  : row.tag === "del"
-                    ? "text-diff-del-fg"
-                    : "text-fg-dim"
-              }`}
-            >
-              {row.tag === "add" ? "+ " : row.tag === "del" ? "- " : "  "}
-            </span>
-            {highlightCode(row.text, lang)}
-            {"\n"}
-          </span>
-        ),
-      )}
+      {split ? <SplitDiff rows={rows} lang={lang} /> : <UnifiedDiff rows={rows} lang={lang} />}
     </pre>
   )
 }

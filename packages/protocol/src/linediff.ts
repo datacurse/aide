@@ -107,6 +107,111 @@ export function diffLines(oldText: string, newText: string): DiffLine[] {
 export type DiffRow = DiffLine | { tag: "gap"; hidden: number }
 
 /**
+ * A changed line split into the spans that moved and the spans that did not.
+ *
+ * When a line changes by one identifier, a diff that only says "this line
+ * left, this line arrived" makes the reader compare two nearly-identical
+ * lines character by character — which is the work side-by-side was really
+ * being asked to do. Marking the span that actually moved answers it
+ * directly.
+ *
+ * `same` spans are drawn DIMMED rather than the changed span tinted: the
+ * code underneath already carries syntax colour, and a third colour over the
+ * changed words would be two systems fighting for the same glyphs. Dimming
+ * what did not change leaves the highlight to be the absence of dimming.
+ */
+export interface WordSpan {
+  text: string
+  changed: boolean
+}
+
+/**
+ * Word-ish tokens: runs of identifier characters, and everything else one
+ * character at a time. Splitting on whitespace alone makes `foo(bar)` a
+ * single token, so changing `bar` marks the whole call; splitting per
+ * character makes every shared letter a span and the line a mosaic. This is
+ * the middle that reads.
+ */
+const tokenize = (s: string): string[] => s.match(/[A-Za-z0-9_$]+|\s+|[^A-Za-z0-9_$\s]/g) ?? []
+
+/**
+ * How different two lines may be before word-level marking is dropped.
+ *
+ * Below this much shared material the lines are not a rewrite of each other,
+ * they are two different lines — and marking 90% of both as "changed" is a
+ * mosaic that says less than the plain +/- pair. `pairWords` returns null
+ * there and the caller draws the lines whole.
+ */
+const MIN_SHARED = 0.3
+
+/** Longest common subsequence over tokens, as spans. Null when too dissimilar. */
+export function pairWords(oldLine: string, newLine: string): {
+  left: WordSpan[]
+  right: WordSpan[]
+} | null {
+  const a = tokenize(oldLine)
+  const b = tokenize(newLine)
+  if (a.length === 0 || b.length === 0) return null
+  // The same quadratic table as `diffLines`, over tokens of one line. Lines
+  // are short, so the guard is generous and only exists to stop a pathological
+  // minified line from costing a frame.
+  if (a.length > 400 || b.length > 400) return null
+
+  const lcs: number[][] = Array.from({ length: a.length + 1 }, () =>
+    new Array<number>(b.length + 1).fill(0),
+  )
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      lcs[i]![j] =
+        a[i] === b[j]
+          ? (lcs[i + 1]![j + 1] ?? 0) + 1
+          : Math.max(lcs[i + 1]![j] ?? 0, lcs[i]![j + 1] ?? 0)
+    }
+  }
+
+  // Shared material measured in CHARACTERS, not tokens: ten shared spaces and
+  // one shared identifier are not the same amount of "this line survived".
+  let sharedChars = 0
+  for (let i = 0, j = 0; i < a.length && j < b.length; ) {
+    if (a[i] === b[j]) {
+      sharedChars += (a[i] ?? "").length
+      i++
+      j++
+    } else if ((lcs[i + 1]![j] ?? 0) >= (lcs[i]![j + 1] ?? 0)) i++
+    else j++
+  }
+  const longest = Math.max(oldLine.length, newLine.length)
+  if (longest === 0 || sharedChars / longest < MIN_SHARED) return null
+
+  const left: WordSpan[] = []
+  const right: WordSpan[] = []
+  // Consecutive spans of the same kind are merged as they are pushed, so a
+  // renderer gets one element per readable run rather than one per token.
+  const push = (into: WordSpan[], text: string, changed: boolean) => {
+    const last = into[into.length - 1]
+    if (last && last.changed === changed) last.text += text
+    else into.push({ text, changed })
+  }
+  let i = 0
+  let j = 0
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      push(left, a[i] ?? "", false)
+      push(right, b[j] ?? "", false)
+      i++
+      j++
+    } else if ((lcs[i + 1]![j] ?? 0) >= (lcs[i]![j + 1] ?? 0)) {
+      push(left, a[i++] ?? "", true)
+    } else {
+      push(right, b[j++] ?? "", true)
+    }
+  }
+  while (i < a.length) push(left, a[i++] ?? "", true)
+  while (j < b.length) push(right, b[j++] ?? "", true)
+  return { left, right }
+}
+
+/**
  * One row of a SPLIT view: what sits on the left, and what sits on the right.
  *
  * The same diff as `DiffRow`, paired for two columns. A changed stretch is a

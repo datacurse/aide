@@ -5,7 +5,7 @@ import {
   CHAT_MODE_LABEL,
   EFFORT_LEVELS,
 } from "@aide/protocol"
-import { CARD_EXPAND_KEY } from "./CallDetail.js"
+import { CARD_EXPAND_KEY, CARD_SPLIT_KEY } from "./CallDetail.js"
 import { useChatDefaults } from "./chatSettings.js"
 import { useClickAway } from "./useClickAway.js"
 import { useRemembered } from "./useRemembered.js"
@@ -31,6 +31,7 @@ export function SettingsButton() {
   const box = useClickAway(open, () => setOpen(false))
   const [defaults, patch] = useChatDefaults()
   const [expand, setExpand] = useRemembered<boolean>(CARD_EXPAND_KEY, true, isBool)
+  const [split, setSplit] = useRemembered<boolean>(CARD_SPLIT_KEY, false, isBool)
 
   return (
     <div ref={box} className="relative">
@@ -121,6 +122,22 @@ export function SettingsButton() {
                 onClick={() => setExpand(false)}
               >
                 clamped
+              </Pill>
+            </Row>
+            <Row name="diffs">
+              <Pill
+                on={!split}
+                title="One diff: unchanged lines shown once, only what moved marked. Best for a few changed lines in a stable neighbourhood."
+                onClick={() => setSplit(false)}
+              >
+                unified
+              </Pill>
+              <Pill
+                on={split}
+                title="Two aligned columns, old against new. Worth the halved width when a whole block was rewritten."
+                onClick={() => setSplit(true)}
+              >
+                split
               </Pill>
             </Row>
           </div>
