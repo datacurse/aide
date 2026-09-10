@@ -99,7 +99,7 @@ Decisions already taken, which are not gaps to fill:
   static import is hoisted and its output would print above `repo: <path>` — the
   run would still be correct and would read as though the sections had been
   shuffled. When changing any of this, the check that matters is that the
-  assertion count does not fall: `pnpm smoke` prints 822 `ok` lines as of
+  assertion count does not fall: `pnpm smoke` prints 828 `ok` lines as of
   2026-09-10, and a refactor that quietly drops some is the failure this number
   exists to catch.
   It fell once on purpose — the card view was removed and took ~30 of its own
@@ -740,6 +740,36 @@ Decisions already taken, which are not gaps to fill:
   refuses to do is in `.aide/project.md`.
 - **No backlog file.** `.aide/todos.md` is gone too — an unsent chat IS the row,
   held in the browser, because nothing about it has happened yet.
+- **A chat that has just started is drawn from a STAND-IN until the daemon
+  answers, and retiring it is the load-bearing half.** The handoff is two acts
+  that cannot be made one: the unstarted record is dropped the instant the SDK
+  names the session — it has to be, or the record and the conversation it became
+  sit in the list side by side — and the row replacing it can only arrive on the
+  next fetch. Between them the chat was in NEITHER collection, so pressing ▶ made
+  your own chat leave the list and come back a round trip later. Locally that is
+  a flash; on a remote project the conversation read costs seconds and the row is
+  simply gone for them. `BridgedChat` is the note left in its place and
+  `bridgedChats` in protocol decides which notes still stand, against the session
+  ids the fetch actually answered with. The obvious cheaper fix — hold the draft
+  back until the fetch lands — is wrong: the box, the chat's own picks and the
+  URL all move to the session key on the same press, and a record left under the
+  old key is exactly the strand `startedRunId` already exists to heal. Four things
+  are decisions rather than details. (1) The note carries the parked row's own
+  TITLE and DATES, so the row does not change its words or move in the sort while
+  it converts. (2) It carries nothing else — no spend, no branch, no byte count —
+  because a row printing `$0.00` over a turn that is running says the work was
+  free, which the brief forbids of any cost figure; `BridgeRow` omits those lines
+  rather than zeroing them. (3) Its tick is INERT: `closeChat` on a row the list
+  has never fetched is a write it cannot then correct, and the real row is a beat
+  away. (4) `items === null` keeps every note, or a project you have only just
+  arrived at reads "no rows yet" as "your chat is not one of them". Both ways of
+  getting the retirement wrong are silent and invisible to `tsc` — held too long
+  draws one chat twice under two keys, dropped too early restores the flicker
+  while looking fixed — so `pnpm smoke` pins the rule, including that survivors
+  keep their IDENTITY, since the list reports what landed by comparing arrays.
+  The wall's column has the same gap from the other end and shares the same
+  function: its header reads its title out of `pickerRows`, so without a stand-in
+  the column you just sent from falls back to a grey "no chat".
 - **A parked chat is named when it is parked, not when it runs.** The SDK names
   a session a second or two into its first turn, so everything aide has spent
   money on has a name and the backlog — the rows you actually have to find again

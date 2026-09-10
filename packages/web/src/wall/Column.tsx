@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
+  bridgedChats,
   projectGates,
   sortChats,
   type Attachment,
+  type BridgedChat,
   type ChatMode,
   type ChatModel,
   type EffortLevel,
@@ -19,6 +21,7 @@ import {
   idFromKey,
   markDraftSent,
   openNewChat,
+  peekDraft,
   useUnstartedChats,
   type Draft,
 } from "../drafts.js"
@@ -170,21 +173,58 @@ export function WallColumn({
   const [open, setOpen] = useOpenChat(project.id)
 
   /**
+   * Chats that have just handed off and are not in `chats` yet — see
+   * `BridgedChat`, which holds the argument. The column shows two things that
+   * would otherwise go blank for the round trip: its own header, which falls
+   * back to a grey "no chat" once the draft is gone and the fetch has not
+   * landed, and the picker row you just pressed ▶ on.
+   */
+  const [bridged, setBridged] = useState<BridgedChat[]>([])
+
+  /**
+   * Drop the unstarted record and leave a stand-in in its place.
+   *
+   * The record IS the chat, so it must not linger beside the conversation it
+   * turned into — but removing it and waiting for the fetch is what made the row
+   * vanish and come back. Both handoff paths below go through here so they
+   * cannot differ about that.
+   */
+  const handOff = useCallback(
+    (key: string, sessionId: string) => {
+      const was = peekDraft(key)
+      // Read before the carry, which deletes it.
+      carryDraft(key, draftKey(project.id, sessionId))
+      if (!was) return
+      setBridged((prev) => [
+        // Keyed by session, so two answers about one chat leave one stand-in.
+        ...prev.filter((b) => b.sessionId !== sessionId),
+        {
+          sessionId,
+          title: draftName(was) ?? draftSubject(was).trim().split("\n", 1)[0] ?? "",
+          createdAt: was.createdAt,
+          lastModified: was.updatedAt,
+        },
+      ])
+    },
+    [project.id],
+  )
+
+  /**
    * This draft has become a real conversation.
    *
    * The unstarted record IS the chat, so it must not linger in the picker beside
-   * the conversation it turned into — `carryDraft` moves anything still unsent in
+   * the conversation it turned into — `handOff` moves anything still unsent in
    * its box across and drops the record. The column follows only when the chat
    * that started is the one it is pointing at, for the same reason the pane does:
    * healing a row further down the picker must not move what you are reading.
    */
   const adopt = useCallback(
     (fromDraftId: string | null, sessionId: string) => {
-      if (fromDraftId) carryDraft(draftKey(project.id, fromDraftId), draftKey(project.id, sessionId))
+      if (fromDraftId) handOff(draftKey(project.id, fromDraftId), sessionId)
       setOpen({ sessionId, draftId: null })
       setSeq((n) => n + 1)
     },
-    [project.id, setOpen],
+    [project.id, setOpen, handOff],
   )
 
   const holder = project.holder
@@ -363,7 +403,7 @@ export function WallColumn({
               // reason nothing on screen explains — the objection the holder dot
               // answers by marking rather than switching.
               if (open.draftId === draftId) adopt(draftId, sessionId)
-              else carryDraft(draft.key, draftKey(project.id, sessionId))
+              else handOff(draft.key, sessionId)
               setSeq((n) => n + 1)
             } else if (ended) {
               // The turn is over and never got a session, so there is no
@@ -386,7 +426,25 @@ export function WallColumn({
       cancelled = true
       clearInterval(timer)
     }
-  }, [waiting, open.draftId, adopt, project.id])
+  }, [waiting, open.draftId, adopt, handOff, project.id])
+
+  /**
+   * Stand-ins the fetched list has not overtaken yet.
+   *
+   * `chats === null` keeps every note: a column that has not fetched anything
+   * knows nothing, and retiring on that reads "no rows" as "your chat is not
+   * one of them".
+   */
+  const standing = useMemo(
+    () => (chats === null ? bridged : bridgedChats(bridged, new Set(chats.map((c) => c.sessionId)))),
+    [bridged, chats],
+  )
+
+  // Retired once the real row exists, or the same chat is drawn twice — the
+  // failure this mechanism exists to avoid, arriving from the other end.
+  useEffect(() => {
+    if (standing.length !== bridged.length) setBridged(standing)
+  }, [standing, bridged])
 
   const turnEvents = useMemo(() => {
     const merged = new Map(sent)
@@ -585,7 +643,10 @@ export function WallColumn({
     }
   }
 
-  const rows = useMemo(() => pickerRows(chats, unstarted), [chats, unstarted])
+  const rows = useMemo(
+    () => pickerRows(chats, unstarted, standing),
+    [chats, unstarted, standing],
+  )
   const openTitle = titleOf(rows, open) ?? (open.draftId ? "New chat" : "no chat")
 
   /**
@@ -902,7 +963,18 @@ type PickerRow =
  * bottom, because a column pointed at finished work is the least likely thing
  * you meant.
  */
-function pickerRows(chats: ConversationRow[] | null, drafts: readonly Draft[]): PickerRow[] {
+function pickerRows(
+  chats: ConversationRow[] | null,
+  drafts: readonly Draft[],
+  /**
+   * Chats that handed off a moment ago and are not in `chats` yet. Drawn as
+   * ordinary started rows, because that is what they are — the daemon simply
+   * has not been asked since. Without them the row you pressed ▶ on leaves the
+   * picker for a round trip, and the column header above it, which reads its
+   * title out of this same list, falls back to a grey "no chat".
+   */
+  bridged: readonly BridgedChat[] = [],
+): PickerRow[] {
   const parked: PickerRow[] = drafts.map((d) => ({
     kind: "draft",
     id: idOf(d.key),
@@ -923,9 +995,22 @@ function pickerRows(chats: ConversationRow[] | null, drafts: readonly Draft[]): 
     title: c.title,
     done: c.status.done,
   }))
+  // In front of the fetched ones rather than sorted among them: a stand-in is
+  // by definition the most recently started chat in the project, which is where
+  // `sortChats` would put it anyway — and doing it by position avoids giving a
+  // row that knows only two dates a say in an order it cannot fully answer.
+  const standing: PickerRow[] = bridged.map((b) => ({
+    kind: "chat",
+    id: b.sessionId,
+    title: b.title || "New chat",
+    // Nobody has ticked off a chat that started seconds ago, and guessing
+    // otherwise would sink it to the bottom — the row disappearing by another
+    // route.
+    done: false,
+  }))
   const live = started.filter((r) => r.kind === "chat" && !r.done)
   const closed = started.filter((r) => r.kind === "chat" && r.done)
-  return [...parked, ...live, ...closed]
+  return [...parked, ...standing, ...live, ...closed]
 }
 
 const idOf = (key: string): string => key.slice(key.indexOf(":") + 1)

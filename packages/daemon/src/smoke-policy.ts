@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url"
 import {
   CHAT_MODELS,
   SUMMARY_FENCE,
+  bridgedChats,
   buildTimeline,
   chatModeFromSdk,
   chatModelLabel,
@@ -765,6 +766,43 @@ console.log("\na snapshot that is stable across projects")
   check("a new store recomputes", after !== first && computed === before + 1)
 
   check("no project is not an empty list", memo.read(source, null, rows) === null)
+}
+
+console.log("\na chat that has just handed off")
+{
+  // The unstarted record is dropped the instant the SDK names the session, and
+  // the row that replaces it only arrives on the next fetch of the daemon's
+  // list. Between those two the chat is in neither collection — so it left the
+  // list and came back a round trip later, which locally is a flash and on a
+  // remote project is seconds of the row simply being gone.
+  //
+  // Both ways of getting the retirement wrong are SILENT. Held too long and one
+  // chat is drawn twice under two keys with a tick on one of them; dropped too
+  // early and the row blinks out again, which is the bug this removes. Neither
+  // is visible to `tsc` or to the build, and a React component cannot be driven
+  // from here — which is why the rule is a function in protocol.
+  const note = (sessionId: string) => ({ sessionId, title: sessionId, createdAt: 1, lastModified: 1 })
+  const a = note("s-a")
+  const b = note("s-b")
+
+  check("a stand-in the list does not have yet is kept", bridgedChats([a], new Set()).length === 1)
+  check("and it is the same object", bridgedChats([a], new Set())[0] === a)
+  check(
+    "one the list HAS is retired",
+    bridgedChats([a], new Set(["s-a"])).length === 0,
+    "a note kept past its real row draws the chat twice",
+  )
+  check(
+    "and only that one",
+    bridgedChats([a, b], new Set(["s-a"])).map((n) => n.sessionId).join() === "s-b",
+  )
+  check("nothing standing stays nothing", bridgedChats([], new Set(["s-a"])).length === 0)
+  // The identity half. The list reports what landed by comparing the filtered
+  // array against the one it was given, so a filter that rebuilt its entries
+  // would report every note as landed on every render — and retire the
+  // stand-in immediately, restoring the flicker while looking like it worked.
+  const kept = bridgedChats([a, b], new Set(["s-a"]))
+  check("survivors keep their identity", kept[0] === b, "a rebuilt entry breaks the landed report")
 }
 
 console.log("\nwhere a hover hint goes")

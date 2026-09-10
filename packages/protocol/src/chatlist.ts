@@ -98,6 +98,58 @@ export function resolveChatSettings(args: {
   }
 }
 
+/**
+ * A chat that has just become a conversation, and is not in the fetched list yet.
+ *
+ * The handoff is two acts that cannot be made one. The unstarted record is
+ * dropped the instant the SDK names the session — it has to be, or the record
+ * and the conversation it turned into sit in the list side by side — and the
+ * row that replaces it can only arrive on the next fetch of the daemon's list.
+ * Between those two the chat is in NEITHER collection, so it left the list
+ * entirely and came back a round trip later: press ▶, watch your chat vanish,
+ * watch it reappear somewhere. Locally that is a flash; on a remote project the
+ * conversation read costs seconds and the row is simply gone for them.
+ *
+ * So the list carries its own note of what just handed off, and stands a row on
+ * it for exactly as long as the fetched rows do not have one. `bridgedChats`
+ * decides that, and the retirement is the half worth pinning: a note kept after
+ * the real row arrives is the SAME failure from the other end — one chat drawn
+ * twice, under two keys, with a tick on one of them.
+ *
+ * Not solved by holding the draft back until the fetch lands: the box, the
+ * chat's own picks and the URL all move to the session key on the same press,
+ * and a record left behind under the old key is the strand this list already
+ * has `startedRunId` to heal.
+ */
+export interface BridgedChat {
+  sessionId: string
+  /** What the row was called while it was parked, so the title does not change under you. */
+  title: string
+  /** The parked record's own dates, so the row does not move in the sort as it converts. */
+  createdAt: number
+  lastModified: number
+}
+
+/**
+ * The notes that are still standing in for a chat, given what the daemon has
+ * actually answered with.
+ *
+ * `known` is every session id in the fetched list. A note whose session is in it
+ * has been overtaken and is dropped — the real row carries the title, the spend
+ * and the tick, all of which this stand-in can only guess at.
+ *
+ * Pure, and here rather than in the component, for the reason `parseLocation`
+ * gives: both ways of getting this wrong are silent. Keep a note too long and
+ * one chat is drawn twice; drop it too early and the row blinks out, which is
+ * the bug this exists to remove and which no error anywhere reports.
+ */
+export function bridgedChats<T extends { sessionId: string }>(
+  notes: readonly T[],
+  known: ReadonlySet<string>,
+): T[] {
+  return notes.filter((n) => !known.has(n.sessionId))
+}
+
 /** Running, finished, or neither. */
 export type ChatState = "working" | "closed"
 

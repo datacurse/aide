@@ -437,6 +437,16 @@ export function readDraft(key: string): { text: string; attachments: Attachment[
   return { text: row?.text ?? "", attachments: row?.attachments ?? [] }
 }
 
+/**
+ * The whole record, outside a render.
+ *
+ * For the one caller that has to read a draft immediately BEFORE deleting it:
+ * the handoff wants what the row was called and when it was parked, so the
+ * conversation it becomes can be drawn in the same place with the same words
+ * while the daemon's list catches up. See `BridgedChat`.
+ */
+export const peekDraft = (key: string): Draft | null => cache.get(key) ?? null
+
 export function discardDraft(key: string): void {
   if (cache.has(key)) commit(key, null)
 }

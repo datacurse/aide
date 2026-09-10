@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import type { Attachment, ChatOrder, ChatStatus } from "@aide/protocol"
-import { born, isImageAttachment, sortChats } from "@aide/protocol"
+import type { Attachment, BridgedChat, ChatOrder, ChatStatus } from "@aide/protocol"
+import { born, bridgedChats, isImageAttachment, sortChats } from "@aide/protocol"
 import { api, type ConversationRow, type LockHolder } from "../api.js"
 import { collectAttachments } from "../attachments.js"
 import {
@@ -924,6 +924,77 @@ function ChatRow({
   )
 }
 
+/**
+ * A chat that has just become a conversation, for the round trip before the
+ * daemon's own row arrives — see `BridgedChat`.
+ *
+ * Deliberately the same skeleton as `ChatRow` rather than a component of its
+ * own: same paddings, same 36px square at the same x, same two lines. The whole
+ * job is that nothing moves when the real row replaces this one, so the two
+ * layouts have to be read side by side whenever either changes. What it cannot
+ * draw is what it does not know — the spend figures, the branch, the kind — and
+ * those are omitted rather than zeroed, since a row printing `$0.00` over a
+ * turn that is running says the work was free.
+ *
+ * The square is `DoneCheck`'s, not a copy of it, and it is `working` whenever
+ * this chat holds the checkout — which is nearly always, this being a turn a
+ * second old. The tick is inert: ticking off a chat the list has never fetched
+ * would send `closeChat` for a row it cannot then correct, and the press is
+ * available again the instant the real row lands.
+ */
+function BridgeRow({
+  bridge,
+  order,
+  status,
+  heldSince,
+  selected,
+  onOpen,
+}: {
+  bridge: BridgedChat
+  order: ChatOrder
+  status: ChatStatus
+  heldSince: number | null
+  selected: boolean
+  onOpen: () => void
+}) {
+  const working = status.state === "working"
+  const meta = selected ? "text-fg-muted" : "text-fg-dim"
+  return (
+    <div
+      // Matches `ChatRow` exactly. See the argument there.
+      className={`group flex w-full items-center border py-1.5 pr-2 pl-3 font-sans hover:bg-hover ${
+        selected ? SELECTED : "border-transparent"
+      } ${selected || working ? "text-fg" : "text-fg-muted"}`}
+    >
+      <button
+        type="button"
+        onClick={onOpen}
+        className="flex min-w-0 flex-1 flex-col gap-0.5 pr-1.5 text-left"
+      >
+        <div className="flex items-baseline gap-2">
+          <span className="flex-1 truncate text-[13px]">{bridge.title || "New chat"}</span>
+        </div>
+        <div className={`flex items-baseline gap-1.5 text-[10px] tabular-nums ${meta}`}>
+          <span>{when(order === "activity" ? bridge.lastModified : bridge.createdAt)}</span>
+        </div>
+      </button>
+      <DoneCheck
+        done={false}
+        working={working}
+        heldSince={heldSince}
+        // The gold mark says which row the project's last run happened in, and
+        // it is read off the fetched list — a stand-in claiming it would be
+        // claiming it twice for a beat, once here and once on the row that
+        // replaces this one.
+        ranLast={false}
+        // Nothing to toggle: the daemon has no row here to close, and the real
+        // one is a moment away. A tick that silently did nothing would be worse.
+        onToggle={() => {}}
+      />
+    </div>
+  )
+}
+
 /** Dimmer than what it separates, or the eye reads the list as dots. */
 const Dot = () => <span className="text-line-soft">·</span>
 
@@ -976,6 +1047,15 @@ const USAGE_SHARE = (tokens: number) =>
  * One object for every parked row, because none of them differ.
  */
 const PARKED: ChatStatus = { state: null, blocked: false, done: false }
+
+/**
+ * What a stand-in knows about itself before `withLock` is applied.
+ *
+ * `done: false` is the only honest value: this chat was started seconds ago, so
+ * nobody has ticked it off — and guessing anything else would sort it into the
+ * archived group, which is a row disappearing again by another route.
+ */
+const BRIDGE_STATUS: ChatStatus = { state: null, blocked: false, done: false }
 
 /** One array for every empty box, so the identity is stable across renders. */
 const NOTHING_TYPED: Attachment[] = []
@@ -1038,6 +1118,12 @@ function withLock(
 type ListRow = { status: ChatStatus; createdAt: number | null; lastModified: number } & (
   | { kind: "draft"; draft: Draft }
   | { kind: "chat"; chat: ConversationRow }
+  // A conversation the daemon has not answered with yet, standing on what the
+  // parked record said — see `BridgedChat`. Its own kind rather than a faked
+  // `ConversationRow`, because most of that shape is genuinely unknown here
+  // (what it cost, how big the transcript is, which branch it is on) and a row
+  // filled with plausible zeroes is a row that quietly reports a chat as free.
+  | { kind: "bridge"; bridge: BridgedChat }
 )
 
 /**
@@ -1065,9 +1151,11 @@ export function ConversationList({
   reloadSeq,
   holder,
   startBlocked,
+  bridged,
   onSelect,
   onSelectDraft,
   onStartDraft,
+  onBridgeLanded,
   onDraftStarted,
   onChanged,
 }: {
@@ -1090,10 +1178,21 @@ export function ConversationList({
    * send it would fail at clears the box it was sending.
    */
   startBlocked: string | null
+  /**
+   * Chats that handed off a moment ago and whose real row has not been fetched
+   * yet — see `BridgedChat`. Drawn here so a chat you just started does not
+   * leave the list for the length of a round trip and come back.
+   */
+  bridged: readonly BridgedChat[]
   onSelect: (sessionId: string) => void
   onSelectDraft: (draftId: string) => void
   /** Open a parked chat and send it, from its ▶. */
   onStartDraft: (draftId: string) => void
+  /**
+   * These stand-ins have been overtaken by fetched rows and can be dropped. Must
+   * be stable, or the effect that reports it re-runs on its own output.
+   */
+  onBridgeLanded: (sessionIds: readonly string[]) => void
   /**
    * An unstarted chat turned out to have a session after all — see `waiting`.
    * Must be stable, or the handoff below restarts on every poll.
@@ -1308,6 +1407,33 @@ export function ConversationList({
   )
 
   /**
+   * The stand-ins still worth drawing, against what the daemon has answered
+   * with. Everything overtaken is reported up and gone by the next render.
+   *
+   * `items === null` — nothing fetched for this project yet — deliberately
+   * keeps every note: a project you have only just arrived at knows nothing,
+   * and retiring on that would be reading "no rows" as "your chat is not one
+   * of them".
+   */
+  const standing = useMemo(
+    () =>
+      items === null
+        ? bridged
+        : bridgedChats(bridged, new Set(items.map((c) => c.sessionId))),
+    [bridged, items],
+  )
+
+  // Reported up rather than dropped here, because the notes belong to the app —
+  // both halves of a handoff land there. Guarded on the LENGTH rather than on
+  // identity: `bridgedChats` returns a fresh array every render, so comparing
+  // identities would report the same landing forever.
+  useEffect(() => {
+    if (standing.length === bridged.length) return
+    const landed = bridged.filter((b) => !standing.includes(b)).map((b) => b.sessionId)
+    if (landed.length > 0) onBridgeLanded(landed)
+  }, [standing, bridged, onBridgeLanded])
+
+  /**
    * Every row this project has, in one order: newest first, whatever each one is
    * doing. See `sortChats` — under the default order a chat you park has to
    * appear where you are looking, and under `activity` the chat that just
@@ -1327,6 +1453,19 @@ export function ConversationList({
     () =>
       sortChats(
         [
+          ...standing.map(
+            (b): ListRow => ({
+              kind: "bridge",
+              bridge: b,
+              // The lock is the only live thing known about it, and it is the
+              // one that matters: this chat was started seconds ago, so it is
+              // almost always the holder — which is what draws the run dial and
+              // keeps the row looking like the work it just became.
+              status: withLock(BRIDGE_STATUS, b.sessionId, holdingSession, holderBlocked),
+              createdAt: b.createdAt,
+              lastModified: b.lastModified,
+            }),
+          ),
           ...unstarted.map(
             (d): ListRow => ({
               kind: "draft",
@@ -1350,7 +1489,7 @@ export function ConversationList({
         ],
         order,
       ),
-    [unstarted, items, holdingSession, holderBlocked, order],
+    [standing, unstarted, items, holdingSession, holderBlocked, order],
   )
 
   /**
@@ -1384,7 +1523,17 @@ export function ConversationList({
   const archivedHeading = archived.length > 0 && (stillOpen.length > 0 || hideArchived)
 
   const render = (row: ListRow) =>
-    row.kind === "draft" ? (
+    row.kind === "bridge" ? (
+      <BridgeRow
+        key={row.bridge.sessionId}
+        bridge={row.bridge}
+        order={order}
+        status={row.status}
+        heldSince={row.bridge.sessionId === holdingSession ? (holder?.startedAt ?? null) : null}
+        selected={row.bridge.sessionId === selected}
+        onOpen={() => onSelect(row.bridge.sessionId)}
+      />
+    ) : row.kind === "draft" ? (
       <UnstartedRow
         key={row.draft.key}
         draft={row.draft}

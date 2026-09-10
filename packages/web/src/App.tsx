@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { projectGates } from "@aide/protocol"
+import { projectGates, type BridgedChat } from "@aide/protocol"
 import { api, type GitPending, type Health, type ProjectView } from "./api.js"
 import { CHIME_KEY } from "./chime.js"
 import { usePoll } from "./usePoll.js"
 import { DaemonBar } from "./Daemon.js"
 import { Dashboard } from "./Dashboard.js"
-import { carryDraft, draftKey, openComposedChat, openNewChat } from "./drafts.js"
+import { carryDraft, draftKey, draftSubject, openComposedChat, openNewChat, peekDraft } from "./drafts.js"
 import { Hint } from "./Hint.js"
+import { draftName } from "./naming.js"
 import { SettingsButton } from "./Settings.js"
 import { SURVEY_PROMPT } from "./survey.js"
 import { useAppLocation } from "./useAppLocation.js"
@@ -56,6 +57,21 @@ export function App() {
    * back to the top, and a half-typed line in the capture box vanished with it.
    */
   const [conversationsSeq, setConversationsSeq] = useState(0)
+  /**
+   * Chats that have just become conversations and are not in the fetched list
+   * yet — see `BridgedChat`, which holds the argument.
+   *
+   * Here rather than in the list because both halves of the handoff land here:
+   * the pane hears the name off the live stream, the list hears it from the
+   * daemon, and `chatStarted` is where those two already meet. A copy in each
+   * would be two answers to "is this chat drawn yet".
+   *
+   * Not per project, and it does not need to be: a note is retired the moment
+   * the project's own list contains it, and the list only ever consults notes
+   * against the rows it has. Switching away and back leaves at most one stale
+   * entry, which the first fetch of that project drops.
+   */
+  const [bridged, setBridged] = useState<BridgedChat[]>([])
   /**
    * A parked chat that has had its ▶ pressed and has not gone out yet.
    *
@@ -218,17 +234,61 @@ export function App() {
    */
   const chatStarted = useCallback(
     (fromDraftId: string | null, id: string) => {
-      // The unstarted record IS this conversation, so it does not linger next to
-      // the real one the list is about to grow — anything still unsent in its
-      // box moves across with it.
       if (projectId && fromDraftId) {
-        carryDraft(draftKey(projectId, fromDraftId), draftKey(projectId, id))
+        const key = draftKey(projectId, fromDraftId)
+        // Read before the carry, which deletes it. What the row was called and
+        // when it was parked are the two facts the list needs to keep drawing
+        // this chat in the same place, with the same words, for the round trip
+        // between the record going and the daemon's own row arriving.
+        const was = peekDraft(key)
+        // The unstarted record IS this conversation, so it does not linger next
+        // to the real one the list is about to grow — anything still unsent in
+        // its box moves across with it.
+        carryDraft(key, draftKey(projectId, id))
+        if (was) {
+          const said = draftSubject(was).trim().split("\n", 1)[0] ?? ""
+          setBridged((prev) => [
+            // Keyed by session id, so a second handoff for the same conversation
+            // — the pane's stream and the list's poll both answering — replaces
+            // the note rather than standing two rows on it.
+            ...prev.filter((b) => b.sessionId !== id),
+            {
+              sessionId: id,
+              // The name it had, else the first line of what went out. The
+              // fetched row will carry the SDK's own title a moment later; what
+              // matters here is that the row does not go blank or change words
+              // under the cursor in between.
+              title: draftName(was) ?? said,
+              createdAt: was.createdAt,
+              lastModified: was.updatedAt,
+            },
+          ])
+        }
       }
       if (fromDraftId === null || fromDraftId === draftId) navigate({ sessionId: id })
       setConversationsSeq((n) => n + 1)
     },
     [projectId, draftId, navigate],
   )
+
+  /**
+   * A stand-in has been overtaken by the daemon's own row.
+   *
+   * The list is the only thing that knows what the fetch answered with, so it
+   * is the only thing that can say this. Retiring the note is not tidiness: one
+   * kept after the real row lands draws the same chat twice, which is the bug
+   * this whole mechanism exists to avoid, arriving from the other side.
+   *
+   * Stable, because the list calls it from an effect that depends on it.
+   */
+  const bridgeLanded = useCallback((sessionIds: readonly string[]) => {
+    setBridged((prev) => {
+      const next = prev.filter((b) => !sessionIds.includes(b.sessionId))
+      // Same array when nothing was retired, or the effect that reports this
+      // re-runs on its own output forever.
+      return next.length === prev.length ? prev : next
+    })
+  }, [])
 
   /**
    * Add a project by pointing at it.
@@ -532,6 +592,8 @@ export function App() {
             navigate({ draftId: id })
             setAutoSend(id)
           }}
+          bridged={bridged}
+          onBridgeLanded={bridgeLanded}
           onDraftStarted={chatStarted}
           onChanged={() => setConversationsSeq((n) => n + 1)}
         />
