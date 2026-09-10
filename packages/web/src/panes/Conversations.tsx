@@ -1252,7 +1252,9 @@ export function ConversationList({
           10px wider on the press, and reserving the gutter instead left a
           permanent stripe of nothing. The rows are full width either way now,
           and the bar floats over them only while there is something to scroll. */}
-      <OverlayScroller className="flex-1" contentClassName="py-1">
+      {/* pr-1.5: the rows' own pr-2 ends 8px from the edge, 2px short of the
+          floating 10px thumb — this puts their buttons clear of it. */}
+      <OverlayScroller className="flex-1" contentClassName="py-1 pr-1.5">
         {items === null && rows.length === 0 && <Empty>Reading the session store…</Empty>}
         {items !== null && rows.length === 0 && (
           <Empty>
