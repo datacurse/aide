@@ -185,6 +185,18 @@ export function ConversationPane({
    */
   const startedHere = useRef<string | null>(null)
 
+  /**
+   * Runs this pane has watched end, so the adoption above can tell a run it is
+   * merely stale about from one it is actively streaming.
+   *
+   * A ref rather than derived from `turnEvents`: the adoption runs inside a
+   * fetch callback, which cannot read a value computed later in the render, and
+   * making it a dependency would refire the fetch every time a turn ended.
+   * Never cleared while the chat stays open — an ended run does not un-end, and
+   * the set is one entry per turn of one sitting.
+   */
+  const endedRuns = useRef<Set<string>>(new Set())
+
   // Switching conversations clears the pane — during this render, not in an
   // effect after it. An effect leaves one commit in which the pane is already
   // pointed at the new chat while `runId` and the stream still belong to the old
@@ -213,6 +225,7 @@ export function ConversationPane({
       setRunId(null)
       setSent(new Map())
       setLiveSessionId(null)
+      endedRuns.current = new Set()
       // Only that one handoff is exempt, so the exemption ends with it —
       // otherwise coming back to the chat later skips the reset too, and it
       // opens on top of whatever the chat in between left behind.
@@ -241,7 +254,17 @@ export function ConversationPane({
         // may have ended while you were in another project, and adopting a dead
         // run replays it into the transcript — put-it-back bar and all.
         const inFlight = v.summary.activeRunId
-        if (inFlight) setRunId((prev) => prev ?? inFlight)
+        // The run already on screen normally wins — it is the one this pane is
+        // streaming, and this answer is up to a poll stale. The exception is a
+        // run that has ENDED, which `endedRuns` is the record of: a pane left
+        // sitting on a finished auto-commit while the daemon reports a live
+        // turn for this conversation is holding the wrong id, and holding it
+        // for good, because `??` can never replace it. That is a turn running
+        // with no working bar, no streaming reply and no chime until it is
+        // over — see `turnForSession`, which is the other half of this.
+        if (inFlight) {
+          setRunId((prev) => (prev === null || endedRuns.current.has(prev) ? inFlight : prev))
+        }
       })
       .catch((err) => {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err))
@@ -267,6 +290,12 @@ export function ConversationPane({
       for (const e of live) next.set(`${e.runId}:${e.seq}`, e)
       return next
     })
+    // Noted as they pass, for the adoption above. A run log ends in exactly one
+    // terminal event, so this is the same test `finished` makes — recorded here
+    // because the fetch callback runs long before that memo exists.
+    for (const e of live) {
+      if (e.type === "run.finished" || e.type === "run.error") endedRuns.current.add(e.runId)
+    }
     // Only a NEW conversation needs this: it has no id until the SDK assigns one,
     // and the list has no row for it yet. An existing one already knows its id,
     // and telling the list to refetch mid-turn just churns it.

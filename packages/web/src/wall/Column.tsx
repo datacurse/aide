@@ -152,6 +152,13 @@ export function WallColumn({
   const [view, setView] = useState<ConversationView | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [runId, setRunId] = useState<string | null>(null)
+  /**
+   * Runs this column has watched end, so the adoption below can tell a run it
+   * is merely stale about from one it is actively streaming. A ref because the
+   * adoption happens inside a fetch callback; see the pane, which keeps the
+   * same set for the same reason.
+   */
+  const endedRuns = useRef<Set<string>>(new Set())
   const [sent, setSent] = useState<Map<string, RunEvent>>(new Map())
   const [picking, setPicking] = useState(false)
   const [pushing, setPushing] = useState(false)
@@ -252,8 +259,16 @@ export function WallColumn({
         if (cancelled) return
         setView(v)
         // Adopt a turn that was already running — the column may have been
-        // scrolled into view long after it started.
-        if (v.summary.activeRunId) setRunId((prev) => prev ?? v.summary.activeRunId)
+        // scrolled into view long after it started. The run on screen otherwise
+        // wins, because this answer is a poll stale; the exception is one that
+        // has ENDED, or a column left on a finished auto-commit could never
+        // move to the turn queued behind it — `??` cannot replace anything, so
+        // that turn would run to completion drawing nothing. Same fix as the
+        // pane's, whose comment carries the rest of it.
+        const inFlight = v.summary.activeRunId
+        if (inFlight) {
+          setRunId((prev) => (prev === null || endedRuns.current.has(prev) ? inFlight : prev))
+        }
       })
       .catch(() => {
         if (!cancelled) setView(null)
@@ -281,6 +296,7 @@ export function WallColumn({
     setRunId(null)
     setSent(new Map())
     setError(null)
+    endedRuns.current = new Set()
   }
 
   const { events: streamed, draft } = useRunStream(runId)
@@ -293,6 +309,11 @@ export function WallColumn({
       for (const e of live) next.set(`${e.runId}:${e.seq}`, e)
       return next
     })
+    // Noted as they pass, for the adoption above — a run log ends in exactly
+    // one terminal event.
+    for (const e of live) {
+      if (e.type === "run.finished" || e.type === "run.error") endedRuns.current.add(e.runId)
+    }
     // A new chat learns its session id mid-turn. The column has to follow it, or
     // the turn it just started belongs to a draft that no longer stands for
     // anything and the transcript would vanish when it finished.

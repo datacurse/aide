@@ -719,6 +719,28 @@ Decisions already taken, which are not gaps to fill:
   awaiting the wait — a commit can outlast an HTTP timeout, and a browser that
   restores its draft over a turn the daemon still runs turns one message into
   two.
+- **A queued turn means a conversation has TWO records, and `turnForSession`
+  answers with the turn.** The auto-commit is attributed to the chat whose turn
+  it follows, so typing into that chat while it lands leaves the lane holding
+  the commit AND the turn queued behind it under one session id — and
+  `turnForSession` was a `find` over an insertion-ordered Map, which answers
+  with whichever was registered first. That is always the commit. Nothing
+  refuses and nothing errors: `activeRunId` names the commit, the browser adopts
+  it, and `isCommitRun` quite correctly draws nothing for a commit — so the turn
+  the human just sent runs its whole length with no working bar, no streaming
+  reply and no chime, and the answer appears only when it is over. From the
+  outside that is aide swallowing a message. `holderFor` beside it still answers
+  with the COMMIT and must: the visible holder stays the commit until it lets
+  go, or a wall column would re-point mid-commit for a reason nothing on screen
+  explains. Two questions, two answers, one moment where they differ — which is
+  the whole reason they are two functions. The browser half is the same bug from
+  the other end: both the pane and a wall column adopt with `prev ?? activeRunId`,
+  so a surface already pointed at the FINISHED commit could never move to the
+  turn behind it, `??` having nothing to replace. Both now keep an `endedRuns`
+  ref and let a live run displace a dead one. `pnpm smoke:queue` pins the daemon
+  half — it had no coverage because every existing commit-queue assertion
+  commits with `sessionId: null`, where one conversation can never have two
+  records.
 - **A failed check gets one automatic fix, and one only.** The commit hands the
   failure to the conversation it is attributed to, waits for the turn, re-reads
   the tree and checks again; a second failure stops and asks. That turn runs

@@ -496,9 +496,26 @@ export class ChatLane implements LiveChats {
    * Null rather than `find`'s own `undefined`, to match `holderFor` beside it:
    * these are the two halves of one question and they answered "nothing" with two
    * different values, which every caller then had to normalize on its own.
+   *
+   * A conversation can have TWO records against it — the auto-commit attributed
+   * to it, and a turn typed while that commit landed and queued behind it — and
+   * this answers with the CHAT turn, never the commit. A plain `find` over an
+   * insertion-ordered Map answers with the commit, because the commit was
+   * registered first, and every reader of this then describes the wrong run:
+   * `activeRunId` hands the browser the commit's id, the pane adopts it, and
+   * `isCommitRun` quite correctly draws nothing for it — so the turn the human
+   * just sent runs with no working bar, no streaming reply and no chime, for
+   * its whole duration. What that looks like from the outside is aide
+   * swallowing a message, and the only tell is that the answer appears in the
+   * transcript once it is over.
+   *
+   * The commit is still what `holderFor` reports below, and deliberately: the
+   * lock's visible holder stays the commit until it lets go, or a column would
+   * re-point mid-commit for a reason nothing on screen explains.
    */
   turnForSession(sessionId: string): ChatTurn | null {
-    return this.turns().find((t) => t.sessionId === sessionId) ?? null
+    const mine = this.turns().filter((t) => t.sessionId === sessionId)
+    return mine.find((t) => !t.held) ?? mine[0] ?? null
   }
 
   /**

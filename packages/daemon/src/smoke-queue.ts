@@ -1189,6 +1189,83 @@ console.log("\na send during a commit queues instead of refusing")
 }
 
 // ---------------------------------------------------------------------------
+console.log("\na turn queued behind its OWN conversation's commit is what that chat reports")
+// The section above commits with no session, so a conversation never has two
+// records against it. The real auto-commit is ATTRIBUTED to the chat whose turn
+// it follows, and typing into that chat while it lands is the ordinary thing to
+// do — which leaves the lane holding two records for one session: the commit,
+// registered first, and the turn queued behind it.
+//
+// `turnForSession` decides which one every reader describes, and a plain `find`
+// over an insertion-ordered Map answers with the COMMIT. Nothing refuses and
+// nothing errors; `activeRunId` simply names the commit, the browser adopts it,
+// and `isCommitRun` correctly draws nothing for a commit — so the turn the human
+// just sent runs its whole length with no working bar, no streaming reply and no
+// chime, and the answer appears only once it is over. Invisible to every other
+// assertion here, because the queue itself works perfectly.
+{
+  const session = "eeeeeeee-ffff-4aaa-8bbb-000000000000"
+  let unblock = () => {}
+  const gate = new Promise<void>((resolve) => {
+    unblock = resolve
+  })
+  const held = lane.hold({
+    project,
+    // The commit hangs off this conversation's finished turn, which is what
+    // `startCommit` does with every auto-commit that follows a chat turn.
+    sessionId: session,
+    text: "committing what is uncommitted",
+    model: "helper-model",
+    work: async () => {
+      await gate
+      return { costUsd: 0, modelUsage: {} }
+    },
+  })
+
+  const queued = await say(session, "asked while its own commit was landing")
+  check(
+    "the send into the committing chat is admitted",
+    lane.turns().some((t) => t.runId === queued),
+    "a commit attributed to this chat is still only a commit — it queues, like any other",
+  )
+  check(
+    "one conversation, two records",
+    lane.turns().filter((t) => t.sessionId === session).length === 2,
+    "the setup this is about — without both there is nothing to pick wrongly",
+  )
+  check(
+    "the chat reports the TURN, not the commit it queued behind",
+    lane.turnForSession(session)?.runId === queued,
+    lane.turnForSession(session)?.runId === held
+      ? "it named the commit — the turn runs with nothing on screen until it ends"
+      : String(lane.turnForSession(session)?.runId),
+  )
+  check(
+    "and that turn is not marked held",
+    lane.turnForSession(session)?.held === false,
+    "the browser reads `held` to decide whether to draw the run at all",
+  )
+  check(
+    "while the project's visible holder is still the commit",
+    lane.holderFor(project.id)?.runId === held,
+    "the two questions have different answers here, which is the whole point of them being two",
+  )
+
+  unblock()
+  await settled(lane)
+  check(
+    "the queued turn ran",
+    log.read(queued).at(-1)?.type === "run.finished",
+    log.read(queued).at(-1)?.type ?? "(no events)",
+  )
+  check(
+    "and the conversation reports nothing once both are done",
+    lane.turnForSession(session) === null,
+    "a record left behind would show a finished chat as permanently working",
+  )
+}
+
+// ---------------------------------------------------------------------------
 console.log("\na refused commit asks the conversation for a fix")
 // The one automatic attempt. It is an agent turn running INSIDE a commit, which
 // is the shape everything here is about: the commit keeps the project's lock
