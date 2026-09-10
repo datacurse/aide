@@ -194,8 +194,19 @@ const truncate = (s: string, n = 300) => (s.length > n ? `${s.slice(0, n)}...` :
 function clip(s: string, n = 300): string {
   if (s.length <= n) return s
   const half = Math.floor((n - 1) / 2)
-  const dropped = s.length - half * 2
-  return `${s.slice(0, half)}\n…${dropped} chars…\n${s.slice(-half)}`
+  let head = s.slice(0, half)
+  let tail = s.slice(-half)
+  // Snap each cut to a line boundary when one is near. A character cut
+  // strands half a word on each side of the elision — "ren" above the rule,
+  // "prove chunking:" below it — which reads as corruption rather than as a
+  // cut. Only when the newline is in the nearer half of that side's budget,
+  // so single-line output does not lose half its keep to the snap.
+  const hn = head.lastIndexOf("\n")
+  if (hn > half / 2) head = head.slice(0, hn)
+  const tn = tail.indexOf("\n")
+  if (tn !== -1 && tn < half / 2) tail = tail.slice(tn + 1)
+  const dropped = s.length - head.length - tail.length
+  return `${head}\n…${dropped} chars…\n${tail}`
 }
 
 /** tool_result content is either a string or an array of blocks. Render either. */

@@ -208,14 +208,6 @@ function Body({ call, clamp }: { call: CallDetailData; clamp: string }) {
       </Labeled>
     )
   }
-  if (call.name === "Bash") {
-    return (
-      // The header truncates a long command; this is the whole of it.
-      <Labeled label="command">
-        <pre className={`${CODE} ${clamp}`}>{highlightCode(str(o, "command") ?? "", "sh")}</pre>
-      </Labeled>
-    )
-  }
   if (call.name === "Read") {
     const offset = num(o, "offset")
     const limit = num(o, "limit")
@@ -319,20 +311,32 @@ export function CallDetail({
 export function CallBlocks({ call }: { call: CallDetailData }) {
   const [expand] = useRemembered<boolean>(CARD_EXPAND_KEY, true, isBool)
   const clamp = expand ? "" : "max-h-48"
+  // A shell call is ONE terminal reading, not a labelled command box above a
+  // labelled result box — the command was already in the header, so the boxes
+  // spent two section labels saying it twice. `$ command`, then what it
+  // printed: the shape every terminal ever taught, and the `$ ` rule in
+  // ShellOutput brights this line exactly like the `$ ` echoes pnpm itself
+  // prints beneath it. `target` rather than the input, so a still-streaming
+  // call already shows the command its delta named.
+  if (call.name === "Bash") {
+    return (
+      <ShellOutput
+        text={`$ ${call.target}${call.summary === "" ? "" : `\n${call.summary}`}`}
+        clamp={clamp}
+      />
+    )
+  }
   return (
     <div className="space-y-1.5">
       <Body call={call} clamp={clamp} />
       {call.summary !== "" && (
         <Labeled label="result">
           {/* A Read's result IS file content, so it reads in that file's
-              colours, and a Bash result reads like the terminal it never got
-              (`ShellOutput`). Every other tool's result stays plain —
-              colouring a stack trace as TypeScript would be decoration
-              claiming to be meaning. */}
+              colours. Every other tool's result stays plain — colouring a
+              stack trace as TypeScript would be decoration claiming to be
+              meaning. */}
           {call.name === "Read" ? (
             <pre className={`${CODE} ${clamp}`}>{highlightCode(call.summary, langOfPath(call.target))}</pre>
-          ) : call.name === "Bash" ? (
-            <ShellOutput text={call.summary} clamp={clamp} />
           ) : (
             <pre className={`${PRE} ${clamp} bg-editor`}>{call.summary}</pre>
           )}
