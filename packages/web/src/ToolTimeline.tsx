@@ -21,6 +21,48 @@ import { buildTimeline, looksOnly, type TimelineCall, type TimelineRow } from "@
 /** Column width for n dots side by side; 24px floor so single dots align. */
 const colWidth = (n: number): number => Math.max(24, n * 10 + (n - 1) * 3 + 10)
 
+/**
+ * The row connector as one filled SVG path per cell: a 2px line that SWELLS
+ * into each dot with tangent curves and ends underneath the outermost dots.
+ *
+ * Drawn, because rectangles could not say this. The first version was a grey
+ * hairline (disconnected from the dots it joined), the second a rounded pill
+ * under each dot (which poked past the row's end dots — a stadium shape has
+ * no way to stop AT a circle). A path can: each swell rises from line
+ * thickness to just under the dot's radius with horizontal tangents at both
+ * ends, so it leaves the line smoothly and disappears under the dot's edge,
+ * and an endpoint dot simply gets no swell on its outer side. SVG rather than
+ * canvas for the same result: crisp at any zoom, no resize or repaint
+ * plumbing, and the dots stay HTML — focusable, hoverable, clickable.
+ *
+ * Geometry mirrors the HTML dots exactly: 10px dots on a 3px gap, centred in
+ * the cell — `colWidth` is the same arithmetic. The swell's half-height is
+ * 4.5 against the dot's radius of 5, so its seam is always covered, ring dots
+ * included.
+ */
+function connectorPath(xs: number[], from: number, to: number): string {
+  const y = 12 // half the 24px row
+  const t = 1 // half the line's thickness
+  const r = 4.5 // the swell's peak, just under the dot's radius
+  const lead = 7 // how far out a swell begins
+  let d = `M ${from} ${y - t} L ${to} ${y - t} L ${to} ${y + t} L ${from} ${y + t} Z `
+  for (const x of xs) {
+    // A half-swell only where the line actually continues on that side — the
+    // outermost dots end the shape instead of wearing a stub past the row.
+    if (x > from + 0.5) {
+      d +=
+        `M ${x - lead} ${y - t} C ${x - lead + 3} ${y - t} ${x - 5} ${y - r} ${x} ${y - r} ` +
+        `L ${x} ${y + r} C ${x - 5} ${y + r} ${x - lead + 3} ${y + t} ${x - lead} ${y + t} Z `
+    }
+    if (x < to - 0.5) {
+      d +=
+        `M ${x + lead} ${y - t} C ${x + lead - 3} ${y - t} ${x + 5} ${y - r} ${x} ${y - r} ` +
+        `L ${x} ${y + r} C ${x + 5} ${y + r} ${x + lead - 3} ${y + t} ${x + lead} ${y + t} Z `
+    }
+  }
+  return d
+}
+
 /** File rows show their tail; `search`, `shell` and friends are already short. */
 const shortLabel = (r: TimelineRow): string =>
   r.sys ? r.label : r.label.split(/[/\\]/).slice(-2).join("/")
@@ -330,9 +372,17 @@ export function ToolTimeline({
                   </td>
                   {t.messages.map((m) => {
                     const cs = byMsg?.get(m) ?? []
-                    // The hairline from first touch to last, behind the dots.
+                    // The connector from first touch to last, behind the dots.
                     // A row touched once gets none — there is nothing to join.
                     const on = lo !== hi && m >= lo && m <= hi
+                    const w = cells.widths.get(m) ?? 24
+                    // The HTML dots' geometry, recomputed for the path: 10px
+                    // dots on a 3px gap, centred — `colWidth`'s arithmetic.
+                    const xs = cs.map(
+                      (_, i) => w / 2 - (cs.length * 10 + (cs.length - 1) * 3) / 2 + 5 + i * 13,
+                    )
+                    const from = m === lo ? (xs[0] ?? w / 2) : 0
+                    const to = m === hi ? (xs[xs.length - 1] ?? w / 2) : w
                     return (
                       <td
                         key={m}
@@ -343,27 +393,18 @@ export function ToolTimeline({
                           hover === m ? "bg-hover" : ""
                         }`}
                       >
-                        {/* The connector, in the dots' own green rather than a
-                            grey hairline — same colour means the junction with
-                            a solid dot simply disappears, which is most of
-                            what reads as "the line flows into the node". */}
                         {on && (
-                          <span
-                            className={`absolute top-1/2 h-[2px] -translate-y-1/2 bg-ok ${m === lo ? "left-1/2" : "left-0"} ${
-                              m === hi ? "right-1/2" : "right-0"
-                            }`}
-                          />
-                        )}
-                        {/* A soft neck under each dot: a 4px pill a little
-                            wider than the dots, so the 2px line swells as it
-                            arrives and the circle grows out of the bulge
-                            instead of sitting on a wire. The cheap half of a
-                            metaball, for none of the filter tricks. */}
-                        {on && cs.length > 0 && (
-                          <span
-                            className="absolute top-1/2 left-1/2 h-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-ok"
-                            style={{ width: (cells.widths.get(m) ?? 24) - 10 }}
-                          />
+                          <svg
+                            aria-hidden="true"
+                            width={w}
+                            height={24}
+                            className="pointer-events-none absolute inset-0"
+                          >
+                            <path
+                              d={connectorPath(xs, from, to)}
+                              style={{ fill: "var(--color-ok)" }}
+                            />
+                          </svg>
                         )}
                         {cs.length > 0 && (
                           <span className="relative z-[1] flex h-full items-center justify-center gap-[3px]">
