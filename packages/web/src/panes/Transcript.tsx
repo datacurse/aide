@@ -26,7 +26,7 @@ import {
   X,
 } from "../icons.js"
 import { Markdown } from "../Markdown.js"
-import { CallDetail } from "../CallDetail.js"
+import { CallBlocks, CallDetail } from "../CallDetail.js"
 import { ToolTimeline } from "../ToolTimeline.js"
 import { Button, Empty, money } from "../ui.js"
 import type { LiveTool } from "../useRunStream.js"
@@ -1031,10 +1031,23 @@ function ToolRow({ line }: { line: ToolLine }) {
             line.ms >= SLOW_TOOL_MS && <span className="shrink-0 text-fg-dim">{took(line.ms)}</span>}
       </div>
       {open && detailed && (
-        <pre className="mt-1 mb-2 max-h-64 overflow-auto rounded-sm bg-chrome p-2 text-[11px] leading-relaxed whitespace-pre-wrap text-fg-muted">
-          {JSON.stringify(line.input, null, 2)}
-          {line.summary ? `\n\n--- result ---\n${line.summary}` : ""}
-        </pre>
+        // The same structured blocks the timeline's card draws — one
+        // component, so the two readings cannot diverge. This was a JSON
+        // dump, which meant the same call read as old/new diff blocks from a
+        // dot and as `\n`-riddled soup from the row.
+        <div className="mt-1 mb-2">
+          <CallBlocks
+            call={{
+              name: line.name,
+              input: line.input,
+              target: toolTarget(line.name, line.input),
+              ok: line.ok,
+              summary: line.summary,
+              failTag: line.ok === false ? classifyFailure(line.name, line.summary) : null,
+              retry: line.retry,
+            }}
+          />
+        </div>
       )}
     </div>
   )

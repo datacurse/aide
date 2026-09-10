@@ -811,9 +811,11 @@ Decisions already taken, which are not gaps to fill:
   the editor's own syntax colours (filled diff backgrounds were tried and
   fought the tokens), a Bash as its command over its output, a Grep as the
   pattern beside its filter chips, anything unrecognised as JSON — instead of
-  unfolding the whole flat list to find one row. The card renders the same
-  recorded fields the flat row holds, so the two readings cannot disagree,
-  and `show N steps` stays the unchanged full reading. The colouring is
+  unfolding the whole flat list to find one row. The card and a flat row's
+  own expansion render through ONE component (`CallBlocks`), so the two
+  readings cannot diverge — opening a row behind `show N steps` gets the same
+  structured blocks, and the JSON dump it used to show is gone with its
+  escaped-newline soup. The colouring is
   `highlight.tsx`, drawn rather than installed — the `filetypes.ts` trade
   again: seven token classes over the `--color-syn-*` palette buy most of
   "looks like VS Code" for none of a grammar pack, and a language it does not

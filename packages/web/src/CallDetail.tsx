@@ -210,8 +210,6 @@ export function CallDetail({
   duration: string | null
   onClose: () => void
 }) {
-  const [expand] = useRemembered<boolean>(CARD_EXPAND_KEY, true, isBool)
-  const clamp = expand ? "" : "max-h-48"
   return (
     // The commit fold's box: bordered, because like a commit this is neither
     // the model talking nor a row in the flow — it is an inspection the reader
@@ -246,22 +244,40 @@ export function CallDetail({
           <X className="size-3" />
         </button>
       </div>
-      <div className="space-y-1.5 px-2 py-1.5">
-        <Body call={call} clamp={clamp} />
-        {call.summary !== "" && (
-          <Labeled label="result">
-            {/* A Read's result IS file content, so it reads in that file's
-                colours. Every other tool's result is output, and stays plain
-                — colouring a stack trace as TypeScript would be decoration
-                claiming to be meaning. */}
-            {call.name === "Read" ? (
-              <pre className={`${CODE} ${clamp}`}>{highlightCode(call.summary, langOfPath(call.target))}</pre>
-            ) : (
-              <pre className={`${PRE} ${clamp} bg-editor`}>{call.summary}</pre>
-            )}
-          </Labeled>
-        )}
+      <div className="px-2 py-1.5">
+        <CallBlocks call={call} />
       </div>
+    </div>
+  )
+}
+
+/**
+ * The per-tool blocks and the result, WITHOUT the card's frame — shared
+ * verbatim between the card a timeline dot opens and a flat row's expansion
+ * behind `show N steps`. One component is the point: the expansion used to be
+ * a JSON dump with the escapes showing, so the same call had a structured
+ * reading in one place and `\n`-riddled soup in the other, and which one you
+ * got depended on where you happened to click.
+ */
+export function CallBlocks({ call }: { call: CallDetailData }) {
+  const [expand] = useRemembered<boolean>(CARD_EXPAND_KEY, true, isBool)
+  const clamp = expand ? "" : "max-h-48"
+  return (
+    <div className="space-y-1.5">
+      <Body call={call} clamp={clamp} />
+      {call.summary !== "" && (
+        <Labeled label="result">
+          {/* A Read's result IS file content, so it reads in that file's
+              colours. Every other tool's result is output, and stays plain
+              — colouring a stack trace as TypeScript would be decoration
+              claiming to be meaning. */}
+          {call.name === "Read" ? (
+            <pre className={`${CODE} ${clamp}`}>{highlightCode(call.summary, langOfPath(call.target))}</pre>
+          ) : (
+            <pre className={`${PRE} ${clamp} bg-editor`}>{call.summary}</pre>
+          )}
+        </Labeled>
+      )}
     </div>
   )
 }
