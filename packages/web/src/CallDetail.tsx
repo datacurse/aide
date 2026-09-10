@@ -230,7 +230,18 @@ function DiffText({ spans, text, lang }: { spans: WordSpan[] | null; text: strin
   )
 }
 
-const rowTint = (tag: "add" | "del") => (tag === "add" ? "bg-diff-add-fg/10" : "bg-diff-del-fg/10")
+/**
+ * The row wash, deliberately faint.
+ *
+ * At /10 a fifteen-line addition drew as a solid green slab — and the tint is
+ * the LEAST informative thing on the row, since the marker in the gutter
+ * already says which direction it went. Worse, the slab swamped the
+ * word-level dimming it sits behind, which is the signal actually worth
+ * seeing. /[0.025] is enough to group a changed stretch when the eye scans
+ * for one, and not enough to compete with the code.
+ */
+const rowTint = (tag: "add" | "del") =>
+  tag === "add" ? "bg-diff-add-fg/[0.025]" : "bg-diff-del-fg/[0.025]"
 const markTone = (tag: "add" | "del") => (tag === "add" ? "text-diff-add-fg" : "text-diff-del-fg")
 
 /**
@@ -293,9 +304,11 @@ function SplitDiff({ rows, lang }: { rows: DiffRow[]; lang: string | null }) {
   const pairs = splitRows(rows)
   const side = (text: string | null, spans: WordSpan[] | null, tag: "add" | "del") =>
     text === null ? (
-      // An empty half of a lopsided change: tinted, so the column reads as
-      // "nothing here" rather than as a line that happens to be blank.
-      <span className="block bg-fg-dim/5">{"\n"}</span>
+      // An empty half of a lopsided change: faintly tinted, so the column
+      // reads as "nothing here" rather than as a line that happens to be
+      // blank. Same restraint as `rowTint` — it marks absence, which nobody
+      // needs shouted.
+      <span className="block bg-fg-dim/[0.04]">{"\n"}</span>
     ) : (
       <span className={`block ${rowTint(tag)}`}>
         <span className={`select-none ${markTone(tag)}`}>{tag === "add" ? "+ " : "- "}</span>
