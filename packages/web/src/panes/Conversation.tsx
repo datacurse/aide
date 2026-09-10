@@ -643,7 +643,13 @@ export function ConversationPane({
       <div className="relative flex min-h-0 flex-1 flex-col">
         <div
           ref={scroller}
-          className="relative flex-1 overflow-x-hidden overflow-y-auto px-3 py-2 font-mono text-xs leading-relaxed"
+          // `overflow-anchor: none`: the browser's scroll anchoring picks a
+          // node in view and holds IT still through height changes — and when
+          // that node is below an open call card, changing which dot is
+          // selected shoves the grid you are clicking instead of growing the
+          // card downward. Appends land at the bottom here, so anchoring was
+          // buying nothing.
+          className="relative flex-1 overflow-x-hidden overflow-y-auto px-3 py-2 font-mono text-xs leading-relaxed [overflow-anchor:none]"
         >
           {/* Only when there is nothing on screen to keep. `view` is addressed
               by session id, so a new chat's first turn arrives at a key that has

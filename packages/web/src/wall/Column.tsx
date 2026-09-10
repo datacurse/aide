@@ -675,7 +675,13 @@ export function WallColumn({
           far away at the top reads as two unrelated halves. */}
       {/* `relative` so the jump pill below is positioned against the scrollport
           rather than against the page. */}
-      <div ref={body} className="relative min-h-0 flex-1 overflow-y-auto px-2 py-2">
+      {/* `overflow-anchor: none` for the same reason the pane's scroller has
+          it: scroll anchoring holds a node BELOW an open call card still, so
+          picking another dot shoved the grid instead of growing the card. */}
+      <div
+        ref={body}
+        className="relative min-h-0 flex-1 overflow-y-auto px-2 py-2 [overflow-anchor:none]"
+      >
         {/* The growing box, measured by the follower. A wrapper rather than the
             scrollport itself because a ResizeObserver on an `overflow-y-auto`
             element reports the VIEWPORT, which does not change as content
