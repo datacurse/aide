@@ -26,6 +26,7 @@ import {
   X,
 } from "../icons.js"
 import { Markdown } from "../Markdown.js"
+import { CallDetail } from "../CallDetail.js"
 import { ToolTimeline } from "../ToolTimeline.js"
 import { Button, Empty, money } from "../ui.js"
 import type { LiveTool } from "../useRunStream.js"
@@ -898,29 +899,43 @@ function StepsRow({ line }: { line: StepsLine }) {
     }))
 
   /**
-   * A dot was clicked: the flat list is the detail view, so open it and put
-   * that call's row mid-pane. Two frames, because the rows do not exist in the
-   * document until the open has rendered and painted.
+   * Which call's card is open under the grid. A dot click used to unfold the
+   * whole flat list and scroll to the one row — every other call expanded as
+   * the price of reading one. The card draws just the selected call, from the
+   * same `ToolLine` the flat row renders so the two cannot disagree, and it is
+   * looked up by id on every render so a running call's card fills in live as
+   * its result lands. The fold stays closed, and stays the full reading.
    */
-  const openCall = (id: string) => {
-    setOpen(true)
-    requestAnimationFrame(() =>
-      requestAnimationFrame(() => {
-        const el = document.querySelector(`[data-callid="${CSS.escape(id)}"]`)
-        if (!(el instanceof HTMLElement)) return
-        el.scrollIntoView({ block: "center", behavior: "smooth" })
-        el.animate(
-          [{ backgroundColor: "rgba(240, 210, 122, 0.18)" }, { backgroundColor: "transparent" }],
-          { duration: 900 },
-        )
-      }),
-    )
-  }
+  const [sel, setSel] = useState<string | null>(null)
+  const picked = sel === null ? null : (line.steps.find((s) => s.toolUseId === sel) ?? null)
 
   return (
     <div>
       {gridCalls.length > 0 && (
-        <ToolTimeline calls={gridCalls} live={line.live ?? false} onOpenCall={openCall} />
+        <ToolTimeline
+          calls={gridCalls}
+          live={line.live ?? false}
+          selected={sel}
+          onSelect={setSel}
+        />
+      )}
+      {picked && (
+        <CallDetail
+          call={{
+            name: picked.name,
+            input: picked.input,
+            target:
+              picked.input !== null
+                ? toolTarget(picked.name, picked.input)
+                : (picked.liveTarget ?? ""),
+            ok: picked.ok,
+            summary: picked.summary,
+            failTag: picked.ok === false ? classifyFailure(picked.name, picked.summary) : null,
+            retry: picked.retry,
+          }}
+          duration={picked.ms === null ? null : took(picked.ms)}
+          onClose={() => setSel(null)}
+        />
       )}
       {/* 11px, the same as the rows it stands for — a fold that shouted louder
           than its own contents would be the derivation getting MORE weight for
@@ -977,8 +992,7 @@ function ToolRow({ line }: { line: ToolLine }) {
   const detailed = line.input !== null
 
   return (
-    // `data-callid` is how a clicked timeline dot finds this row to scroll to.
-    <div data-callid={line.toolUseId} className={line.nested ? "ml-4 border-l border-line pl-3" : ""}>
+    <div className={line.nested ? "ml-4 border-l border-line pl-3" : ""}>
       <div
         onClick={() => detailed && toggleUnlessSelecting(setOpen)}
         className={`flex min-w-0 items-baseline gap-2 rounded px-1 py-0.5 hover:bg-hover ${detailed ? "cursor-pointer" : ""}`}

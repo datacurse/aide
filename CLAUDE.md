@@ -805,9 +805,13 @@ Decisions already taken, which are not gaps to fill:
   subagent's work stays nested behind the fold. A call announced by the
   `tool` delta draws as a spinner on the column the streaming message will
   become; a column exists only once the model has actually sent it, and
-  nothing queued or predicted is ever drawn. Clicking a dot opens the flat
-  list at that call: the transcript stays the conversation's one full
-  reading, and the grid indexes it rather than replacing it. Two live details
+  nothing queued or predicted is ever drawn. Clicking a dot opens a CARD
+  under the grid for that one call — a per-tool body: an Edit as old and new
+  blocks in the diff colours, a Bash as its command over its output, a Grep
+  as the pattern beside its filter chips, anything unrecognised as JSON —
+  instead of unfolding the whole flat list to find one row. The card renders
+  the same recorded fields the flat row holds, so the two readings cannot
+  disagree, and `show N steps` stays the unchanged full reading. Two live details
   came from watching it. A call announced mid-stream now learns its TARGET
   before its event — the `tool.target` delta, emitted the moment the target
   field's closing quote arrives in the streaming JSON (`partialToolTarget`,

@@ -84,13 +84,20 @@ function Dot({
 export function ToolTimeline({
   calls,
   live = false,
-  onOpenCall,
+  selected = null,
+  onSelect,
 }: {
   calls: TimelineCall[]
   /** The turn is still running, so between messages the model is composing. */
   live?: boolean
-  /** A dot was clicked: open the steps and show this call. */
-  onOpenCall?: (id: string) => void
+  /**
+   * Which call's card is open below the grid. Held by the CALLER, because the
+   * caller owns the card and a second copy of "which call" here is the one
+   * that would disagree with it.
+   */
+  selected?: string | null
+  /** A dot was clicked; null means the selected dot was clicked again. */
+  onSelect?: (id: string | null) => void
 }) {
   const t = useMemo(() => buildTimeline(calls), [calls])
   /**
@@ -103,7 +110,6 @@ export function ToolTimeline({
    */
   const composing = live && !calls.some((c) => c.status === "busy")
   const [hover, setHover] = useState<number | null>(null)
-  const [selected, setSelected] = useState<string | null>(null)
   const wrap = useRef<HTMLDivElement>(null)
   const strip = useRef<HTMLDivElement>(null)
   /**
@@ -173,11 +179,7 @@ export function ToolTimeline({
   const inBracket = (m: number) => failed.has(m) || recovery.has(m)
   const callsIn = (m: number) => t.rows.reduce((n, r) => n + (cells.grid.get(r.key)?.get(m)?.length ?? 0), 0)
 
-  const pick = (c: TimelineCall) => {
-    const next = selected === c.id ? null : c.id
-    setSelected(next)
-    if (next !== null) onOpenCall?.(c.id)
-  }
+  const pick = (c: TimelineCall) => onSelect?.(selected === c.id ? null : c.id)
 
   return (
     <div className="my-1">
