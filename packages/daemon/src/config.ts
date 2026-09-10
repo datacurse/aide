@@ -128,31 +128,17 @@ export const CONFIG = {
    */
   chatAutoAllowTools: list("AIDE_CHAT_AUTO_ALLOW", ["Read", "Glob", "Grep", "TodoWrite"]),
 
-  /**
-   * Bash commands the agent may run, matched as leading-word prefixes by
-   * `policy.ts`. Single commands only — no pipes, no chaining.
+  /*
+   * `allowedBash` (`AIDE_ALLOWED_BASH`) was here: a prefix allowlist threaded
+   * through `RunAgentOptions` into `checkBashCommand`. The only branch that ever
+   * read it was the fail-closed path for a "task run", and there is one kind of
+   * run now — the live call passes `null`, meaning "anything not denied". A
+   * setting that reaches nothing is worse than absent: it reads as the knob that
+   * controls the shell, and turning it does nothing at all.
    *
-   * The read-only git entries are usually auto-allowed by the SDK's own set
-   * before they ever reach us; they are listed so the policy reads as complete
-   * rather than depending on that.
-   *
-   * `git push` is the one that writes, and it is here on purpose. Nothing is
-   * pushable until it has been committed, and committing is the human pressing
-   * the button — so a run that can push is only ever moving commits somebody has
-   * already read and approved. Leaving it out did not protect a review; it
-   * stranded approved work on the machine that made it, which is what happened
-   * to a remote project on `tg`. See `HUMAN_ONLY_COMMANDS`, which still holds
-   * `git commit`, because that IS the gate.
+   * What decides a shell command is `deniedBash` below plus `HUMAN_ONLY_COMMANDS`
+   * and the file-tool refusals in `policy.ts`.
    */
-  allowedBash: list("AIDE_ALLOWED_BASH", [
-    "pnpm",
-    "npm",
-    "git status",
-    "git diff",
-    "git log",
-    "git show",
-    "git push",
-  ]),
 
   /**
    * Denied even though a prefix above would allow them. Each one is a way a run

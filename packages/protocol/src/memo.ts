@@ -11,12 +11,17 @@
  *
  * The version this replaces held ONE slot, `{ source, projectId, rows }`, and it
  * was correct for exactly as long as one project was on screen at a time. The
- * four panes are scoped to one, so the slot always hit. The wall draws a column
- * per project, and with one slot the columns evict each other — A's read
- * replaces B's entry, B's read replaces A's, so every read on every column
- * misses and returns a fresh array. Interleaving is the trigger, so the failure
- * appears only when a second project is on screen, which is why nothing before
- * the wall found it.
+ * four panes are scoped to one, so the slot always hit. A view that put a second
+ * project on screen — there was one once, drawing a column per project — made the
+ * two evict each other: A's read replaces B's entry, B's read replaces A's, so
+ * every read misses and returns a fresh array. Interleaving is the trigger, so
+ * the failure appears only with two projects live, which is why nothing found it
+ * for as long as there was one.
+ *
+ * That view is gone and this stays, deliberately. The guard it replaced named its
+ * own failure mode in a comment and was still scoped to an assumption that later
+ * stopped holding; re-narrowing this to one slot would be making the same bet a
+ * second time, against the next thing that reads two projects at once.
  *
  * Keyed on the SOURCE as well: the store is replaced wholesale on every write,
  * so one identity comparison invalidates every project at once and no caller has

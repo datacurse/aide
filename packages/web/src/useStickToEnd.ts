@@ -4,14 +4,13 @@ import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
  * Stick to the end while you are at the end, and stay out of the way when you
  * are not.
  *
- * Shared by the conversation pane and every wall column, because they are the
- * same transcript with the same reading behaviour — and because this is far more
- * subtle than it looks. The column had NO follower at all: it passed a scroller
- * down so the transcript could position its pinned question and nothing ever
- * scrolled it, so a turn streaming into a column wrote off the bottom of the box
- * while the visible rows sat still. Writing a second copy for the wall was the
- * obvious fix and the wrong one: every comment below is a failure somebody hit
- * once, and a reimplementation gets to hit them all again.
+ * A hook rather than logic inside the pane, because this is far more subtle than
+ * it looks: every comment below is a failure somebody hit once, and a second
+ * implementation for a second surface gets to hit them all again. That is not
+ * hypothetical — it is what happened when one existed with no follower at all,
+ * passing a scroller down so the transcript could position its pinned question
+ * while nothing ever scrolled it, so a streaming turn wrote off the bottom of the
+ * box while the visible rows sat still.
  *
  * Returns whether the end is currently in view — what draws a jump button — and
  * a way back down.

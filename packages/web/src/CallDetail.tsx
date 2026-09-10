@@ -30,8 +30,8 @@ export const CARD_EXPAND_KEY = "aide.card.expand"
  * shape of nearly every edit in this repo. Split earns its width on a block
  * REWRITE, where unified stacks N deletions above N insertions and comparing
  * line 3 to line 3 means crossing the boundary between two piles. It costs
- * half the card's width, which is why it is the toggle rather than the
- * default: in a wall column there is not enough room for two columns of code.
+ * half the card's width, which is why it is the toggle rather than the default —
+ * a narrow pane has no width to give two columns of code.
  */
 export const CARD_SPLIT_KEY = "aide.card.split"
 

@@ -1233,31 +1233,30 @@ function useStuckQuestion(
 }
 
 /**
- * The turn is stopped here until you answer.
+ * A turn that stopped and asked — in a conversation that ran when it could.
  *
- * Rendered inline in the transcript rather than as a modal so it is legible in
- * context — what Claude was about to do, right after what it said it would do —
- * and so a replayed transcript shows what was asked and what you decided.
+ * READ-ONLY, and permanently so. Nothing aide runs can block on a human
+ * mid-turn: `canUseTool` allows or denies on every path and `AskUserQuestion` is
+ * refused in both modes, so no new `permission.request` is ever written. The
+ * allow/decline buttons went with the route that answered them.
+ *
+ * The row stays because the EVENTS stay. `~/.aide/runs` holds transcripts from
+ * when this could happen, and they are permanent; a reader that dropped these
+ * would redraw those conversations with the pause taken out — an agent that
+ * appears to have chosen, on its own, whatever the human actually approved.
  */
-function PermissionRow({
-  line,
-  onAnswer,
-}: {
-  line: PermissionLine
-  onAnswer?: (requestId: string, allowed: boolean) => void
-}) {
-  const [open, setOpen] = useState(line.allowed === null)
-  const pending = line.allowed === null
+function PermissionRow({ line }: { line: PermissionLine }) {
+  const [open, setOpen] = useState(false)
+  // A request with no answer after it: the turn was interrupted, or the daemon
+  // died holding it. Never a question waiting on you — there is nothing left
+  // that could ask one.
+  const unanswered = line.allowed === null
 
   return (
-    <div
-      className={`my-2 rounded border px-3 py-2 ${
-        pending ? "border-warn bg-warn/5" : "border-line bg-chrome"
-      }`}
-    >
+    <div className="my-2 rounded border border-line bg-chrome px-3 py-2">
       <div className="flex min-w-0 items-center gap-2 font-sans text-[12px]">
-        <span className={`shrink-0 ${pending ? "text-warn" : "text-fg-dim"}`}>
-          {pending ? "needs your approval" : line.allowed ? "you allowed" : "you declined"}
+        <span className="shrink-0 text-fg-dim">
+          {unanswered ? "asked, never answered" : line.allowed ? "you allowed" : "you declined"}
         </span>
         <span className="shrink-0 font-mono text-syn-func">{line.name}</span>
         <span className="min-w-0 truncate font-mono text-[11px] text-syn-string">
@@ -1276,20 +1275,6 @@ function PermissionRow({
         <pre className="mt-2 max-h-48 overflow-auto rounded-sm bg-editor p-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-fg-muted">
           {JSON.stringify(line.input, null, 2)}
         </pre>
-      )}
-
-      {pending && onAnswer && (
-        <div className="mt-2 flex gap-1.5">
-          <Button tone="primary" onClick={() => onAnswer(line.requestId, true)}>
-            allow
-          </Button>
-          <Button onClick={() => onAnswer(line.requestId, false)}>decline</Button>
-        </div>
-      )}
-      {pending && !onAnswer && (
-        <p className="mt-1 font-sans text-[11px] text-fg-dim">
-          This turn is no longer running, so it cannot be answered.
-        </p>
       )}
     </div>
   )
@@ -1524,10 +1509,7 @@ function PushLandedRow({ line }: { line: PushLandedLine }) {
   )
 }
 
-function renderLine(
-  line: Line,
-  onPermission?: (requestId: string, allowed: boolean) => void,
-): ReactNode {
+function renderLine(line: Line): ReactNode {
   if (line.kind === "tool") return <ToolRow key={line.key} line={line} />
   if (line.kind === "steps")
     return line.commit ? (
@@ -1573,7 +1555,7 @@ function renderLine(
     )
   if (line.kind === "user") return <UserRow key={line.key} line={line} />
   if (line.kind === "permission")
-    return <PermissionRow key={line.key} line={line} onAnswer={onPermission} />
+    return <PermissionRow key={line.key} line={line} />
   if (line.kind === "denied")
     return (
       <p key={line.key} className="px-1 break-words text-warn">
@@ -1655,7 +1637,6 @@ function renderLine(
  */
 export function Transcript({
   events,
-  onPermission,
   live,
   busy,
   tail,
@@ -1663,8 +1644,6 @@ export function Transcript({
   children,
 }: {
   events: RunEvent[]
-  /** Present only for a live chat turn; a replayed transcript cannot be answered. */
-  onPermission?: (requestId: string, allowed: boolean) => void
   /** The reply being typed right now, if there is one. See `LiveText`. */
   live?: LiveText | null
   /**
@@ -1731,7 +1710,7 @@ export function Transcript({
     <div ref={setRoot}>
       {pinned && <StickyQuestion text={pinned.text} />}
       <div className="space-y-1">
-        {shown.map((line) => renderLine(line, onPermission))}
+        {shown.map((line) => renderLine(line))}
         {children}
       </div>
     </div>

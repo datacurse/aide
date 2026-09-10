@@ -26,16 +26,6 @@ export interface AppLocation {
    * panes behind it were never navigated away from.
    */
   activity: boolean
-  /**
-   * The wall is open: one column per project, each showing that project's
-   * current chat.
-   *
-   * A flag beside the project for exactly the reasons `activity` is, and never
-   * set at the same time as it. They are two whole-window pages, so a
-   * hand-written URL naming both opens the one written first rather than
-   * producing some third state.
-   */
-  wall: boolean
   projectId: string | null
   /** A conversation the daemon knows about. Null when an unstarted one is open. */
   sessionId: string | null
@@ -53,7 +43,6 @@ export interface AppLocation {
 
 export const EMPTY_LOCATION: AppLocation = {
   activity: false,
-  wall: false,
   projectId: null,
   sessionId: null,
   draftId: null,
@@ -61,22 +50,23 @@ export const EMPTY_LOCATION: AppLocation = {
 
 export function parseLocation(hash: string): AppLocation {
   // "#/p/<projectId>", "#/p/<projectId>/<sessionId>" or "#/p/<projectId>/new/<draftId>",
-  // optionally under a leading "#/activity/…" or "#/wall/…" when one of the
-  // whole-window pages is open over it.
+  // optionally under a leading "#/activity/…" when the dashboard is open over it.
   let parts = hash.replace(/^#\/?/, "").split("/").filter(Boolean)
 
-  // Both are PREFIXES rather than locations of their own, so the project and
-  // chat underneath survive in the URL — which is what lets closing either put
-  // you back where you were, including after a reload.
+  // A PREFIX rather than a location of its own, so the project and chat
+  // underneath survive in the URL — which is what lets closing it put you back
+  // where you were, including after a reload.
   const activity = parts[0] === "activity"
-  const wall = !activity && parts[0] === "wall"
-  if (activity || wall) parts = parts.slice(1)
+  // "#/wall/…" was the second such prefix, and the wall is gone. Consumed rather
+  // than left to fail the `p` test below, so a bookmark or a restored mirror
+  // still opens the project and chat it names instead of dropping them — the
+  // same courtesy the retired `chats`/`board` segments get further down.
+  if (activity || parts[0] === "wall") parts = parts.slice(1)
 
-  if (parts[0] !== "p" || !parts[1]) return { ...EMPTY_LOCATION, activity, wall }
+  if (parts[0] !== "p" || !parts[1]) return { ...EMPTY_LOCATION, activity }
   const projectId = parts[1]
-  const at = (rest: Omit<AppLocation, "activity" | "wall" | "projectId">) => ({
+  const at = (rest: Omit<AppLocation, "activity" | "projectId">) => ({
     activity,
-    wall,
     projectId,
     ...rest,
   })
@@ -91,7 +81,7 @@ export function parseLocation(hash: string): AppLocation {
 }
 
 export function formatLocation(loc: AppLocation): string {
-  const prefix = loc.activity ? "#/activity" : loc.wall ? "#/wall" : "#"
+  const prefix = loc.activity ? "#/activity" : "#"
   if (!loc.projectId) return `${prefix}/`
   if (loc.draftId) return `${prefix}/p/${loc.projectId}/new/${loc.draftId}`
   if (loc.sessionId) return `${prefix}/p/${loc.projectId}/${loc.sessionId}`

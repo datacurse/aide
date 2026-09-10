@@ -398,8 +398,8 @@ export function Composer({
    */
   const composed = draft?.mode ?? null
   // Who wins is `resolveChatSettings`, in protocol, where `pnpm smoke:queue`
-  // pins it — a precedence written inline here is one the wall's copy of this
-  // component could quietly disagree with.
+  // pins it — every rung of that precedence fails quietly, and one written inline
+  // here would be beyond the reach of a test.
   const { mode, effort, thinking, model } = resolveChatSettings({
     composed,
     chosen,

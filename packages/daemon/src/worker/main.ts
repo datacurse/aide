@@ -5,11 +5,10 @@
  * The isolation is the point: an agent run that crashes, wedges, or eats memory
  * takes down a worker, not the daemon holding every other project's state.
  *
- * A task run is one turn and exits. A chat holds the SDK session open and takes
- * follow-ups over IPC, because the alternative — a fork and a CLI boot per
- * message — costs about 1.4 seconds on Windows before the model sees a token,
- * and re-reads the transcript from disk every time to learn what it already
- * knew.
+ * A worker holds the SDK session open and takes follow-ups over IPC, because the
+ * alternative — a fork and a CLI boot per message — costs about 1.4 seconds on
+ * Windows before the model sees a token, and re-reads the transcript from disk
+ * every time to learn what it already knew.
  *
  * The loop itself lives in `loop.ts`, because `aide-agent` runs the same one
  * over stdio on another machine. This file is what makes it a forked child: the
@@ -20,15 +19,13 @@ import type { RunDelta, RunEventBody } from "@aide/protocol"
 import type { FollowUpTurn, RunAgentOptions } from "../agent.js"
 import { createAgentLoop } from "./loop.js"
 
-/** The job needs `chatMode` set for the worker to ask instead of failing closed. */
 export type ToWorker =
   | { cmd: "start"; job: RunAgentOptions }
-  /** Chat only: another message for a session that is already open. */
+  /** Another message for a session that is already open. */
   | { cmd: "turn"; turn: FollowUpTurn }
   | { cmd: "interrupt" }
-  /** Chat only: end the conversation and let the process exit. */
+  /** End the conversation and let the process exit. */
   | { cmd: "close" }
-  | { cmd: "permission"; requestId: string; allowed: boolean }
 
 /**
  * `runId` is on every message because a chat worker outlives a turn: the parent
@@ -49,10 +46,9 @@ export type FromWorker =
   | { type: "event"; runId: string; body: RunEventBody }
   /** Ephemeral live output; never written to the event log. */
   | { type: "delta"; runId: string; body: RunDelta }
-  | { type: "permission"; runId: string; requestId: string; name: string; input: unknown }
-  /** One turn finished. In a chat the process stays up for the next one. */
+  /** One turn finished. The process stays up for the next one. */
   | { type: "done"; runId: string; interrupted: boolean }
-  /** The session is over and the process is going away. Chat only. */
+  /** The session is over and the process is going away. */
   | { type: "closed" }
 
 const send = (msg: FromWorker) => {

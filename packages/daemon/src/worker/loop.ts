@@ -72,29 +72,13 @@ export function createAgentLoop(
   exit: () => void,
 ): AgentLoop {
   const turns = new TurnQueue()
-  /**
-   * Tool calls waiting on a human.
-   *
-   * The turn is genuinely blocked while one of these is outstanding — that is
-   * the point of a manual mode — so an interrupt has to settle them too, or the
-   * SDK sits forever on a promise nobody will resolve and the agent never exits.
-   */
-  const waiting = new Map<string, (allowed: boolean) => void>()
   let control: { interrupt: () => Promise<void> } | null = null
   let interrupted = false
   let started = false
   /** The turn events belong to. Updated by `onTurnStart` as each message goes in. */
   let currentRunId = ""
 
-  const settleAll = (allowed: boolean): void => {
-    for (const resolve of waiting.values()) resolve(allowed)
-    waiting.clear()
-  }
-
   async function main(job: RunAgentOptions): Promise<void> {
-    // A chat keeps its session; a task run is one turn and has nothing to follow
-    // it up with. This is the whole difference between the two lifetimes.
-    const session = Boolean(job.chatMode)
     currentRunId = job.runId
 
     try {
@@ -106,44 +90,20 @@ export function createAgentLoop(
           // later message in this conversation pre-cancelled.
           interrupted = false
         },
-        ...(session ? { followUps: turns } : {}),
+        followUps: turns,
         onControl: (c) => {
           control = c
           // An interrupt that arrived before the SDK was ready still applies.
           if (interrupted) void c.interrupt().catch(() => {})
         },
-        // Only a chat streams deltas — a headless task has nobody watching.
-        ...(job.chatMode
-          ? {
-              onDelta: (delta: RunDelta) =>
-                send({ type: "delta", runId: currentRunId, body: delta }),
-            }
-          : {}),
-        // Only chat turns ask. A task run leaves chatMode unset and keeps the
-        // fail-closed path in agent.ts, because nobody is there to answer.
-        ...(job.chatMode
-          ? {
-              onPermission: (req) =>
-                new Promise<boolean>((resolve) => {
-                  if (interrupted) return resolve(false)
-                  waiting.set(req.requestId, resolve)
-                  send({
-                    type: "permission",
-                    runId: currentRunId,
-                    requestId: req.requestId,
-                    name: req.name,
-                    input: req.input,
-                  })
-                }),
-            }
-          : {}),
+        onDelta: (delta: RunDelta) => send({ type: "delta", runId: currentRunId, body: delta }),
       }
       for await (const body of runAgent(opts)) {
         const runId = currentRunId
         send({ type: "event", runId, body })
-        // A session reports each turn as it lands and keeps going. A task run has
-        // one turn, and reports it from the `finally` below.
-        if (session && (body.type === "run.finished" || body.type === "run.error")) {
+        // Each turn is reported as it lands, and the session stays open for the
+        // next message.
+        if (body.type === "run.finished" || body.type === "run.error") {
           send({ type: "done", runId, interrupted })
         }
       }
@@ -154,12 +114,10 @@ export function createAgentLoop(
         body: { type: "run.error", message: err instanceof Error ? err.message : String(err) },
       })
     } finally {
-      settleAll(false)
       // `closed` rather than `done`: the parent has already been told about each
       // turn, and what it needs to learn here is that the warm session is gone
       // and the next message has to start one.
-      if (session) send({ type: "closed" })
-      else send({ type: "done", runId: currentRunId, interrupted })
+      send({ type: "closed" })
       exit()
     }
   }
@@ -168,17 +126,9 @@ export function createAgentLoop(
     handle(msg: ToWorker): void {
       if (msg?.cmd === "interrupt") {
         interrupted = true
-        // Deny anything outstanding: an interrupted turn must not go on to run a
-        // tool call the human never got round to approving.
-        settleAll(false)
         // If the run has not reached the SDK yet there is nothing to interrupt;
         // the flag alone makes the eventual result read as cancelled.
         void control?.interrupt().catch(() => {})
-        return
-      }
-      if (msg?.cmd === "permission") {
-        waiting.get(msg.requestId)?.(msg.allowed)
-        waiting.delete(msg.requestId)
         return
       }
       if (msg?.cmd === "turn") {

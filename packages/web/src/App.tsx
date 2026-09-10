@@ -7,6 +7,7 @@ import { DaemonBar } from "./Daemon.js"
 import { Dashboard } from "./Dashboard.js"
 import { carryDraft, draftKey, draftSubject, openComposedChat, openNewChat, peekDraft } from "./drafts.js"
 import { Hint } from "./Hint.js"
+import { Lock, X } from "./icons.js"
 import { draftName } from "./naming.js"
 import { SettingsButton } from "./Settings.js"
 import { SURVEY_PROMPT } from "./survey.js"
@@ -17,11 +18,18 @@ import { ConversationPane } from "./panes/Conversation.js"
 import { ConversationList } from "./panes/Conversations.js"
 import { PendingRail } from "./panes/Pending.js"
 import { RemotePicker } from "./RemotePicker.js"
-import { Wall } from "./wall/Wall.js"
-import { Button, Empty, heldBy, PaneHeader, SELECTED } from "./ui.js"
+import { Button, Empty, heldBy, LOCKED, PaneHeader, SELECTED } from "./ui.js"
 
 /** While anything is in flight the lists need to move on their own. */
 const POLL_MS = 1500
+
+/**
+ * How long a primed `forget` stays primed.
+ *
+ * Short enough that one left armed cannot catch a click made minutes later for
+ * some other reason, long enough to read the name it is now offering to drop.
+ */
+const CONFIRM_MS = 4000
 
 export function App() {
   const [health, setHealth] = useState<Health | null>(null)
@@ -32,7 +40,7 @@ export function App() {
    * you were and Back steps through what you had open. A chat is either a
    * session the daemon knows or one that has not been sent; see useAppLocation.
    */
-  const [{ activity, wall, projectId, sessionId, draftId }, navigate] = useAppLocation()
+  const [{ activity, projectId, sessionId, draftId }, navigate] = useAppLocation()
   /**
    * What the project has left to commit.
    *
@@ -176,11 +184,10 @@ export function App() {
   /**
    * Why this project cannot take a chat, a send or a push right now.
    *
-   * The rules themselves are in `projectGates`, in protocol, rather than here —
-   * the wall draws a column per project and needs the same answers for each of
-   * them, and two implementations of "is this project blocked" is the shape the
-   * brief has been bitten by twice, both times as a gate nobody could clear.
-   * `pnpm smoke` asserts them there, which a component cannot be.
+   * The rules themselves are in `projectGates`, in protocol, rather than here.
+   * Two implementations of "is this project blocked" is the shape the brief has
+   * been bitten by twice, both times as a gate nobody could clear, and `pnpm
+   * smoke` asserts them there — which a component cannot be.
    *
    * Stated BEFORE the press rather than after it, which is what `start` is for:
    * sending clears the box, so a ▶ that failed would take the parked idea with it
@@ -212,6 +219,29 @@ export function App() {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setPushing(false)
+    }
+  }
+
+  /**
+   * Forget a project — the registry entry, and nothing on disk.
+   *
+   * The repository, its `.aide/` and every conversation stay exactly where they
+   * are; this only drops aide's own list entry. It lives on the rail because the
+   * rail IS that list, and it was the one thing `removeProject` had no way to be
+   * reached from once the wall went.
+   *
+   * If the project being forgotten is the one open, the panes have to be sent
+   * somewhere — they are scoped to a project id the registry no longer answers
+   * for, and every one of them would poll it forever.
+   */
+  const forgetProject = async (id: string) => {
+    setError(null)
+    try {
+      await api.removeProject(id)
+      if (id === projectId) navigate({ projectId: null })
+      await refresh()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
     }
   }
 
@@ -345,14 +375,6 @@ export function App() {
     )
   }
 
-  // The wall takes the window on the same terms and for the same reasons — see
-  // `Wall.tsx`. It polls a column per visible project, so leaving the panes
-  // mounted behind it would double the beat on the one project they are scoped
-  // to for a rail nobody can see.
-  if (wall) {
-    return <Wall onClose={() => navigate({ wall: false })} onOpen={navigate} />
-  }
-
   return (
     // No title bar. Nothing up there was worth a row of height across the whole
     // window — the app's name is in the tab, and the daemon controls are a
@@ -385,74 +407,82 @@ export function App() {
           >
             stats
           </Button>
-          {/* Beside `stats` because it is the other whole-window page and about
-              the same scope — every project rather than the open one. They
-              differ in what they do with it: `stats` counts what has already
-              happened, this one is where you steer what is happening now. */}
-          <Button
-            onClick={() => navigate({ wall: true })}
-            title="Every project side by side, one chat each — start the next thing without leaving the last"
-          >
-            wall
-          </Button>
         </PaneHeader>
         <div className="flex-1 overflow-auto py-1">
           {projects.length === 0 ? (
             <Empty>No projects yet. Add a git repository to get started.</Empty>
           ) : (
             projects.map((p) => (
-              // Every row, so the answer is a hover away without opening the
-              // project. The line below is for the one you are working in.
-              <Hint key={p.id} hint={p.root}>
-                <button
-                  type="button"
-                  onClick={() => navigate({ projectId: p.id })}
-                  // The same frame the chat list draws, because two lists side by
-                  // side that disagree about what "selected" looks like read as
-                  // one of them being broken. It also gets the same thing out of
-                  // the way here: the holder's name is `text-info`, and on a
-                  // filled navy row that was blue text on a blue plate.
-                  className={`flex w-full flex-col border px-3 py-[3px] text-left font-sans text-[13px] hover:bg-hover ${
-                    p.id === projectId ? `${SELECTED} text-fg` : "border-transparent text-fg-muted"
-                  }`}
-                >
-                  <span className="flex w-full items-center gap-2">
-                    <span
-                      className={`inline-block size-1.5 shrink-0 rounded-full ${
-                        p.holder ? "bg-info animate-pulse" : "bg-fg-dim"
-                      }`}
-                    />
-                    <span className="flex-1 truncate">{p.name}</span>
-                    {/* Which conversation has the repo, not how many do — one
-                        project runs one agent, so a count would be a boolean
-                        wearing a number's clothes. The name is what you need
-                        when you are wondering what is in your way. */}
-                    {p.holder && (
-                      <Hint hint={`"${p.holder.title}" has this checkout`}>
-                        <span className="max-w-[8rem] truncate text-[10px] text-info">
-                          {p.holder.title}
-                        </span>
-                      </Hint>
-                    )}
-                  </span>
-                  {/* Where the work happens, which is the project root and nothing
-                      else — every run and every chat is in it, so it belongs to
-                      the project rather than to a conversation. It used to be a
-                      22px bar along the foot of the transcript, and for a chat
-                      that had not run yet it could not even say the path: it read
-                      "runs in the project root". A row of window height for one
-                      line of text that is the same for every chat in a project is
-                      the same trade the title bar lost.
-
-                      Only under the selected row. On all of them the rail is a
-                      list of paths you have to read past to find a name. */}
-                  {p.id === projectId && (
-                    <span className="w-full truncate pl-[14px] text-[10px] text-fg-dim">
-                      {p.root}
+              // A row, with the name as its own button and `forget` as a second
+              // one beside it. NOT one button around both: a button inside a
+              // button is markup a browser fixes by dropping the inner one, so
+              // the ✕ would be silently unclickable rather than visibly wrong.
+              <div key={p.id} className="group relative flex items-center">
+                {/* Every row, so the answer is a hover away without opening the
+                    project. The line below is for the one you are working in. */}
+                <Hint hint={p.root}>
+                  <button
+                    type="button"
+                    onClick={() => navigate({ projectId: p.id })}
+                    // The same frame the chat list draws, because two lists side
+                    // by side that disagree about what "selected" looks like read
+                    // as one of them being broken. It also gets the same thing out
+                    // of the way here: the holder's name is `text-info`, and on a
+                    // filled navy row that was blue text on a blue plate.
+                    className={`flex w-full flex-col border py-[3px] pr-8 pl-3 text-left font-sans text-[13px] hover:bg-hover ${
+                      p.id === projectId ? `${SELECTED} text-fg` : "border-transparent text-fg-muted"
+                    }`}
+                  >
+                    <span className="flex w-full items-center gap-2">
+                      <span
+                        className={`inline-block size-1.5 shrink-0 rounded-full ${
+                          p.holder ? "bg-info animate-pulse" : "bg-fg-dim"
+                        }`}
+                      />
+                      <span className="flex-1 truncate">{p.name}</span>
+                      {/* Which conversation has the repo, not how many do — one
+                          project runs one agent, so a count would be a boolean
+                          wearing a number's clothes. The name is what you need
+                          when you are wondering what is in your way. */}
+                      {p.holder && (
+                        <Hint hint={`"${p.holder.title}" has this checkout`}>
+                          <span className="max-w-[8rem] truncate text-[10px] text-info">
+                            {p.holder.title}
+                          </span>
+                        </Hint>
+                      )}
                     </span>
-                  )}
-                </button>
-              </Hint>
+                    {/* Where the work happens, which is the project root and
+                        nothing else — every run and every chat is in it, so it
+                        belongs to the project rather than to a conversation. It
+                        used to be a 22px bar along the foot of the transcript,
+                        and for a chat that had not run yet it could not even say
+                        the path: it read "runs in the project root". A row of
+                        window height for one line of text that is the same for
+                        every chat in a project is the same trade the title bar
+                        lost.
+
+                        Only under the selected row. On all of them the rail is a
+                        list of paths you have to read past to find a name. */}
+                    {p.id === projectId && (
+                      <span className="w-full truncate pl-[14px] text-[10px] text-fg-dim">
+                        {p.root}
+                      </span>
+                    )}
+                  </button>
+                </Hint>
+                {/* Absolutely placed over the row's right edge, which the row's
+                    own `pr-8` keeps clear. In the flex flow it would compete with
+                    the name for width and shorten every title by 24px to make room
+                    for something that is only visible on hover. */}
+                <div className="absolute top-1/2 right-1 -translate-y-1/2">
+                  <ForgetProject
+                    name={p.name}
+                    blocked={p.holder ? heldBy(p.holder.title) : null}
+                    onForget={() => void forgetProject(p.id)}
+                  />
+                </div>
+              </div>
             ))
           )}
         </div>
@@ -652,5 +682,83 @@ export function App() {
         />
       )}
     </main>
+  )
+}
+
+/**
+ * Drop a project from aide's list.
+ *
+ * It says `forget`, never `delete`, because `delete` is a promise aide does not
+ * keep in either direction: nothing on disk is destroyed — the repository, its
+ * `.aide/` and every conversation stay — and somebody reading `delete` would
+ * reasonably not press it when they only meant to tidy the list.
+ *
+ * Two presses, and the second one NAMES the project rather than asking "are you
+ * sure" — a question whose only answer is the button you already pressed. The
+ * arming is local to this row and expires (`CONFIRM_MS`), so two cannot be armed
+ * at once and one left armed cannot catch a later click.
+ *
+ * Refused while a run holds the checkout, and that guard is the daemon's as well
+ * (`DELETE /api/projects/:id`). The reason is sharper than the push gate's: the
+ * lane belongs to the daemon rather than the registry, so dropping the entry
+ * under a live turn does not stop that turn, it ORPHANS it — the run keeps
+ * writing to a checkout nothing on screen can name.
+ */
+function ForgetProject({
+  name,
+  blocked,
+  onForget,
+}: {
+  name: string
+  /** Why this cannot be forgotten right now — a run has the checkout. */
+  blocked: string | null
+  onForget: () => void
+}) {
+  const [armed, setArmed] = useState(false)
+
+  useEffect(() => {
+    if (!armed) return
+    const timer = setTimeout(() => setArmed(false), CONFIRM_MS)
+    return () => clearTimeout(timer)
+  }, [armed])
+
+  if (blocked) {
+    // Shown rather than hidden on hover like the other two states: a row you
+    // cannot act on should say so when you go looking, not answer with nothing.
+    return (
+      <Hint hint={blocked}>
+        <span className={`inline-flex shrink-0 items-center rounded-sm p-1 ${LOCKED}`}>
+          <Lock className="size-3" />
+        </span>
+      </Hint>
+    )
+  }
+
+  if (armed) {
+    return (
+      <Hint hint={`Drop ${name} from aide's list. The repository and its files are untouched.`}>
+        <button
+          type="button"
+          onClick={onForget}
+          className="shrink-0 rounded-sm bg-diff-del-fg/85 px-1.5 py-0.5 font-sans text-[10px] text-white hover:bg-diff-del-fg"
+        >
+          forget {name}
+        </button>
+      </Hint>
+    )
+  }
+
+  // Hover-only, like the discard in the chat list: tidying the rail is not what
+  // it is open for, and a ✕ on every row is a column of them beside the names.
+  return (
+    <Hint hint="Remove this project from aide. Nothing on disk is deleted.">
+      <button
+        type="button"
+        onClick={() => setArmed(true)}
+        className="shrink-0 rounded-sm p-1 text-fg-dim opacity-0 group-hover:opacity-100 hover:bg-hover hover:text-err focus-visible:opacity-100"
+      >
+        <X className="size-3" />
+      </button>
+    </Hint>
   )
 }

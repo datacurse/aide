@@ -602,7 +602,7 @@ function unstartedFor(projectId: string): Draft[] {
  * mutated on every write. Without the memo the array is a new identity on each
  * read and `useSyncExternalStore` treats an unchanged backlog as a change, which
  * is an infinite render loop rather than merely slow — and this held ONE slot
- * until the wall put two projects on screen at once and they began evicting each
+ * until something put two projects on screen at once and they began evicting each
  * other. `PerProjectMemo` is where that is explained and asserted.
  */
 const listCache = new PerProjectMemo<Draft>()

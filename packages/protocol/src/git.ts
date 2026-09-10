@@ -72,7 +72,6 @@ export interface GitCommit {
   sha: string
   short: string
   author: string
-  authorEmail: string
   /** ISO 8601, with the author's own offset preserved. */
   date: string
   /** Branches, remotes and tags pointing here. */

@@ -533,13 +533,15 @@ function parseRefs(raw: string): GitRef[] {
 
 function parseCommit(line: string): GitCommit | null {
   const f = line.split("\x1f")
-  const [sha, short, author, authorEmail, date, refs, parents, ...rest] = f
+  // `%ae` is still asked for and still lands in this tuple — it is skipped here
+  // rather than dropped from the format, because the fields are positional and
+  // removing one silently reassigns every field after it.
+  const [sha, short, author, , date, refs, parents, ...rest] = f
   if (!sha || !short) return null
   return {
     sha,
     short,
     author: author ?? "",
-    authorEmail: authorEmail ?? "",
     date: date ?? "",
     refs: parseRefs(refs ?? ""),
     parents: (parents ?? "").split(" ").filter(Boolean),

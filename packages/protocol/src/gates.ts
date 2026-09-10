@@ -3,17 +3,17 @@
  *
  * ## Why this is here and not in the component that draws it
  *
- * These answers lived inline in `App.tsx`, computed for the ONE project the
- * four panes are scoped to. That was fine while there was one. The wall draws a
- * column per project and needs the same answers for every one of them, and the
- * obvious way to get there — recompute them in the column — puts two
- * implementations of "is this project blocked" in the codebase.
+ * These answers lived inline in `App.tsx`, computed for the ONE project the four
+ * panes are scoped to. They were lifted out when a second view needed the same
+ * answers per project, and they stay out now that it is gone: the alternative is
+ * recomputing them wherever they are next wanted, which puts two implementations
+ * of "is this project blocked" in the codebase.
  *
  * The brief has already been bitten by that shape twice, and both times the
  * symptom was a gate that could not be cleared. A block that reads one object
  * while the button that releases it reads another can wedge, and the only way out
- * of the worst one was a terminal. So the rules live in one pure function that
- * both views call, and `pnpm smoke` asserts them — which a React component cannot
+ * of the worst one was a terminal. So the rules live in one pure function every
+ * caller shares, and `pnpm smoke` asserts them — which a React component cannot
  * be.
  *
  * ## What is no longer here
@@ -132,45 +132,3 @@ export function projectGates(opts: {
   }
 }
 
-/**
- * Which columns the wall draws, given the set a human has hidden.
- *
- * Pure, and here rather than in the hook for the reason this file already
- * exists: the hook imports React and so cannot be reached from Node, and these
- * are the rules whose failures are quiet rather than loud. `mergedMode` was
- * lifted into protocol on exactly this argument.
- *
- * The rule that matters is that the two returned halves PARTITION the projects.
- * The wall draws one and counts the other, so anything that lets them disagree
- * puts a number in the header that does not match the columns missing from the
- * page — and the number is the only thing telling you a project was hidden at
- * all. Two ways that happens, both silent:
- *
- *  - a duplicate id in the stored list, which a naive count of the list itself
- *    reports as two hidden columns for one missing column;
- *  - an id for a project that has since been FORGOTTEN, which counts a column
- *    that cannot come back — "1 hidden" that restores nothing when pressed.
- *
- * Counting what is actually absent from `shown`, rather than the size of the
- * stored set, is what makes both cases impossible instead of merely unlikely.
- */
-export function splitHiddenColumns<T extends { id: string }>(
-  projects: readonly T[],
-  hiddenIds: readonly string[],
-): { shown: T[]; hiddenCount: number } {
-  const hidden = new Set(hiddenIds)
-  const shown = projects.filter((p) => !hidden.has(p.id))
-  return { shown, hiddenCount: projects.length - shown.length }
-}
-
-/**
- * Add an id to the hidden set, without letting it appear twice.
- *
- * Re-hiding an already-hidden project is reachable — two tabs, or a stored value
- * edited by hand — and an unguarded append is what puts a duplicate in the list
- * that `splitHiddenColumns` then has to be careful about. Guarding both ends is
- * deliberate: this keeps the stored value clean, and the split stays correct
- * even for a value this function never wrote.
- */
-export const withHidden = (hiddenIds: readonly string[], projectId: string): string[] =>
-  hiddenIds.includes(projectId) ? [...hiddenIds] : [...hiddenIds, projectId]

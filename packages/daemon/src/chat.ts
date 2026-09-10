@@ -143,12 +143,18 @@ export interface ChatTurn {
    * disk yet can still be named. */
   text: string
   /**
-   * A tool call is waiting on a human.
+   * A tool call is waiting on a human. Always false, and kept anyway.
    *
-   * Exposed on the turn rather than left inside the record because the board
-   * needs it: "an agent is blocked on you right now" is the one thing that
-   * outranks everything else in the sort, and it is not derivable from anything
-   * else the lane publishes.
+   * Nothing aide runs can stop mid-turn for permission: `AskUserQuestion` is
+   * refused in both modes, and `canUseTool` allows or denies on every path
+   * rather than asking. The machinery that could set this — the request event,
+   * the answer route, the worker's waiting map — is gone with the feature.
+   *
+   * The FIELD stays because it is on the wire (`LockHolder.blocked`) and in
+   * every run log ever written: `profile.ts` still reports `blockedMs` for
+   * conversations that ran when this could be true, and a reader that dropped it
+   * would silently rewrite what those turns spent their time on. A constant here
+   * is honest about today; removing it would make the past unreadable.
    */
   blocked: boolean
   /**
@@ -189,8 +195,9 @@ interface NestedTurn {
 }
 
 /**
- * `blocked` is omitted rather than stored: it is exactly `pending.size > 0`, and
- * a copy of it here would be a second source of truth to forget to update.
+ * `blocked` is omitted rather than stored: nothing aide runs can be blocked on a
+ * human mid-turn any more (see `ChatTurn.blocked`), so the lane publishes a
+ * constant and a field here would be a place for that to drift.
  */
 interface TurnRecord extends Omit<ChatTurn, "blocked"> {
   /**
@@ -202,8 +209,6 @@ interface TurnRecord extends Omit<ChatTurn, "blocked"> {
    */
   worker: SessionWorker | null
   interrupted: boolean
-  /** Tool calls the human has not answered yet. */
-  pending: Set<string>
   /**
    * The daemon's own source fingerprint when this turn was admitted.
    *
@@ -449,7 +454,9 @@ export class ChatLane implements LiveChats {
       sessionId: t.sessionId,
       startedAt: t.startedAt,
       text: t.text,
-      blocked: t.pending.size > 0,
+      // Always false: nothing aide runs can stop for a human mid-turn. Kept on
+      // the wire rather than removed — see `ChatTurn.blocked`.
+      blocked: false,
       held: t.held,
     }))
   }
@@ -613,7 +620,6 @@ export class ChatLane implements LiveChats {
       text: opts.text,
       worker: null,
       interrupted: false,
-      pending: new Set(),
       settling: null,
       nested: null,
       headline: null,
@@ -875,7 +881,6 @@ export class ChatLane implements LiveChats {
       text: opts.text,
       worker: null,
       interrupted: false,
-      pending: new Set(),
       settling: null,
       nested: null,
       headline: null,
@@ -1239,7 +1244,6 @@ export class ChatLane implements LiveChats {
       projectId: project.id,
       // A chat turn is the message, with no title composed in front of it.
       title: opts.text,
-      prompt: "",
       projectDoc: doc.body,
       // What the commit gate will run, so the turn stops re-proving the tree
       // after every edit. See `verifyCommands` in agent.ts for the measurement.
@@ -1252,7 +1256,6 @@ export class ChatLane implements LiveChats {
       // tool before either is consulted — which would let a Plan turn edit the
       // tree it was told to describe.
       allowedTools: [...CONFIG.chatAutoAllowTools],
-      allowedBash: [...CONFIG.allowedBash],
       deniedBash: [...CONFIG.deniedBash],
       env: CONFIG.runEnv,
       ...(CONFIG.chatMaxBudgetUsd ? { maxBudgetUsd: CONFIG.chatMaxBudgetUsd } : {}),
@@ -1322,16 +1325,6 @@ export class ChatLane implements LiveChats {
       if (msg.type === "delta") {
         const watchers = this.#watchers.get(msg.runId)
         if (watchers) for (const fn of watchers) fn(msg.body)
-        return
-      }
-      if (msg.type === "permission") {
-        turn?.pending.add(msg.requestId)
-        this.log.append(msg.runId, {
-          type: "permission.request",
-          requestId: msg.requestId,
-          name: msg.name,
-          input: msg.input,
-        })
         return
       }
       if (msg.type === "event") {
@@ -1598,40 +1591,10 @@ export class ChatLane implements LiveChats {
     }
   }
 
-  /** Answer a pending permission request. Returns false if it is already gone. */
-  resolvePermission(runId: string, requestId: string, allowed: boolean): boolean {
-    const record = this.#turns.get(runId)
-    if (!record || !record.pending.has(requestId)) return false
-    record.pending.delete(requestId)
-    // A turn still installing dependencies has no worker and no pending calls,
-    // so the guard above already returned. `?.` covers the ordering rather than
-    // a real case.
-    record.worker?.runner.send({ cmd: "permission", requestId, allowed } satisfies ToWorker)
-    this.log.append(runId, {
-      type: "permission.resolved",
-      requestId,
-      allowed,
-      reason: allowed ? "you allowed it" : "you declined it",
-    })
-    return true
-  }
-
   interrupt(runId: string): boolean {
     const record = this.#turns.get(runId)
     if (!record) return false
     record.interrupted = true
-    // The worker denies anything outstanding on interrupt; recording it here
-    // keeps the transcript honest about why those calls did not run.
-    for (const requestId of record.pending) {
-      this.log.append(runId, {
-        type: "permission.resolved",
-        requestId,
-        allowed: false,
-        reason: "the turn was interrupted",
-      })
-    }
-    record.pending.clear()
-
     // `?.` rather than a guard: a turn interrupted between admission and the
     // fork has no worker to tell, and `#coldStart` checks `interrupted` before
     // it starts one. Nor does a held run, unless it is part way through the fix

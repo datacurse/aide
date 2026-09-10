@@ -55,24 +55,14 @@ import { runChecks, type CheckOutcome } from "./verify.js"
  * can write the line itself, inside the diff you already review.
  */
 
-/**
- * The baseline a conversation's work is measured against.
- *
- * Null means no checkpoint, which is not a missing feature but a conversation
- * that has never taken a turn: the snapshot is taken before the first message
- * reaches an agent, so anything that has run has one.
- *
- * Read by the diff view only. A commit does not need one — see the header for
- * why making it need one wedged the project.
+/*
+ * `conversationBaseline(project, sessionId)` was here: a three-line wrapper over
+ * `readCheckpoint` that renamed `.sha` to `.checkpoint`. Its own comment said
+ * "read by the diff view only", and that view went with the commit button — so
+ * it had no callers at all, while still being imported by `server.ts` and
+ * described there as something the commit gate used. It does not: the gate reads
+ * the working tree through `treeChanges`.
  */
-export async function conversationBaseline(
-  project: Project,
-  sessionId: string,
-): Promise<{ checkpoint: string } | null> {
-  const found = await readCheckpoint(repoOf(project), sessionId)
-  if (!found) return null
-  return { checkpoint: found.sha }
-}
 
 export interface CommitWorkingTreeOptions {
   project: Project

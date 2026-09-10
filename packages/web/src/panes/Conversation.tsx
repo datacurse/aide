@@ -621,13 +621,6 @@ export function ConversationPane({
     }
   }
 
-  const answer = (requestId: string, allowed: boolean) => {
-    if (!runId) return
-    void api.answerPermission(runId, requestId, allowed).catch((err) => {
-      setError(err instanceof Error ? err.message : String(err))
-    })
-  }
-
   const title = summary ? `conversation · ${summary.title}` : openSessionId ? "conversation" : "new chat"
 
   return (
@@ -723,13 +716,12 @@ export function ConversationPane({
               )}
               <Transcript
                 events={shownEvents}
-                onPermission={busy ? answer : undefined}
                 live={typing}
                 busy={watching}
                 tail={showAll ? undefined : VISIBLE_TAIL}
-                // So the question you are under can pin itself to the top edge of
-                // this box. It is the only thing in there that needs to know where
-                // the box's edge is.
+                // So a sticky row can pin itself to the top edge of this box. It
+                // is the only thing in there that needs to know where the box's
+                // edge is.
                 scroller={scroller}
               />
             </div>
@@ -788,9 +780,9 @@ export function ConversationPane({
           // hand every unstarted chat the same box.
           draftKey={draftKey(projectId, sessionId ?? draftId ?? "")}
           inheritedMode={summary?.lastMode ?? null}
-          // Stated in `projectGates` rather than here — the wall's columns each
-          // carry a box of their own and must refuse on the same terms this one
-          // does. See that file for why the holder is compared by RUN ID.
+          // Stated in `projectGates` rather than here, so every box refuses on
+          // the same terms. See that file for why the holder is compared by RUN
+          // ID rather than by session.
           blocked={
             projectGates({
               holder,

@@ -25,7 +25,6 @@ record. They are all rows in the same list, in that order of urgency.
 | What | Where |
 | --- | --- |
 | The four panes and the polling loop | `packages/web/src/App.tsx` |
-| Every project at once, one chat each | `packages/web/src/wall/Wall.tsx`, `wall/Column.tsx` |
 | Why a project cannot take a chat, a commit or a push | `packages/protocol/src/gates.ts` |
 | Where you are, as a URL | `packages/protocol/src/location.ts` |
 | The chat list, the capture box, the done tick | `packages/web/src/panes/Conversations.tsx` |
@@ -99,12 +98,16 @@ Decisions already taken, which are not gaps to fill:
   static import is hoisted and its output would print above `repo: <path>` — the
   run would still be correct and would read as though the sections had been
   shuffled. When changing any of this, the check that matters is that the
-  assertion count does not fall: `pnpm smoke` prints 828 `ok` lines as of
+  assertion count does not fall: `pnpm smoke` prints 812 `ok` lines as of
   2026-09-10, and a refactor that quietly drops some is the failure this number
   exists to catch.
-  It fell once on purpose — the card view was removed and took ~30 of its own
-  assertions with it, leaving the ten that cover `currentActivity`, which
-  outlived it.
+  It has fallen twice on purpose, and both times the removal is what to check
+  against. The card view went and took ~30 of its own assertions with it, leaving
+  the ten that cover `currentActivity`, which outlived it. Then the wall went:
+  828 → 812, which is the hidden-columns block (`splitHiddenColumns`,
+  `withHidden`) plus the `#/wall/…` half of the location round trip. Four of
+  those came back as the retired-prefix assertions — a bookmarked wall URL still
+  has to open the project and chat it names.
 - **`taskId` is gone from the wire and kept in the session reader, and that is
   not an inconsistency.** They were two different fields wearing one name. The
   wire one — `run.started.taskId`, `RunAgentOptions.taskId` — was a required
@@ -290,153 +293,66 @@ Decisions already taken, which are not gaps to fill:
   Weekday is shifted to Monday-first in `reduceActivity` rather than in the
   renderer, because an off-by-one there mislabels every row and reads as a data
   bug.
-- **The wall is a page that ACTS, which is what separates it from the dashboard.**
-  `#/wall`, reached from `wall` on the projects header, one column per project
-  showing that project's current chat. It takes the whole window on exactly the
-  dashboard's terms — a prefix in the URL so the project and chat underneath
-  survive, replacing the panes rather than covering them so nothing behind it
-  polls — but the dashboard COUNTS and opens nothing, and this one is the only
-  surface in aide where a turn is sent to a project without first selecting it.
-  That is the whole reason it exists: every project has its own lock, so several
-  can run at once, and what stops that happening is purely navigational — starting
-  work in one project means leaving the turn you were watching in another. It is
-  aimed at the `dead` half of `WorkSplit`, which is the number the dashboard says
-  is worth recovering, so whether it worked is a question the dashboard can
-  already answer. Two things were deliberately refused. There is no **commit
-  all**: reviewing four diffs is four acts, and one press taking them is the
-  brief's two-gates-into-one-button, which removes the review rather than
-  simplifying it. And there is no **broadcast box** — one prompt sent to five
-  projects is five turns written with one project in mind, and reviewing what
-  comes back costs more than the typing saved. One send per chat, one commit per
-  column.
-- **A column draws the TRANSCRIPT, tailed — there is no reduced reading of a
-  turn any more.** There was one: a card per turn, a strip of facts off exit
-  codes and git with four model-written fields under it, drawn in the column and
-  offered as a toggle in the conversation pane. It is gone, removed on the
-  judgement that it compressed badly — you ended up seeing LESS, from a summary
-  that could be wrong, with the thing you actually wanted a click away. The cost
-  it was buying down was width, and the answer to width turned out to be `tail`
-  rather than compression: a column draws the panes' own `Transcript` at 60 lines
-  against the pane's 250, so what a column gives up is HISTORY, not detail.
-  Reading further back is the panes, and the project name in the header goes
-  there. The live reply is handed in as `LiveText` so a turn arriving lands in
-  the same element it will finish in, and it is RAW here — the typewriter is a
-  reading preference the panes carry, and a column is a glance. A column
-  deliberately has no file tree, no history and no graph — those answer "where am
-  I", which is a question you ask inside one project. What survived the card is
-  `currentActivity`, in `protocol/activity-line.ts`, which was always the working
-  bar's line rather than part of that view.
-- **The picker writes the store the PANES read, and that is the point of it.**
-  `rememberProjectChat` and `readOpenChat` are the same per-project memory
-  `useAppLocation` already kept for the four panes, so picking a chat on the wall
-  and clicking into the panes lands you in it. A store of the wall's own would let
-  the two views disagree about what a project is currently about — the
-  two-readings-of-one-thing failure this file records more than once. It needed
-  one thing the panes never did: a subscription. They write that store as a side
-  effect of NAVIGATING, and navigating re-renders everything; the wall writes it
-  without navigating, so `watchOpenChats` is what stops a column drawing the chat
-  it no longer points at. The chat holding the checkout is MARKED in the picker
-  rather than switched to, because a column that re-targeted itself mid-read
-  would move for a reason nothing on screen explains. Two identity traps live on
-  this path and both are render loops rather than slow renders — the page paints
-  correctly and goes grey half a second later, once the first poll has landed and
-  the columns have mounted. `readOpenChat` parses the store on every call and so
-  hands back an equal-but-distinct object each read, which `sameChat` compares by
-  VALUE and the render-phase reset keys on as an id STRING. And
-  `useUnstartedChats` held ONE memo slot — see `PerProjectMemo`, which is the one
-  that actually greyed the page.
-- **A memo keyed for ONE project is a render loop the moment there are two.**
+- **The wall was removed, and what it was FOR is still unanswered.** `#/wall` drew
+  one column per project, each showing that project's current chat, and it was the
+  only surface where a turn went to a project without first selecting it. The aim
+  was the `dead` half of `WorkSplit` — every project has its own lock, so several
+  can run at once, and what stops that is purely navigational. What it cost was a
+  1,300-line `Column.tsx` that was a hand-copied fork of `Conversation.tsx`: the
+  same run-adoption state machine, the same history trim, the same handoff loop,
+  with `HANDOFF_MS` declared twice and a comment in one file saying it must equal
+  the other. Both copies had already had to be fixed for the same bug once
+  (`prev ?? activeRunId` could never move off a finished commit). Every streaming
+  change was two edits with nothing checking they agreed. If the idea comes back,
+  it needs a SHARED hook — the fork is what made it expensive, not the page.
+  Two things it deliberately refused are worth keeping: there was no **commit
+  all** (reviewing four diffs is four acts, and one press taking them is the
+  brief's two-gates-into-one-button) and no **broadcast box** (one prompt sent to
+  five projects is five turns written with one project in mind).
+- **`forget` lives on the projects rail, and it moved there from the wall.** The ✕
+  on a column header was the only UI that could drop a registry entry, so removing
+  the wall would have made the registry append-only from the browser. It is on the
+  rail now — the rail IS that list — with the semantics unchanged. It says
+  `forget`, never `delete`, because `delete` is a promise aide does not keep in
+  either direction: nothing on disk is destroyed, and somebody reading it would
+  reasonably not press it when they only meant to tidy the list. Two presses, the
+  second NAMING the project rather than asking "are you sure" — a question whose
+  only answer is the button you already pressed. The arming is local to the row and
+  expires. The daemon refuses it while a run holds the checkout, which is the same
+  guard `push` has and a sharper reason: the lane belongs to the daemon, not the
+  registry, so dropping the entry under a live turn does not stop that turn, it
+  ORPHANS it. Two details bite if this is touched: the row is a `div` with the name
+  as its own button and the ✕ as a second one, because a button inside a button is
+  markup browsers fix by dropping the INNER one — the ✕ would be silently
+  unclickable rather than visibly wrong; and forgetting the OPEN project navigates
+  away first, or four panes go on polling a project id the registry no longer
+  answers for.
+- **`PerProjectMemo` outlived the page that needed it, and that is deliberate.**
   `useUnstartedChats` derives an array, and `useSyncExternalStore` compares
   snapshots by IDENTITY, so it has to be memoized or every read reports a change.
   It was — against a single slot, `{ source, projectId, rows }` — and that was
   correct for exactly as long as one project was on screen, which the four panes
-  guarantee. The wall draws a column per project, React calls each column's
-  snapshot in turn, and with one slot they EVICT each other: A's read replaces
-  B's entry, B's replaces A's, every read misses, every read returns a fresh
-  array. That is an infinite render, not a slow one — the page paints once and
-  goes grey when React gives up, about half a second in, which reads as the wall
-  failing to open rather than as a cache bug three files away. `PerProjectMemo`
-  in protocol is the fix and holds the explanation; `pnpm smoke` drives it with
-  two projects interleaved, which is the case that broke and the case a single
-  slot passes. Three things about this are worth carrying: the failure is
-  invisible to `tsc` and to `pnpm build` (returning a fresh array is perfectly
-  well typed), it was unreachable from Node because `drafts.ts` touches
-  `window.indexedDB` at module load, and the comment above the old slot already
-  warned that a new identity per read is "an infinite render loop rather than
-  merely slow" — it just assumed one project. A guard that names its own failure
-  mode can still be scoped to an assumption that later stops holding.
-- **Only a visible column polls, and that is a budget rather than a nicety.** The
-  four panes poll one project because one is open; a wall column polls its own, so
-  the rate becomes a function of how many projects you happen to have added — a
-  number nobody chose. `useOnScreen` makes it a function of window width instead,
-  which is bounded and visible, so horizontal scroll is the mechanism and not just
-  the layout. It matters most for a remote project, where a `gitPending` is an ssh
-  connection and the ceiling is a refusal rather than a slowdown: sshd stops
-  accepting past `MaxStartups`, and when that happens the failure does not land on
-  the wall, it lands on whatever commit needed a connection at the same moment.
-  `usePoll` guards the same budget from the other direction. The `rootMargin` is a
-  screen's worth so a column is usually already answered when it arrives, and the
-  hook starts TRUE because an observer reports after paint — starting false costs
-  every column a visible blank on arrival to save a request it would have made
-  anyway.
-- **Columns are in REGISTRY ORDER and never sort themselves.** The same order the
-  projects rail draws, which is the order they were added, so there is one layout
-  to learn rather than two. The first version ranked by the lock — needs-you,
-  then running, then quiet — on the reasoning that a derived order is one nobody
-  has to maintain. That defended the wrong property. The wall is navigated by
-  POSITION: you learn that a project is the third column and reach for it. A rank
-  reading the lock changes on the 1.5s poll, so columns swap places with nobody
-  touching anything, purely because a turn somewhere else finished — and the
-  failure mode is not a confusing page, it is a turn sent to the wrong project,
-  which is the one mistake this page makes easy and expensive. Uncommitted counts
-  are doubly disqualified: they are polled per VISIBLE column, so ranking on them
-  would reorder the page as you scrolled it. What is lost is that the urgent
-  project is no longer leftmost, and that is answered without moving anything —
-  the column carries the holder dot and its transcript says what is happening,
-  and the
-  dashboard is where the across-everything question belongs. A page you steer
-  from cannot rearrange itself under the pointer.
-- **A column can FORGET its project, and the word is the design.** The ✕ on a
-  column header drops the registry entry and nothing else — the repository, its
-  `.aide/` and every conversation stay exactly where they are, which is what
-  `removeProject` has always done and what the UI had no way to reach. It says
-  `forget`, never `delete`, because `delete` is a promise aide does not keep in
-  either direction: nothing is destroyed, and somebody reading it would
-  reasonably not press it when they only meant to tidy the list. Two presses,
-  with the second one NAMING the project rather than asking "are you sure" — a
-  question whose only answer is the button you already pressed. The arming is
-  local to the column and expires, so two cannot be armed at once and one left
-  armed cannot catch a later click. The daemon refuses it while a run holds the
-  checkout, which is the same guard `push` has and a sharper reason: the lane
-  belongs to the daemon, not the registry, so dropping the entry under a live
-  turn does not stop that turn, it ORPHANS it — the run keeps writing to a
-  checkout nothing on screen can name, and the column that could have
-  interrupted it is the thing that just went away. The wall drops the column on
-  the answer rather than waiting for the next poll, because for that beat it is
-  still on screen and still typeable, and a send in it lands on a project the
-  daemon has already forgotten.
-- **The wall's picker discards an UNSENT chat and only an unsent one.** A ✕ on a
-  `not sent` row, hover-only, calling the same `discardDraft` the pane's list has
-  always called — the wall could create parked chats with `new` and had no way to
-  remove one, so pressing it three times left three anonymous rows permanently at
-  the top of the picker, pushing the real conversations below a 320px fold. That
-  is what it looked like from the outside: a project whose recent chats had
-  stopped being saved. The asymmetry with a started conversation is the design
-  rather than a gap. A draft is held in THIS browser, has never run, cost nothing
-  and is recorded nowhere else, so throwing it away is a local delete. A started
-  chat's transcript is the SDK's own file under `~/.claude/projects/`, shared with
-  the Claude CLI and the VS Code extension — a ✕ there would delete a record aide
-  does not own out of two other tools as well, which is a promise this UI must not
-  make. Closing a real chat is the tick, and the brief's second gate is a verdict
-  rather than a deletion. Two details bite if reimplemented: the row became a
-  `div` with the label as its own button, because a button inside a button is
-  markup browsers fix by dropping the INNER one, so the discard would be silently
-  unclickable rather than visibly wrong; and the selection is moved off the row
-  BEFORE the record is dropped, or the column is left pointing at a `draftId`
-  nothing answers to — the header reads "New chat", the composer writes into a key
-  with no record, and a send starts a chat from a row the list no longer draws.
-  It clears rather than selecting a neighbour, because which chat to show next is
-  a choice the human just made by deleting one.
+  guarantee. The wall drew a column per project, and with one slot they EVICTED
+  each other: A's read replaces B's entry, B's replaces A's, every read misses,
+  every read returns a fresh array. That is an infinite render, not a slow one —
+  the page paints once and goes grey when React gives up, about half a second in,
+  which read as the page failing to open rather than as a cache bug three files
+  away. The wall is gone and the fix stays, because the guard it replaced named
+  its own failure mode in a comment and was STILL scoped to an assumption that
+  later stopped holding; re-narrowing it would be making that same bet again.
+  `pnpm smoke` drives it with two projects interleaved. Three things are worth
+  carrying: the failure is invisible to `tsc` and to `pnpm build` (returning a
+  fresh array is perfectly well typed), it was unreachable from Node because
+  `drafts.ts` touches `window.indexedDB` at module load, and a guard that names
+  its own failure mode can still be scoped to an assumption that later stops
+  holding.
+- **There is ONE reduced reading of a turn, and it is the transcript.** A card per
+  turn was tried — a strip of facts off exit codes and git with four model-written
+  fields under it — and removed on the judgement that it compressed badly: you
+  ended up seeing LESS, from a summary that could be wrong, with the thing you
+  actually wanted a click away. What survived it is `currentActivity`, in
+  `protocol/activity-line.ts`, which was always the working bar's line rather than
+  part of that view.
 - **A send into a ticked-off chat unticks it, and that does not weaken the
   gate.** The tick means "this served its purpose"; a message in it is the human
   saying it has not, so a tick that survived would be a claim the list keeps
@@ -468,12 +384,13 @@ Decisions already taken, which are not gaps to fill:
 - **The gates are one function, and they have shrunk to the lock.**
   `projectGates` in protocol answers why a project cannot take a chat, a push or
   a send. Those lived inline in `App.tsx`, computed for the one open project,
-  which was fine while there was one; the wall needs them per project, and
-  recomputing them in the column would put two implementations of "is this
+  which was fine while there was one; they were lifted out when a second view
+  needed them per project, and they stay out now that it is gone — recomputing
+  them wherever they are next wanted would put two implementations of "is this
   project blocked" in the codebase. That is the shape behind both wedges in the
   brief — a block reading one object while the button that releases it reads
-  another — so it is one pure function both views call, asserted by `pnpm smoke`,
-  which a React component cannot be. The commit gate and the dirty-tree rules
+  another — so it is one pure function every caller shares, asserted by `pnpm
+  smoke`, which a React component cannot be. The commit gate and the dirty-tree rules
   are gone from it: commits are automatic, so an uncommitted tree is a moment in
   the cycle rather than a state a human clears, and a rule blocking chats on it
   would be a refusal with no release. What breaks silently is the surviving
@@ -484,8 +401,12 @@ Decisions already taken, which are not gaps to fill:
   reach. A broken round trip is not an error anywhere; it is a reload landing
   somewhere you did not ask for, which reads as the app forgetting what you had
   open. It is asserted as a FIXED POINT rather than as byte-equality with the
-  input, because a page with no project formats as `#/wall/` and comparing against
-  the input would be testing the spelling instead of the inverse.
+  input, because a page with no project formats as `#/activity/` and comparing
+  against the input would be testing the spelling instead of the inverse. The
+  retired `#/wall/…` prefix is still PARSED and dropped, for the same reason the
+  retired `chats` and `board` segments are: a bookmark or a restored mirror that
+  names it must open the project and chat it names, and the failure is silent —
+  failing the `p` test lands you on an empty app with the URL apparently intact.
 - **The rail's lower half has two readings, and you pick one.** `history` and
   `files`, tabbed, sharing the space rather than stacking — they answer the same
   kind of question, orientation, and a rail split three ways gives each too few
@@ -887,8 +808,8 @@ Decisions already taken, which are not gaps to fill:
 - **`AskUserQuestion` is refused, in both modes.** It is the one tool that turns
   a turn into a mid-run permission prompt, which is the thing the rule above
   exists to prevent — and the enforcement was missing, so it was reachable the
-  whole time. `canUseTool` routes every unresolved call in a CHAT run to the
-  browser, and this tool is never on the allowlist, so it always became a
+  whole time. `canUseTool` used to route every unresolved call in a CHAT run to
+  the browser, and this tool is never on the allowlist, so it always became a
   blocking question. Watched doing it: a turn on Auto sat on one for 937s asking
   which chess variant to migrate, holding a remote project, `blocked: true` in
   the daemon's own state, with two buttons whose only honest answer was to kill
@@ -898,6 +819,35 @@ Decisions already taken, which are not gaps to fill:
   `canUseTool` denies it anyway as the backstop, with a refusal that names the
   alternative — put the options in the reply and end the turn, and the human
   answers in the next message.
+- **The ask/answer machinery is gone, and only the READING of it survives.**
+  Nothing can stop a turn for a human any more: `canUseTool` allows or refuses on
+  every path, so no `permission.request` is ever written. The rest of it had
+  outlived that by a long way — `onPermission` was still threaded from the worker
+  into `agent.ts` and read only as a boolean to tell two kinds of run apart, with
+  a comment saying it "is no longer CALLED"; the `{cmd:"permission"}` message, the
+  worker's `waiting` map, `ChatLane.resolvePermission`, the answer route and the
+  browser's allow/decline buttons were all still wired to a request that could not
+  arrive. All of that is deleted. What stays is every READER: the two events are
+  still in `events.ts`, `PermissionRow` still draws them without buttons, and
+  `profile.ts` still reports `blockedMs`. `~/.aide/runs` holds transcripts from
+  when this could happen and they are permanent — a reader that dropped them would
+  redraw those conversations with the pause taken out, showing an agent that
+  appears to have chosen for itself whatever the human actually approved.
+  `ChatTurn.blocked` survives as a constant `false` for the same reason: it is on
+  the wire as `LockHolder.blocked`.
+- **There is ONE kind of run, and the second one had been unreachable for a
+  while.** `RunAgentOptions` documented two lifetimes — a chat, and a headless
+  "task run" that set no `chatMode` and failed closed. There is one producer
+  (`chat.ts`) and it always sets `chatMode`, so every `opts.chatMode ? … : …` had
+  a dead arm and the fail-closed branch under `canUseTool` could not execute. The
+  sharpest symptom is the one to remember: `allowedBash` was threaded config →
+  chat.ts → RunAgentOptions → worker → runAgent and read ONLY in that branch, so
+  a setting that looked like the knob controlling the shell reached nothing — the
+  live call passes `null`, meaning "anything not denied". `prompt` went the same
+  way (always `""`, so `composeRequest` was `return title` with an unreachable
+  branch), as did `maxTurns`, which had no producer at all. `checkBashCommand`
+  KEEPS its allowlist parameter: `pnpm smoke` drives it directly and that
+  behaviour is genuinely tested.
 - **Subagents are allowed in chats, and the spawn is judged rather than
   trusted.** The `Agent` tool is allowed by `canUseTool`'s own branch, never by
   a bare name on a list — a bare name approves a call before its input is

@@ -21,8 +21,8 @@ import { placeHint, type HintPlacement } from "@aide/protocol"
  * `\n` as a line break, which the native one does too but at whatever width
  * the OS feels like.
  *
- * The delay is 400ms: long enough that dragging the pointer across the wall's
- * columns does not leave a trail of boxes, short enough that a deliberate
+ * The delay is 400ms: long enough that dragging the pointer across a row of
+ * controls does not leave a trail of boxes, short enough that a deliberate
  * hover feels answered. Once one is open, moving to another opens it at once
  * (`warm`), which is how every real tooltip behaves — the delay is there to
  * decide whether you MEANT to hover, and having just read one is that decision

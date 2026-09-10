@@ -44,8 +44,6 @@ export interface RunAgentOptions {
   projectId: string
   /** The task title. Composed into the user turn â it is part of the request. */
   title: string
-  /** The task body. May be empty; the title alone is then the request. */
-  prompt: string
   /**
    * Prose from `.aide/project.md`. Appended to the SYSTEM prompt, not the user
    * turn: it is a durable constraint on every task in this project, not part of
@@ -70,14 +68,11 @@ export interface RunAgentOptions {
   cwd: string
   model: string
   allowedTools: string[]
-  /** Bash prefixes the run may use. Enforced by `policy.ts`, not by the SDK. */
-  allowedBash: string[]
   deniedBash: string[]
   /** Merged over `process.env` for the run. */
   env: Record<string, string>
   /** Omit for no cap. See CONFIG.chatMaxBudgetUsd for why a chat has none. */
   maxBudgetUsd?: number
-  maxTurns?: number
 
   // -------------------------------------------------------------------------
   // Chat turns. A task run leaves all of these unset and behaves exactly as
@@ -87,14 +82,13 @@ export interface RunAgentOptions {
   /**
    * Continue an existing session instead of starting one.
    *
-   * Deliberately WITHOUT `forkSession`. A task follow-up would fork, so an older
-   * run stays resumable at its own point; a chat appends, so the conversation
+   * Deliberately WITHOUT `forkSession`. A chat appends, so the conversation
    * keeps one stable id the way it does in the CLI and the VS Code extension.
-   * Forking a chat would fracture it into a chain of ids after every message.
+   * Forking would fracture it into a chain of ids after every message.
    */
   resume?: string
-  /** Omitted for task runs, which stay on the fail-closed `dontAsk`. */
-  chatMode?: ChatMode
+  /** Which of the two modes a person can pick this turn runs under. */
+  chatMode: ChatMode
   effort?: EffortLevel
   /**
    * Whether the model may think before it answers. Omitted means yes.
@@ -106,13 +100,7 @@ export interface RunAgentOptions {
   thinking?: boolean
   /** Images pasted into the composer, sent as content blocks alongside the text. */
   attachments?: Attachment[]
-  /**
-   * Asks the human to approve a tool call. Present only for chat turns; when it
-   * is absent, anything not already permitted is denied, which is the right
-   * answer when nobody is listening.
-   */
-  onPermission?: (req: { requestId: string; name: string; input: unknown }) => Promise<boolean>
-  /** Emit a `context.usage` event at the end of the turn. Chat only. */
+  /** Emit a `context.usage` event at the end of the turn. */
   trackContext?: boolean
   /**
    * Receives token-by-token output while the turn is producing it. Setting this
@@ -839,25 +827,22 @@ export function normalizeSdkMessage(
 export const MAX_PROJECT_DOC_CHARS = 32_000
 
 /**
- * The request, as the agent sees it.
+ * `composeRequest(title, prompt)` was here, building a heading over a body for a
+ * run that carried both.
  *
- * The title used to be thrown away â only the body was sent â which discarded
- * the one line that most reliably says what the task is, and left a task with an
- * empty body being handed an empty user message.
+ * It was already the survivor of an earlier fix: the title used to be dropped
+ * and only the body sent, which threw away the one line that most reliably said
+ * what a run was about.
  *
- * Named rather than inlined into its one caller below, because "what the model
- * is actually asked" is worth being able to point at. It used to say it was
- * composed in one place "so the two cannot drift" — there was a second call site
- * once, and there has not been for some time.
- */
-function composeRequest(title: string, prompt: string): string {
-  const body = prompt.trim()
-  return body ? `# ${title}\n\n${body}` : title
-}
-
+ * It is gone: every producer set `prompt` to `""`, so the function was `return
+ * title` with one unreachable branch. The FIELD went with it, for the reason
+ * `taskId` did — a required string every caller fills with nothing reads as
+ * something a new call site ought to supply, and there is no right value.
+ *
+ââ */
 export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventBody> {
   expectShadowedTools(opts.allowedTools)
-  const request = composeRequest(opts.title, opts.prompt)
+  const request = opts.title
 
   // Images first, then the text. The Messages API takes either a bare string or
   // an array of content blocks; a turn with no image attachments keeps the
@@ -1122,12 +1107,11 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
       // A chat gets one of the two modes a person can pick. Both of them act;
       // the difference is that Plan asks once first, and that one question is
       // what reaches canUseTool below.
-      permissionMode: opts.chatMode ? CHAT_TO_SDK_MODE[opts.chatMode] : "dontAsk",
-      // A chat gets the whole Claude Code toolset AVAILABLE, while auto-approving
-      // only the read-only ones (see `chatAutoAllowTools`). `tools` decides what
-      // exists; `allowedTools` decides what skips the question. A task run leaves
-      // this alone and keeps the narrow set it was given.
-      ...(opts.chatMode ? { tools: { type: "preset" as const, preset: "claude_code" as const } } : {}),
+      permissionMode: CHAT_TO_SDK_MODE[opts.chatMode],
+      // The whole Claude Code toolset is AVAILABLE, while only the read-only ones
+      // are auto-approved (see `chatAutoAllowTools`). `tools` decides what exists;
+      // `allowedTools` decides what skips the question.
+      tools: { type: "preset" as const, preset: "claude_code" as const },
       // Auto decides its own shell commands, in aide, at zero latency.
       //
       // See `fastBashSettings` for the measurement and for what is given up.
@@ -1203,25 +1187,21 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
             "several calls do not depend on each other, make them in one message instead",
             "of one per turn.",
           ].join(" "),
-          // Chat runs only: a task run does not carry the Claude Code toolset,
-          // so naming the Agent tool there invites calls that can only be
-          // refused. Said out loud because a tool the model is not told about
-          // is one it reaches for rarely and late — and because the two things
-          // aide enforces on a spawn (same checkout, synchronous) read as
-          // errors if the first the model hears of them is a refusal.
-          opts.chatMode
-            ? [
-                "You may fan work out with the Agent tool: parallel subagents, each in its",
-                "own context window, reporting back into this one. Use it when read-heavy",
-                "work splits — several subsystems to survey, independent questions to",
-                "research — and spawn the independent ones in one message so they run",
-                "together. Subagents work this same checkout under this run's own rules,",
-                "so do not point two of them at the same files. They run synchronously,",
-                "inside your turn: isolation options are refused, and every spawn waits",
-                "for its result, because the commit that follows your turn must not race",
-                "an agent still writing.",
-              ].join(" ")
-            : "",
+          // Said out loud because a tool the model is not told about is one it
+          // reaches for rarely and late — and because the two things aide
+          // enforces on a spawn (same checkout, synchronous) read as errors if
+          // the first the model hears of them is a refusal.
+          [
+            "You may fan work out with the Agent tool: parallel subagents, each in its",
+            "own context window, reporting back into this one. Use it when read-heavy",
+            "work splits — several subsystems to survey, independent questions to",
+            "research — and spawn the independent ones in one message so they run",
+            "together. Subagents work this same checkout under this run's own rules,",
+            "so do not point two of them at the same files. They run synchronously,",
+            "inside your turn: isolation options are refused, and every spawn waits",
+            "for its result, because the commit that follows your turn must not race",
+            "an agent still writing.",
+          ].join(" "),
           // The gate is invisible from inside a run, and what a run cannot see it
           // re-proves. See `verifyCommands` for the measurement: two thirds of all
           // shell time across eight conversations went on re-running checks that
@@ -1332,11 +1312,8 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
       // thinking off. This is the session default, and turning thinking back on
       // is expressed as "back to the default" — see `setThinking`.
       thinking: { type: "adaptive", display: "summarized" },
-      // Only when someone is watching. Partial messages are thousands of events
-      // per turn, and a headless task has nobody to show them to.
       ...(opts.onDelta ? { includePartialMessages: true } : {}),
       ...(opts.maxBudgetUsd ? { maxBudgetUsd: opts.maxBudgetUsd } : {}),
-      ...(opts.maxTurns ? { maxTurns: opts.maxTurns } : {}),
       // Taken away rather than only refused. `canUseTool` denies this too, but a
       // deny is a round trip the model can spend a turn arguing with — it sees
       // the tool, calls it, is refused, and may well try again. `disallowedTools`
@@ -1362,23 +1339,18 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
           return denyTool(name, toolInput, QUESTION_REFUSAL)
         }
 
-        // A chat, which is to say a run with a human somewhere near it. That buys
-        // less than it used to and less than it looks: NOTHING here is asked any
-        // more. A chat's turn is no more interruptible than a task's, because the
-        // same turn may have been sent by the commit gate rather than typed, and
-        // a prompt raised by one of those has nobody to answer it.
+        // NOTHING here is ever asked. A turn may have been sent by the commit
+        // gate rather than typed by anyone — that is the brief's rule, not a
+        // policy of this file — so every path below allows or refuses, and the
+        // refusal is written to name the way forward: it lands in a transcript
+        // somebody is already reading, and is answered by the next message.
         //
-        // What a chat gets instead is a different REFUSAL — one that names the
-        // way forward, lands in a transcript somebody is already reading, and is
-        // answered by the next message. A task run has no such reader, so it
-        // falls through to the fail-closed path below.
-        //
-        // Still keyed on `onPermission` because that callback's presence is what
-        // distinguishes the two kinds of run at this layer. It is no longer
-        // CALLED — see the handoff branch — and if a later change removes the
-        // last reason to carry it, this test becomes `opts.chatMode` and the
-        // option goes with it.
-        if (opts.onPermission) {
+        // This used to be split in two, keyed on `opts.onPermission`, with a
+        // fail-closed tail for a "task run" that had no reader. There is one
+        // kind of run now — `chatMode` is set by the only producer there is —
+        // so the tail was unreachable and the callback it was keyed on had
+        // stopped being called long before that.
+        {
           // A chat may fan out. Decided here, above the mode branches, for two
           // reasons: on Plan a subagent is a read-only researcher (it inherits
           // plan mode and its edits are refused by this same callback), and the
@@ -1477,24 +1449,6 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
             turnMode === "plan" ? PLAN_REFUSAL : notAllowedReason(name, opts.allowedTools)
           return denyTool(name, toolInput, reason)
         }
-
-        // A task run refuses. Bash gets a real decision from aide's own policy;
-        // everything else reaching here was not on the allowlist. Note this
-        // callback only sees calls the SDK has not already resolved, so it is a
-        // gate, not an audit log.
-        const verdict =
-          name === "Bash"
-            ? checkBashCommand(
-                (toolInput as { command?: unknown })?.command,
-                opts.allowedBash,
-                opts.deniedBash,
-                opts.cwd,
-              )
-            : { allow: false, reason: notAllowedReason(name, opts.allowedTools) }
-
-        if (verdict.allow) return { behavior: "allow", updatedInput: toolInput }
-
-        return denyTool(name, toolInput, verdict.reason)
       },
     },
   })
@@ -1566,22 +1520,21 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
         projectId: opts.projectId,
         cwd: opts.cwd,
         fallbackModel: opts.model,
-        permissionMode: opts.chatMode ? CHAT_TO_SDK_MODE[opts.chatMode] : "dontAsk",
+        permissionMode: CHAT_TO_SDK_MODE[opts.chatMode],
       })) {
         if (event.type === "run.finished") {
           finished = true
           if (opts.followUps) chargeThisTurn(event)
-          // aide's own count of refused Bash calls, because the SDK's
-          // permission_denials cannot say why and the settings layer's denials
-          // reach the model with no message at all. The larger of the two
-          // sources, not the tally alone: on Auto the settings layer resolves
-          // Bash BEFORE canUseTool, so its denials never reach the tally and
-          // only the SDK's array records them — while the tally is the only
-          // count on the paths where reasons exist. Absent when nothing was
-          // denied, like every optional field on this event.
-          const sdkBashDenials = event.permissionDenials.filter((d) => d.tool === "Bash").length
-          const denials = Math.max(sdkBashDenials, tally.total)
-          if (denials > 0) event.bashDenials = denials
+          // `run.finished.bashDenials` was written here — aide's own count of
+          // refused Bash calls, alongside the SDK's reasonless
+          // `permission_denials`. Nothing ever read it: not the profile, not the
+          // dashboard, not the browser. Its own doc comment argued it was "the
+          // number that says whether the refusals landed or the turn spent
+          // itself retrying", which was an argument for a reader nobody built.
+          //
+          // The tally still resets per turn: `record` is the retry-loop signal
+          // in `policy.ts`, and a count carried across turns would make the
+          // second turn's first refusal look like a repeat of the first's.
           tally.reset()
           // A context reading belongs to the turn it was sampled in; carried
           // over, it would be emitted again ahead of the next turn's result.

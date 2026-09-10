@@ -1085,7 +1085,6 @@ console.log("\nthe drawn graph")
     parents,
     short: sha,
     author: "",
-    authorEmail: "",
     date: "",
     refs: [],
     rows: [],

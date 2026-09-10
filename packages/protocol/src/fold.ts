@@ -140,9 +140,10 @@ export type Folded<T> = { folded: false; row: T } | { folded: true; group: FoldG
  * the prose arriving now is the turn in progress rather than its conclusion.
  */
 export function foldRows<T extends FoldableRow>(rows: T[], live = true): Folded<T>[] {
-  // Where each turn starts: the row after a user message. A transcript that
-  // opens mid-conversation — the wall tails one — has no user row at the top, so
-  // index 0 starts a turn too, or the first turn on screen would never fold.
+  // Where each turn starts: the row after a user message. A transcript that opens
+  // mid-conversation — a long one trimmed to its tail — has no user row at the
+  // top, so index 0 starts a turn too, or the first turn on screen would never
+  // fold.
   const starts: number[] = []
   rows.forEach((row, i) => {
     if (row.kind === "user") starts.push(i + 1)

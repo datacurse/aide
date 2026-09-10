@@ -14,8 +14,9 @@ import type { RunEvent } from "@aide/protocol"
  * The transcript's one-line record ("committed abc1234", or the failed check's
  * output) appears once it is OVER, which is where a commit explains itself.
  *
- * One function, called by the pane and by a wall column, because the two adopt
- * runs the same way and a rule implemented twice is the two-readings wedge.
+ * One function rather than the test written inline where it is wanted: anything
+ * that adopts a run needs the same answer, and a rule implemented twice is the
+ * two-readings wedge.
  *
  * Two tests, ORed. The holder is the daemon's own word (`held` means the hold
  * is a commit, not a turn) but it is polled and can be a beat behind the run

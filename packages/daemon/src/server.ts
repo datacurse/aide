@@ -22,13 +22,12 @@ import type {
 import { CHAT_MODES, EFFORT_LEVELS, isChatModel } from "@aide/protocol"
 import { runLogPath, sshConfigPath } from "@aide/protocol/node"
 import { activity } from "./activity.js"
-import { MAX_PROJECT_DOC_CHARS } from "./agent.js"
 import {
   chatStatuses,
   closeChat,
   reopenChat,
 } from "./board.js"
-import { currentBranch, pushBranch, runChanges, squashAndPush } from "./changes.js"
+import { currentBranch, pushBranch, squashAndPush } from "./changes.js"
 import { ChatLane } from "./chat.js"
 import { CONFIG } from "./config.js"
 import { EventLog } from "./eventlog.js"
@@ -45,12 +44,7 @@ import {
 import { pickFolder } from "./picker.js"
 import { listRemoteDirectories, listSshHosts } from "./ssh.js"
 import { conversationProfile } from "./profile.js"
-import {
-  commitWorkingTree,
-  conversationBaseline,
-  turnCommitMessage,
-  VerifyFailed,
-} from "./review.js"
+import { commitWorkingTree, turnCommitMessage, VerifyFailed } from "./review.js"
 import * as repo from "./repo.js"
 import { BOOT_SOURCE_ID, currentSourceId, isStale } from "./source.js"
 import { getConversation, listConversations } from "./sessions.js"
@@ -655,8 +649,12 @@ app.get(
  * There was a companion `…/conversations/:sessionId/diff` here, answering "what
  * did this chat change" from its checkpoint. It went unused: a diff is read in
  * the conversation that produced it, from the transcript, and nothing in the web
- * package ever called the route. `conversationBaseline` and `runChanges` are
- * both still live — the commit gate is their real caller.
+ * package ever called the route.
+ *
+ * This used to add that `conversationBaseline` and `runChanges` were "both still
+ * live — the commit gate is their real caller", which was not true of either.
+ * The gate reads the working tree through `treeChanges`. `conversationBaseline`
+ * had no callers and is gone; `runChanges` is reached only from `pnpm smoke`.
  */
 
 
@@ -1103,18 +1101,13 @@ app.get("/api/runs/:runId/session", async (req, reply) => {
   return { sessionId: named?.sessionId ?? null, ended: terminal !== null }
 })
 
-/** Answer a tool call the turn is blocked on. */
-app.post("/api/runs/:runId/permissions/:requestId", async (req, reply) => {
-  const { runId, requestId } = req.params as { runId: string; requestId: string }
-  const { allowed } = (req.body ?? {}) as { allowed?: boolean }
-  if (typeof allowed !== "boolean") {
-    return reply.code(400).send({ message: "body must include { allowed: boolean }" })
-  }
-  if (!chat.resolvePermission(runId, requestId, allowed)) {
-    return reply.code(404).send(notFound("that request is no longer waiting"))
-  }
-  return { ok: true }
-})
+/*
+ * `POST /api/runs/:runId/permissions/:requestId` was here: the answer to a tool
+ * call a turn had stopped on. Nothing can stop that way any more — `canUseTool`
+ * allows or denies on every path and `AskUserQuestion` is refused in both modes
+ * — so the route had no request to answer. The events it wrote are still read,
+ * because logs that predate the change still carry them.
+ */
 
 app.post("/api/runs/:runId/chat-interrupt", async (req, reply) => {
   const { runId } = req.params as { runId: string }

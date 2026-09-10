@@ -671,13 +671,15 @@ export const RETRY_LOOP_DENIALS = 3
 /**
  * Denied Bash calls in one turn, counted where the denials happen.
  *
- * Exists because the SDK's own record cannot carry the story: `permission_denials`
- * on the result message has no reason field (the settings layer drops the
- * message entirely), so "how often was this run refused, and did it loop" is
- * only answerable by aide counting its own gate. The total rides on
- * `run.finished.bashDenials`; `record` answering true is the retry-loop signal
- * — the same prefix denied more than `RETRY_LOOP_DENIALS` times, meaning the
- * refusal text is not landing.
+ * What this is FOR is the retry loop, not the total. `record` answering true
+ * means the same prefix has been denied more than `RETRY_LOOP_DENIALS` times —
+ * the refusal text is not landing and the turn is spending itself rephrasing.
+ *
+ * The total used to ride on `run.finished.bashDenials` as well, on the argument
+ * that the SDK's own `permission_denials` has no reason field and so cannot say
+ * whether refusals landed. Nothing ever read that field, so it is gone; the
+ * tally is still reset per turn, or the second turn's first refusal would look
+ * like a repeat of the first turn's.
  */
 export class DenialTally {
   #byPrefix = new Map<string, number>()

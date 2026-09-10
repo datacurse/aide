@@ -49,10 +49,8 @@ import {
   planChecks,
   projectGates,
   restartDecision,
-  splitHiddenColumns,
   stripPartialTurnSummary,
   stripTurnSummary,
-  withHidden,
   type Health,
   type RunEvent,
   type RunEventBody,
@@ -725,10 +723,11 @@ console.log("\na snapshot that is stable across projects")
 {
   // `useSyncExternalStore` compares by IDENTITY, so a snapshot that derives a
   // fresh array on every read re-renders forever. The version this replaces held
-  // ONE memo slot and was correct while one project was on screen; the wall draws
-  // a column per project, and interleaved reads made them evict each other, so
-  // every read missed and the page went grey about half a second after it
-  // painted. Nothing about that is visible to `tsc` or to the build.
+  // ONE memo slot and was correct while one project was on screen; a view that
+  // drew two at once made their interleaved reads evict each other, so every read
+  // missed and the page went grey about half a second after it painted. That view
+  // is gone and this stays — the assertions below are what stop a future one
+  // rediscovering it. Nothing about it is visible to `tsc` or to the build.
   const memo = new PerProjectMemo<string>()
   const source = { store: 1 }
   let computed = 0
@@ -747,12 +746,12 @@ console.log("\na snapshot that is stable across projects")
   check(
     "and the first is NOT evicted by it",
     memo.read(source, "p1", rows) === first,
-    "one slot for two projects is the render loop that greyed the wall",
+    "one slot for two projects is the render loop that greyed the page",
   )
   check("nor the second by going back", memo.read(source, "p2", rows) === other)
   check("so interleaving computes nothing new", computed === 2, String(computed))
 
-  // Three passes of two columns, which is what a wall actually does.
+  // Three passes over two projects, which is what a repeated render does.
   const before = computed
   for (let pass = 0; pass < 3; pass++) {
     check(`p1 is stable on pass ${pass}`, memo.read(source, "p1", rows) === first)
@@ -878,11 +877,11 @@ console.log("\nwhere you are, as a URL")
   // parser bug. That is why these live in protocol rather than beside the hook.
   //
   // Asserted as STABILITY rather than as byte-equality with the input: a page
-  // with no project formats as `#/wall/`, so a bare `#/wall` is a different
-  // spelling of the same place and comparing against the input would be testing
-  // the spelling rather than the inverse. What has to hold is that formatting
-  // again changes nothing — that is what makes the effect in `useAppLocation`
-  // settle instead of rewriting the URL on every render.
+  // with no project formats as `#/activity/`, so a bare `#/activity` is a
+  // different spelling of the same place and comparing against the input would be
+  // testing the spelling rather than the inverse. What has to hold is that
+  // formatting again changes nothing — that is what makes the effect in
+  // `useAppLocation` settle instead of rewriting the URL on every render.
   const trip = (hash: string) => formatLocation(parseLocation(hash))
   for (const hash of [
     "#/",
@@ -891,9 +890,6 @@ console.log("\nwhere you are, as a URL")
     "#/p/abc/new/new-xyz",
     "#/activity",
     "#/activity/p/abc/session-1",
-    "#/wall",
-    "#/wall/p/abc/session-1",
-    "#/wall/p/abc/new/new-xyz",
   ]) {
     check(`${hash} round trips to a fixed point`, trip(trip(hash)) === trip(hash), trip(hash))
   }
@@ -904,31 +900,21 @@ console.log("\nwhere you are, as a URL")
     "#/p/abc/session-1",
     "#/p/abc/new/new-xyz",
     "#/activity/p/abc/session-1",
-    "#/wall/p/abc/session-1",
   ]) {
     check(`${hash} survives verbatim`, trip(hash) === hash, trip(hash))
   }
 
-  // The whole-window pages are PREFIXES, so what is underneath survives — which
-  // is what lets closing either one put you back exactly where you were.
-  const under = parseLocation("#/wall/p/abc/session-1")
-  check("the wall keeps the project underneath it", under.projectId === "abc")
+  // The dashboard is a PREFIX, so what is underneath survives — which is what
+  // lets closing it put you back exactly where you were.
+  const under = parseLocation("#/activity/p/abc/session-1")
+  check("the dashboard keeps the project underneath it", under.projectId === "abc")
   check("and the chat", under.sessionId === "session-1")
-  check("and says it is open", under.wall && !under.activity)
+  check("and says it is open", under.activity)
 
-  // Two whole-window pages cannot both be open. A hand-written URL naming both
-  // has to resolve to one of them rather than to some third state.
-  const both = parseLocation("#/activity/wall/p/abc")
-  check(
-    "a URL naming both pages opens exactly one",
-    both.activity !== both.wall,
-    JSON.stringify({ activity: both.activity, wall: both.wall }),
-  )
-
-  // A bare page is a complete location: both are about every project, so neither
-  // needs one. Testing only for a project id would drop it.
-  check("a bare wall URL is a location", parseLocation("#/wall").wall === true)
-  check("with no project", parseLocation("#/wall").projectId === null)
+  // A bare page is a complete location: it is about every project, so it needs
+  // none. Testing only for a project id would drop it.
+  check("a bare activity URL is a location", parseLocation("#/activity").activity === true)
+  check("with no project", parseLocation("#/activity").projectId === null)
 
   // Layouts this app has already outgrown. The mirror in localStorage outlives
   // them, so they land on the project rather than on nothing.
@@ -937,16 +923,28 @@ console.log("\nwhere you are, as a URL")
   check("a retired board URL opens the project", parseLocation("#/p/abc/board").projectId === "abc")
   check("with nothing open", parseLocation("#/p/abc/board").sessionId === null)
 
+  // The wall was the second whole-window prefix, and it is gone. A bookmark or a
+  // restored mirror still naming it has to open what it names rather than drop
+  // the project — the same courtesy `chats` and `board` above get. This is the
+  // one that would be silent: `#/wall/p/abc/s1` failing the `p` test lands you on
+  // an empty app with the URL apparently intact.
+  const retired = parseLocation("#/wall/p/abc/session-1")
+  check("a retired wall URL still finds its project", retired.projectId === "abc")
+  check("and its chat", retired.sessionId === "session-1")
+  check("and formats without the prefix", formatLocation(retired) === "#/p/abc/session-1")
+  check("a bare wall URL is just the app", parseLocation("#/wall").projectId === null)
+
   check("nonsense is not a project", parseLocation("#/nonsense").projectId === null)
 }
 
 console.log("\nwhat a project's gates refuse")
 {
-  // These four answers used to be computed inline in `App.tsx` for the one open
-  // project. The wall draws a column per project and needs them for every one,
-  // and a second implementation of "is this project blocked" is the shape that
-  // produced the wedge in the brief — a block reading one object while the button
-  // that releases it reads another. Asserted here because a component cannot be.
+  // These answers used to be computed inline in `App.tsx` for the one open
+  // project. They were lifted out when a second view needed them per project,
+  // and they stay out: a second implementation of "is this project blocked" is
+  // the shape that produced the wedge in the brief — a block reading one object
+  // while the button that releases it reads another. Asserted here because a
+  // component cannot be.
   const held = (title: string) => `"${title}" has it`
   const holder = { runId: "run-1", title: "a chat" }
 
@@ -1062,73 +1060,6 @@ console.log("\nthe message a squash writes")
   const long = squashMessage(["z".repeat(100)], [])
   check("a runaway first subject is capped", (long.split("\n")[0]?.length ?? 0) <= 72)
   check("no sessions is no trailer block", !squashMessage(["a"], []).includes("Aide-Session"))
-}
-
-console.log("\ncolumns the wall is not drawing")
-{
-  const projects = [{ id: "a" }, { id: "b" }, { id: "c" }]
-
-  const none = splitHiddenColumns(projects, [])
-  check("nothing hidden draws everything", none.shown.length === 3 && none.hiddenCount === 0)
-
-  const one = splitHiddenColumns(projects, ["b"])
-  check(
-    "a hidden project is not drawn",
-    one.shown.map((p) => p.id).join(",") === "a,c",
-    one.shown.map((p) => p.id).join(","),
-  )
-  check("and is counted", one.hiddenCount === 1)
-
-  // The header's number and the missing columns are the SAME arithmetic, and
-  // this is the case that separates them. A duplicate id is reachable from two
-  // tabs or a hand-edited value, and counting the stored list would report two
-  // hidden columns while only one is absent from the page — a "2 hidden" that
-  // restores one column when pressed.
-  const dupe = splitHiddenColumns(projects, ["b", "b"])
-  check(
-    "a duplicate id counts once",
-    dupe.hiddenCount === 1 && dupe.shown.length === 2,
-    `${dupe.hiddenCount} hidden, ${dupe.shown.length} shown`,
-  )
-
-  // The other way the two drift: a project hidden and then FORGOTTEN. Its id
-  // stays in the stored set forever, and counting the set would keep offering to
-  // restore a column that no longer exists.
-  const stale = splitHiddenColumns(projects, ["b", "gone"])
-  check(
-    "an id for a forgotten project counts for nothing",
-    stale.hiddenCount === 1,
-    "otherwise the header offers to restore a column that cannot come back",
-  )
-
-  // The property both of the above are instances of, stated directly: whatever
-  // is stored, the two halves partition the projects. This is what lets the wall
-  // draw one and count the other without them ever disagreeing.
-  for (const ids of [[], ["a"], ["a", "a"], ["a", "b", "c"], ["nope"], ["c", "nope", "c"]]) {
-    const { shown, hiddenCount } = splitHiddenColumns(projects, ids)
-    check(
-      `shown + hidden is every project (${ids.join("|") || "none"})`,
-      shown.length + hiddenCount === projects.length,
-      `${shown.length} + ${hiddenCount} of ${projects.length}`,
-    )
-  }
-
-  // Hiding everything is legal and is NOT the same as having no projects — the
-  // wall draws a different empty state for it, because the way out is the
-  // header's restore control rather than adding a repository.
-  const all = splitHiddenColumns(projects, ["a", "b", "c"])
-  check("every column can be hidden at once", all.shown.length === 0 && all.hiddenCount === 3)
-
-  // The stored set stays clean at the point of writing as well. Both ends are
-  // guarded deliberately: this keeps the value tidy, and the split above stays
-  // correct for a value this function never wrote.
-  check("hiding twice stores one id", withHidden(["a"], "a").join(",") === "a")
-  check("hiding appends", withHidden(["a"], "b").join(",") === "a,b")
-  check(
-    "and the order hidden is kept",
-    withHidden(withHidden([], "c"), "a").join(",") === "c,a",
-    "the list is a record of what you hid, not a sorted set",
-  )
 }
 
 console.log("\nwhat a turn is doing right now")

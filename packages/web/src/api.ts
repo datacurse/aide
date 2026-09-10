@@ -283,11 +283,6 @@ export const api = {
   runSession: (runId: string) =>
     call<{ sessionId: string | null; ended: boolean }>(`/api/runs/${runId}/session`),
 
-  answerPermission: (runId: string, requestId: string, allowed: boolean) =>
-    call<{ ok: true }>(`/api/runs/${runId}/permissions/${requestId}`, {
-      method: "POST",
-      body: JSON.stringify({ allowed }),
-    }),
   interruptChat: (runId: string) =>
     call<{ interrupted: boolean }>(`/api/runs/${runId}/chat-interrupt`, { method: "POST" }),
 

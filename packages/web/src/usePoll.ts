@@ -41,9 +41,10 @@ export function usePoll(
    *
    * A parameter rather than the caller wrapping the hook in a condition, because
    * hooks cannot be called conditionally — and the alternative, an early return
-   * inside `fn`, still pays for a timer and a wakeup per beat per caller. The
-   * wall has one of these per project and turns off the ones scrolled off screen;
-   * see `useOnScreen` for why that is a budget rather than a nicety.
+   * inside `fn`, still pays for a timer and a wakeup per beat per caller. What
+   * it is rationing is real: a remote `gitPending` is an ssh connection, and
+   * connections are a ceiling rather than merely a latency — sshd stops
+   * accepting past `MaxStartups`.
    */
   enabled = true,
 ): void {

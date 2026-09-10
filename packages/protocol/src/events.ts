@@ -434,14 +434,17 @@ export type RunEventBody =
       numTurns: number
       durationMs: number
       permissionDenials: Array<{ tool: string; reason: string }>
-      /**
-       * Bash calls aide's own gate refused this turn, counted at the deny.
-       * The SDK's `permissionDenials` above is the fact with no reason — its
-       * shape has no field for one — so this is the number that says whether
-       * the refusals landed or the turn spent itself retrying. Absent when
-       * nothing was denied, and on every log from before it existed.
+      /*
+       * `bashDenials?: number` was here — aide's own count of refused Bash calls,
+       * beside the SDK's reasonless `permissionDenials`. It was written on every
+       * turn and read by nothing: not the profile, not the dashboard, not the
+       * browser. Removed rather than given a reader, because the argument for it
+       * was always hypothetical.
+       *
+       * Logs on disk still carry it, and that costs nothing: every reader here
+       * takes the fields it wants off a parsed line rather than matching the
+       * shape whole.
        */
-      bashDenials?: number
       /**
        * Why it failed, in the SDK's own words.
        *
