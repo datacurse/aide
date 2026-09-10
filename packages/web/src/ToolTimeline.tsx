@@ -5,9 +5,11 @@ import { buildTimeline, looksOnly, type TimelineCall, type TimelineRow } from "@
  * A turn's tool calls as a grid: one row per thing touched, one column per
  * assistant message — a model round trip, which is the latency metric the flat
  * list could never show. Ten calls in one column cost one round trip; ten
- * columns of one call cost ten. Failures are red, the round trips spent
- * redoing them are tinted, and the transcript behind `show N steps` is
- * unchanged — clicking a dot opens it at that call.
+ * columns of one call cost ten. Failures are red; the round trips spent
+ * redoing them are tinted AMBER, not red, because recovery is cost rather
+ * than failure — the retry usually SUCCEEDS, and a red wash under a green dot
+ * read as the grid contradicting itself. The transcript behind `show N steps`
+ * is unchanged — clicking a dot opens it at that call.
  *
  * Everything derived is `buildTimeline` in protocol, where `pnpm smoke` pins
  * it; this file only draws. The one rule enforced here is the spec's: a column
@@ -208,7 +210,7 @@ export function ToolTimeline({
         <span className="ml-auto shrink-0 text-fg-muted">
           {t.total} calls in {t.messages.length} message{t.messages.length === 1 ? "" : "s"}
           {t.recovery.length > 0 && (
-            <span className="text-err">
+            <span className="text-warn">
               {"   "}
               {t.recovery.length} recovering
             </span>
@@ -216,7 +218,7 @@ export function ToolTimeline({
         </span>
       </div>
 
-      {/* The overview strip: 3px per message, red for a failure, dim red for
+      {/* The overview strip: 3px per message, red for a failure, amber for
           the recovery that followed it, blue for in flight. Dragging scrolls
           the grid. Hidden while the grid fits. */}
       {win !== null && (
@@ -238,7 +240,7 @@ export function ToolTimeline({
                 failed.has(m)
                   ? "h-3.5 bg-err"
                   : recovery.has(m)
-                    ? "h-2 bg-err/40"
+                    ? "h-2 bg-warn/40"
                     : cells.busy.has(m)
                       ? "h-2 bg-info"
                       : "h-[5px] bg-line"
@@ -279,7 +281,7 @@ export function ToolTimeline({
                     onMouseEnter={() => setHover(m)}
                     onMouseLeave={() => setHover(null)}
                     className={`relative h-5 p-0 text-center align-middle text-[10px] font-normal text-fg-dim ${
-                      recovery.has(m) ? "bg-err/10" : ""
+                      recovery.has(m) ? "bg-warn/10" : ""
                     } ${hover === m ? "bg-hover" : ""}`}
                   >
                     {numbered ? m : ""}
@@ -335,7 +337,7 @@ export function ToolTimeline({
                         style={{ width: cells.widths.get(m), minWidth: cells.widths.get(m) }}
                         onMouseEnter={() => setHover(m)}
                         onMouseLeave={() => setHover(null)}
-                        className={`relative h-6 p-0 ${recovery.has(m) ? "bg-err/10" : ""} ${
+                        className={`relative h-6 p-0 ${recovery.has(m) ? "bg-warn/10" : ""} ${
                           hover === m ? "bg-hover" : ""
                         }`}
                       >
