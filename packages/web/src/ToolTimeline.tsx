@@ -141,6 +141,7 @@ function Dot({
       <span
         role="button"
         tabIndex={0}
+        data-dotid={call.id}
         aria-label={`${call.tool} ${call.target}, message ${call.message}, ${state}`}
         title={`${call.tool} ${call.target}`.trim()}
         onClick={onPick}
@@ -258,25 +259,70 @@ export function ToolTimeline({
   }, [])
 
   /**
-   * The wheel scrolls the grid SIDEWAYS while the pointer is over it. A
-   * horizontal scroller inside a vertical one has no wheel axis of its own —
-   * without this, reaching column 30 means grabbing a thin scrollbar or the
-   * overview strip. Two escapes keep it polite: a grid that FITS never takes
-   * the wheel at all, and one scrolled to either edge hands the wheel back to
-   * the page instead of going dead under the pointer. A manual listener
-   * because React registers `onWheel` passively, and a passive listener
-   * cannot preventDefault — the page would scroll as well, which is worse
-   * than either behaviour alone.
+   * The listener is registered once, so what it needs each event rides in a
+   * ref — `[]` deps with a closure over props is how the first version of
+   * this handler quietly read the mount-time selection forever.
+   */
+  const wheelCtx = useRef({ selected, calls, onSelect })
+  wheelCtx.current = { selected, calls, onSelect }
+  /** Accumulated wheel travel between selection steps. */
+  const wheelAcc = useRef(0)
+
+  /**
+   * The wheel, over the grid, does the thing the moment calls for.
+   *
+   * With a card OPEN it scrubs: each notch steps the selection through the
+   * calls in the order they happened, the card follows, and the grid pans
+   * itself to keep the selected dot in view. The wheel is owned outright in
+   * this mode, ends clamped — you are inspecting the grid, not the page.
+   * (This is also why "hover and wheel" seemed dead before: on a grid that
+   * fits its box, panning — the only thing the wheel did then — has nowhere
+   * to go.)
+   *
+   * With NOTHING selected it pans sideways — a horizontal scroller inside a
+   * vertical one has no wheel axis of its own — and stays polite: a grid
+   * that fits never takes the wheel, and one at either edge hands it back to
+   * the page instead of going dead under the pointer.
+   *
+   * A manual non-passive listener, because React registers `onWheel`
+   * passively and a passive listener cannot preventDefault — the page would
+   * scroll along with whichever behaviour ran.
    */
   useEffect(() => {
     const el = wrap.current
     if (!el) return
+    // One selection step per standard mouse notch (~100px of delta);
+    // trackpads accumulate their smaller deltas up to the same threshold.
+    const STEP = 100
     const onWheel = (e: WheelEvent) => {
       // Shift+wheel is the browser's own horizontal scroll; leave it alone.
       if (e.deltaY === 0 || e.shiftKey) return
-      if (el.scrollWidth <= el.clientWidth) return
       // Firefox reports line-based deltas; ~16px a line.
       const delta = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY
+
+      const ctx = wheelCtx.current
+      if (ctx.selected !== null && ctx.onSelect) {
+        const at = ctx.calls.findIndex((c) => c.id === ctx.selected)
+        if (at === -1) return
+        e.preventDefault()
+        wheelAcc.current += delta
+        const steps = Math.trunc(wheelAcc.current / STEP)
+        if (steps === 0) return
+        wheelAcc.current -= steps * STEP
+        const next = ctx.calls[Math.max(0, Math.min(ctx.calls.length - 1, at + steps))]
+        if (!next || next.id === ctx.selected) return
+        ctx.onSelect(next.id)
+        // After the render, walk the grid to the dot the card now describes.
+        requestAnimationFrame(() => {
+          el.querySelector(`[data-dotid="${CSS.escape(next.id)}"]`)?.scrollIntoView({
+            block: "nearest",
+            inline: "nearest",
+          })
+        })
+        return
+      }
+
+      if (el.scrollWidth <= el.clientWidth) return
       const max = el.scrollWidth - el.clientWidth
       const next = Math.max(0, Math.min(max, el.scrollLeft + delta))
       if (next === el.scrollLeft) return
