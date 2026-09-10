@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import type { Attachment, ChatStatus } from "@aide/protocol"
 import { born, sortChats } from "@aide/protocol"
 import { api, type ConversationRow, type LockHolder } from "../api.js"
-import { MAX_ATTACHMENT_BYTES, readAsAttachment } from "../attachments.js"
+import { collectAttachments } from "../attachments.js"
 import {
   addBacklogChat,
   captureKey,
@@ -321,25 +321,34 @@ function CaptureBox({ projectId }: { projectId: string }) {
     setNote(null)
   }
 
+  // Any file, the same as the composer — the two boxes share `collectAttachments`
+  // so what may be parked and what may be sent cannot drift apart.
   const takeFiles = async (files: FileList | File[]) => {
-    const images = [...files].filter((f) => f.type.startsWith("image/"))
-    if (images.length === 0) return
-    const tooBig = images.filter((f) => f.size > MAX_ATTACHMENT_BYTES)
-    if (tooBig.length) setNote(`${tooBig.length} image(s) too large, skipped`)
-    const read = await Promise.all(
-      images.filter((f) => f.size <= MAX_ATTACHMENT_BYTES).map(readAsAttachment),
-    )
-    const added = read.filter((a): a is Attachment => a !== null)
+    const { added, skipped } = await collectAttachments(files)
+    if (skipped) setNote(`${skipped} file(s) too large, skipped`)
     if (added.length === 0) return
     // Re-read the box rather than trusting what this closure captured: decoding
-    // is async, so anything typed — or a second image pasted — while it ran
+    // is async, so anything typed — or a second file pasted — while it ran
     // would be overwritten by the stale copy.
     const now = readDraft(key)
     saveDraft(key, { text: now.text, attachments: [...now.attachments, ...added] })
   }
 
   return (
-    <div className="shrink-0 border-b border-line bg-editor p-2">
+    <div
+      className="shrink-0 border-b border-line bg-editor p-2"
+      // A drop target on the same terms as the composer's bar: preventDefault
+      // on dragOver is what permits the drop; without it the browser navigates
+      // to the file and takes the whole app with it.
+      onDragOver={(e) => {
+        if (e.dataTransfer.types.includes("Files")) e.preventDefault()
+      }}
+      onDrop={(e) => {
+        if (!e.dataTransfer.files.length) return
+        e.preventDefault()
+        void takeFiles(e.dataTransfer.files)
+      }}
+    >
       {attachments.length > 0 && (
         <div className="mb-1.5 flex flex-wrap gap-1.5">
           {attachments.map((a) => (
@@ -347,10 +356,10 @@ function CaptureBox({ projectId }: { projectId: string }) {
               key={a.id}
               type="button"
               onClick={() => edit({ attachments: attachments.filter((x) => x.id !== a.id) })}
-              title="Remove this image"
+              title="Remove this attachment"
               className="inline-flex items-center gap-1 rounded border border-line-soft px-1.5 py-0.5 font-sans text-[10px] text-fg-dim hover:border-err hover:text-err"
             >
-              image
+              <span className="max-w-32 truncate">{a.name ?? "image"}</span>
               <X className="size-2.5" />
             </button>
           ))}
@@ -374,7 +383,7 @@ function CaptureBox({ projectId }: { projectId: string }) {
         }}
         onPaste={(e) => {
           const files = [...e.clipboardData.files]
-          if (files.some((f) => f.type.startsWith("image/"))) {
+          if (files.length) {
             e.preventDefault()
             void takeFiles(files)
           }

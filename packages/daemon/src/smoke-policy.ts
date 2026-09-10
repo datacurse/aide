@@ -28,6 +28,7 @@ import {
   chatModelLabel,
   currentActivity,
   isChatModel,
+  isImageAttachment,
   foldRows,
   formatLocation,
   parseLocation,
@@ -45,6 +46,7 @@ import {
   type RunEventBody,
 } from "@aide/protocol"
 import { parseProjectDoc } from "@aide/protocol/node"
+import { attachedFilesNote, fileAttachmentNames } from "./attachment-files.js"
 import { HUMAN_ONLY_COMMANDS, checkBashCommand } from "./policy.js"
 import { staleVerdict } from "./source.js"
 import { check } from "./smoke-check.js"
@@ -1807,5 +1809,62 @@ console.log("\nrestarting a stale daemon")
   // Unknown must never read as changed: a daemon with no source tree to compare
   // against is not stale, it is unknowable.
   check("never restarts on an unreadable source", !decide({ sourceId: null }, null).restart)
+}
+
+console.log("\nfile attachments")
+{
+  // A non-image attachment becomes a file on the agent's machine, and these are
+  // the two halves that fail quietly: a name that collides or escapes the
+  // folder writes over — or outside — what the note promises, and a note that
+  // lists the wrong paths sends the agent to files that are not there.
+  const names = fileAttachmentNames([
+    { name: "part.stl" },
+    { name: "part.stl" },
+    { name: "C:\\Users\\loki\\Downloads\\part.stl" },
+    { name: "../../etc/passwd" },
+    {},
+    { name: 'log<>:"|?*.txt' },
+    { name: "PART.STL" },
+  ])
+  check("a plain name survives as itself", names[0] === "part.stl", names.join(", "))
+  check("a duplicate is suffixed, not overwritten", names[1] === "part-2.stl", names[1] ?? "")
+  check(
+    "a full path is cut to its basename, then de-collided",
+    names[2] === "part-3.stl",
+    names[2] ?? "",
+  )
+  check("a traversal name cannot leave the folder", names[3] === "passwd", names[3] ?? "")
+  check("no name at all still gets one", names[4] === "file-5", names[4] ?? "")
+  check(
+    "characters Windows refuses are replaced, not dropped",
+    names[5] === "log-------.txt",
+    names[5] ?? "",
+  )
+  // NTFS would happily create PART.STL beside nothing — it IS part.stl there.
+  check(
+    "collisions are judged case-insensitively",
+    names[6] === "PART-4.STL",
+    names[6] ?? "",
+  )
+
+  const note = attachedFilesNote([
+    { path: "/tmp/aide-attach-x/part.stl", bytes: 133 * 1024 },
+    { path: "/tmp/aide-attach-x/notes.csv", bytes: 2 * 1024 * 1024 },
+  ])
+  check("the note names every path", note.includes("/tmp/aide-attach-x/part.stl"))
+  check("with a human-readable size", note.includes("(133 KB)") && note.includes("(2.0 MB)"))
+  check(
+    "and says the files are outside the repository",
+    note.includes("outside the repository"),
+    "or an agent spends a turn asking why the commit gate ignores them",
+  )
+
+  // The split is shared, not re-derived: web chips, the log event and the
+  // worker's routing all call this one predicate.
+  check("an image routes to a vision block", isImageAttachment({ mediaType: "image/png" }))
+  check(
+    "an untyped file routes to the agent's disk",
+    !isImageAttachment({ mediaType: "application/octet-stream" }),
+  )
 }
 

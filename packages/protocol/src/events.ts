@@ -40,6 +40,24 @@ export interface MessageImage {
 }
 
 /**
+ * A non-image file the human attached to a message.
+ *
+ * Carries its bytes as well as its name, for the same reason `MessageImage`
+ * carries them: a failed turn's "put it back" rebuilds the composer's
+ * attachments from this event, and a file restored without its data would
+ * silently resend a message that promised two files with neither. The name is
+ * what the transcript draws — the bytes went to the agent's disk, and a chip
+ * saying which file this was is the whole of what a reader needs.
+ */
+export interface MessageFile {
+  name: string
+  /** e.g. "application/octet-stream". */
+  mediaType: string
+  /** Base64, without the data: URL prefix. */
+  data: string
+}
+
+/**
  * What a worker emits. The daemon stamps runId/seq/ts on append, so workers never
  * have to know their own sequence number.
  */
@@ -182,9 +200,12 @@ export type RunEventBody =
    * transcript read as an agent talking to itself. A replayed conversation has
    * one per turn, and they are most of what makes it a conversation.
    *
-   * `images` is what was pasted alongside the text. Absent rather than empty
-   * when there were none: every transcript written before attachments existed
-   * is that case, and the reader has to keep working on them.
+   * `images` is what was pasted alongside the text, and `files` is everything
+   * attached that is not an image — those went to the agent as paths on its
+   * own disk, not as content blocks. Both are absent rather than empty when
+   * there were none: every transcript written before attachments (and then
+   * before files) existed is that case, and the reader has to keep working on
+   * them.
    *
    * `thinking` is written ONLY when the turn was sent with thinking off, and is
    * absent otherwise — so every log written before the toggle existed reads as
@@ -193,7 +214,13 @@ export type RunEventBody =
    * that thought. A profile that could not say which turns those were would make
    * the comparison it is being kept for impossible.
    */
-  | { type: "user.message"; text: string; images?: MessageImage[]; thinking?: boolean }
+  | {
+      type: "user.message"
+      text: string
+      images?: MessageImage[]
+      files?: MessageFile[]
+      thinking?: boolean
+    }
   /**
    * The API began an assistant message. Carries nothing to draw.
    *

@@ -405,7 +405,7 @@ export function ConversationPane({
     if (ended.type === "run.finished" && ended.status !== "failed") return null
     const asked = mine.find((e) => e.type === "user.message")
     if (asked?.type !== "user.message" || !asked.text.trim()) return null
-    return { text: asked.text, images: asked.images ?? [] }
+    return { text: asked.text, images: asked.images ?? [], files: asked.files ?? [] }
   }, [busy, runId, turnEvents])
 
   /**
@@ -424,13 +424,23 @@ export function ConversationPane({
       // (`mediaType`, `data`) and the composer additionally wants a key to
       // remove one by and a size to show. Dropping them instead would silently
       // resend a message that was half a sentence and a picture as half a
-      // sentence.
-      attachments: failedTurn.images.map((img, i) => ({
-        id: `resend-${i}`,
-        mediaType: img.mediaType,
-        data: img.data,
-        bytes: Math.floor((img.data.length * 3) / 4),
-      })),
+      // sentence. Files come back too — the event carries their bytes for
+      // exactly this moment.
+      attachments: [
+        ...failedTurn.images.map((img, i) => ({
+          id: `resend-${i}`,
+          mediaType: img.mediaType,
+          data: img.data,
+          bytes: Math.floor((img.data.length * 3) / 4),
+        })),
+        ...failedTurn.files.map((f, i) => ({
+          id: `resend-f${i}`,
+          mediaType: f.mediaType,
+          data: f.data,
+          bytes: Math.floor((f.data.length * 3) / 4),
+          name: f.name,
+        })),
+      ],
     })
   }
 

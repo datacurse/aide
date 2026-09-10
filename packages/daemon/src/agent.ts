@@ -10,9 +10,13 @@
  * and returns a string, the other sends no prompt at all and asks the session a
  * single control request, so neither ever sees a message union to normalize.
  */
+import { mkdtemp, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { query, type SDKUserMessage, type Settings } from "@anthropic-ai/claude-agent-sdk"
 import {
   SUMMARY_FENCE,
+  isImageAttachment,
   parseTurnSummary,
   type Attachment,
   type ChatMode,
@@ -31,6 +35,7 @@ import {
   SHELL_WRITE_COMMANDS,
   checkBashCommand,
 } from "./policy.js"
+import { attachedFilesNote, fileAttachmentNames } from "./attachment-files.js"
 
 export interface RunAgentOptions {
   runId: string
@@ -794,18 +799,42 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
   const request = composeRequest(opts.title, opts.prompt)
 
   // Images first, then the text. The Messages API takes either a bare string or
-  // an array of content blocks; a turn with no attachments keeps the string
-  // form, which is also what a replayed transcript shows for older sessions.
-  const userMessage = (text: string, attachments?: Attachment[]): SDKUserMessage => {
-    const content = attachments?.length
+  // an array of content blocks; a turn with no image attachments keeps the
+  // string form, which is also what a replayed transcript shows for older
+  // sessions.
+  //
+  // A non-image attachment has no block type to ride in, so it is written to a
+  // temp folder HERE — this code runs in the worker, which is on the machine
+  // that runs the agent, local fork and `aide-agent` over ssh alike — and the
+  // text names the paths. Deliberately never deleted at turn end: a follow-up
+  // saying "now fix that file" still needs the path to answer to, and the
+  // folder is the OS's own tmp.
+  const userMessage = async (text: string, attachments?: Attachment[]): Promise<SDKUserMessage> => {
+    const images = attachments?.filter(isImageAttachment) ?? []
+    const files = attachments?.filter((a) => !isImageAttachment(a)) ?? []
+    let body = text
+    if (files.length) {
+      const dir = await mkdtemp(join(tmpdir(), "aide-attach-"))
+      const names = fileAttachmentNames(files)
+      const placed = await Promise.all(
+        files.map(async (f, i) => {
+          const path = join(dir, names[i] ?? `file-${i + 1}`)
+          await writeFile(path, Buffer.from(f.data, "base64"))
+          return { path, bytes: f.bytes }
+        }),
+      )
+      const note = attachedFilesNote(placed)
+      body = body.trim() ? `${body}\n\n${note}` : note
+    }
+    const content = images.length
       ? [
-          ...attachments.map((a) => ({
+          ...images.map((a) => ({
             type: "image" as const,
             source: { type: "base64" as const, media_type: a.mediaType, data: a.data },
           })),
-          { type: "text" as const, text },
+          { type: "text" as const, text: body },
         ]
-      : text
+      : body
     return {
       type: "user",
       message: { role: "user", content },
@@ -882,7 +911,7 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
     // after is a turn that ran under the wrong setting.
     if (opts.thinking === false) await setThinking(false)
     opts.onTurnStart?.(opts.runId)
-    yield userMessage(request, opts.attachments)
+    yield await userMessage(request, opts.attachments)
     if (!opts.followUps) return
 
     for await (const turn of opts.followUps) {
@@ -908,7 +937,7 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
       // no terminal event at all.
       finished = false
       opts.onTurnStart?.(turn.runId)
-      yield userMessage(turn.text, turn.attachments)
+      yield await userMessage(turn.text, turn.attachments)
     }
   }
 

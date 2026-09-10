@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react"
-import { MAX_ATTACHMENT_BYTES, readAsAttachment } from "./attachments.js"
+import { MAX_ATTACHMENT_BYTES, collectAttachments } from "./attachments.js"
 import { useChatChoice, useChatDefaults } from "./chatSettings.js"
 import { readDraft, saveDraft, useDraft } from "./drafts.js"
-import { Lightning, Lock, X } from "./icons.js"
+import { File as FileGlyph, Lightning, Lock, Paperclip, X } from "./icons.js"
 import { LOCKED } from "./ui.js"
 import { TYPING_KEY } from "./typing.js"
 import { useAutoGrow } from "./useAutoGrow.js"
@@ -14,6 +14,7 @@ import {
   CHAT_MODE_LABEL,
   EFFORT_LEVELS,
   chatModelLabel,
+  isImageAttachment,
   resolveChatSettings,
   type Attachment,
   type ChatMode,
@@ -486,25 +487,57 @@ export function Composer({
     send()
   })
 
+  // Any file, not just images: an image goes to the model as a picture, and
+  // everything else is written onto the agent's own disk with its path in the
+  // message — the daemon draws that line, not this box.
   const takeFiles = async (files: FileList | File[]) => {
-    const images = [...files].filter((f) => f.type.startsWith("image/"))
-    if (images.length === 0) return
-    const tooBig = images.filter((f) => f.size > MAX_ATTACHMENT_BYTES)
-    if (tooBig.length) setNote(`${tooBig.length} image(s) over ${kb(MAX_ATTACHMENT_BYTES)} skipped`)
-    const read = await Promise.all(
-      images.filter((f) => f.size <= MAX_ATTACHMENT_BYTES).map(readAsAttachment),
-    )
-    const added = read.filter((a): a is Attachment => a !== null)
+    const { added, skipped } = await collectAttachments(files)
+    if (skipped) setNote(`${skipped} file(s) over ${kb(MAX_ATTACHMENT_BYTES)} skipped`)
     if (added.length === 0) return
     // Re-read the box rather than trusting what this closure captured: decoding
-    // is async, so anything typed — or a second image pasted — while it ran
+    // is async, so anything typed — or a second file dropped — while it ran
     // would be overwritten by the stale copy.
     const now = readDraft(draftKey)
     saveDraft(draftKey, { text: now.text, attachments: [...now.attachments, ...added] })
   }
 
+  /**
+   * Files land here from three doors — the clip button, a drop anywhere on the
+   * bar, and paste — and all three walk through `takeFiles` above.
+   *
+   * The drop handlers live on the wrapper rather than the textarea so the whole
+   * bar is the target: chips, controls and all, which is what a drag aimed at
+   * "the prompt box" actually hits. `dragOver` only flips for drags carrying
+   * files, or selecting text and waving it around would light the bar up over
+   * a drop this box would ignore.
+   */
+  const picker = useRef<HTMLInputElement>(null)
+  const [dragOver, setDragOver] = useState(false)
+
   return (
-    <div className="shrink-0 border-t border-line bg-chrome px-3 py-2">
+    <div
+      className={`shrink-0 border-t border-line bg-chrome px-3 py-2 ${
+        dragOver ? "outline-accent -outline-offset-2 outline-2 outline-dashed" : ""
+      }`}
+      onDragOver={(e) => {
+        if (!e.dataTransfer.types.includes("Files")) return
+        // preventDefault is what makes this a legal drop target at all — the
+        // highlight is just saying so out loud.
+        e.preventDefault()
+        setDragOver(true)
+      }}
+      onDragLeave={(e) => {
+        // Leaving for a child fires this too; only a real exit dims the bar.
+        if (e.currentTarget.contains(e.relatedTarget as Node | null)) return
+        setDragOver(false)
+      }}
+      onDrop={(e) => {
+        setDragOver(false)
+        if (!e.dataTransfer.files.length) return
+        e.preventDefault()
+        void takeFiles(e.dataTransfer.files)
+      }}
+    >
       {attachments.length > 0 && (
         <div className="mb-2 flex flex-wrap gap-1.5">
           {attachments.map((a) => (
@@ -512,12 +545,19 @@ export function Composer({
               key={a.id}
               className="flex items-center gap-1.5 rounded border border-line bg-input px-1.5 py-0.5 font-sans text-[11px] text-fg-muted"
             >
-              <img
-                src={`data:${a.mediaType};base64,${a.data}`}
-                alt=""
-                className="size-4 rounded-sm object-cover"
-              />
-              {a.mediaType.replace("image/", "")} {kb(a.bytes)}
+              {isImageAttachment(a) ? (
+                <img
+                  src={`data:${a.mediaType};base64,${a.data}`}
+                  alt=""
+                  className="size-4 rounded-sm object-cover"
+                />
+              ) : (
+                <FileGlyph className="size-3.5 shrink-0 text-fg-dim" />
+              )}
+              <span className="max-w-48 truncate">
+                {a.name ?? a.mediaType.replace("image/", "")}
+              </span>
+              {kb(a.bytes)}
               <button
                 type="button"
                 onClick={() => edit({ attachments: attachments.filter((x) => x.id !== a.id) })}
@@ -535,19 +575,15 @@ export function Composer({
         ref={area}
         value={text}
         onChange={(e) => edit({ text: e.target.value })}
-        // Paste is the whole point of the attachment feature: a screenshot goes
-        // straight from the clipboard into the turn, no file dialog.
+        // Paste is the shortest path for a screenshot — clipboard straight into
+        // the turn, no file dialog — and a file copied in the OS shell pastes
+        // the same way. Drops are handled by the wrapper, whose dragOver made
+        // them legal here in the first place.
         onPaste={(e) => {
           const files = [...e.clipboardData.files]
-          if (files.some((f) => f.type.startsWith("image/"))) {
+          if (files.length) {
             e.preventDefault()
             void takeFiles(files)
-          }
-        }}
-        onDrop={(e) => {
-          if (e.dataTransfer.files.length) {
-            e.preventDefault()
-            void takeFiles(e.dataTransfer.files)
           }
         }}
         onKeyDown={(e) => {
@@ -572,7 +608,7 @@ export function Composer({
             ? "Claude is working…"
             : blocked
               ? "Held — the line below says why."
-              : "Ask, or paste a screenshot"
+              : "Ask, paste a screenshot, or drop files in"
         }
         className="w-full resize-none rounded border border-line-soft bg-input px-2 py-1.5 font-sans text-[13px] leading-relaxed outline-none placeholder:text-fg-dim focus:border-accent"
       />
@@ -581,6 +617,29 @@ export function Composer({
       {note && <p className="mt-1 font-sans text-[11px] text-warn">{note}</p>}
 
       <div className="mt-1.5 flex items-center gap-3">
+        {/* The clip. The input is the machinery, the button is the furniture —
+            a bare file input draws its own filename label, which this bar has
+            chips for. Its value is cleared after every pick so choosing the
+            same file twice fires onChange twice; the FileList is copied first
+            because clearing the input empties the live list it handed over. */}
+        <input
+          ref={picker}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={(e) => {
+            if (e.target.files?.length) void takeFiles([...e.target.files])
+            e.target.value = ""
+          }}
+        />
+        <button
+          type="button"
+          onClick={() => picker.current?.click()}
+          title="Attach files — or drop them anywhere on this bar"
+          className="rounded p-1 text-fg-muted hover:bg-hover hover:text-fg"
+        >
+          <Paperclip className="size-3.5" />
+        </button>
         <ModePicker
           mode={mode}
           effort={effort}

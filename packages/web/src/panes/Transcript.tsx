@@ -3,6 +3,7 @@ import {
   foldRows,
   stripPartialTurnSummary,
   stripTurnSummary,
+  type MessageFile,
   type MessageImage,
   type RunEvent,
   type RunStatus,
@@ -134,6 +135,7 @@ interface UserLine {
   key: string
   text: string
   images: MessageImage[]
+  files: MessageFile[]
 }
 /**
  * One step of a commit.
@@ -405,7 +407,13 @@ function toLines(events: RunEvent[], live?: LiveText | null): Line[] {
   for (const e of events) {
     switch (e.type) {
       case "user.message":
-        lines.push({ kind: "user", key: rowKey(e), text: e.text, images: e.images ?? [] })
+        lines.push({
+          kind: "user",
+          key: rowKey(e),
+          text: e.text,
+          images: e.images ?? [],
+          files: e.files ?? [],
+        })
         break
       case "assistant.text":
         lines.push({
@@ -1010,6 +1018,21 @@ function UserRow({ line }: { line: UserLine }) {
                 className={`w-auto rounded-sm border border-line ${zoom ? "max-h-80" : "h-12"}`}
               />
             </button>
+          ))}
+        </div>
+      )}
+      {/* Files show as named chips, not pictures: their bytes went to a folder
+          on the agent's machine, and which file it was is the whole answer a
+          reader needs here. */}
+      {line.files.length > 0 && (
+        <div className="mb-1.5 flex flex-wrap gap-1.5">
+          {line.files.map((f, i) => (
+            <span
+              key={i}
+              className="inline-flex items-center gap-1 rounded border border-line bg-input px-1.5 py-0.5 font-sans text-[11px] text-fg-muted"
+            >
+              {f.name}
+            </span>
           ))}
         </div>
       )}

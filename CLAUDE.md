@@ -98,8 +98,8 @@ Decisions already taken, which are not gaps to fill:
   static import is hoisted and its output would print above `repo: <path>` — the
   run would still be correct and would read as though the sections had been
   shuffled. When changing any of this, the check that matters is that the
-  assertion count does not fall: `pnpm smoke` prints 734 `ok` lines as of
-  2026-09-09, and a refactor that quietly drops some is the failure this number
+  assertion count does not fall: `pnpm smoke` prints 746 `ok` lines as of
+  2026-09-10, and a refactor that quietly drops some is the failure this number
   exists to catch.
   It fell once on purpose — the card view was removed and took ~30 of its own
   assertions with it, leaving the ten that cover `currentActivity`, which
@@ -133,8 +133,24 @@ Decisions already taken, which are not gaps to fill:
   `Conversations.tsx` floors to `<$0.01`, because rounding a real spend to
   `$0.00` says the work was free, which the brief forbids of any cost figure.
   Merging them would silently undo whichever two lost.
-- **No worktrees and no branches.** Every run works the project's own checkout,
-  one at a time. See the brief for why.
+- **An attachment is any file, and only images ride the API.** The composer and
+  the capture box take arbitrary files — clip button, drop, paste — and
+  `isImageAttachment` in protocol is the one split, shared so the web's chips,
+  the log event and the worker's routing cannot each draw the line differently.
+  An image goes to the model as a vision block, exactly as before; everything
+  else is written by the WORKER into a temp folder on the machine that runs the
+  agent — for a remote project that is the far machine, the only place a path
+  in the message can be true — and the message text names the paths
+  (`attachment-files.ts`, whose note says the files are outside the repository
+  so an agent does not spend a turn asking why the commit gate ignores them).
+  The folder is deliberately not cleaned at turn end: a follow-up saying "now
+  fix that file" still needs the path to answer to, and it is the OS's own tmp.
+  The `user.message` event carries non-images under `files` WITH their bytes,
+  because a failed turn's "put it back" rebuilds the composer's attachments
+  from that event — restored without data, it would silently resend a message
+  that promised two files with neither. `pnpm smoke` pins the two halves that
+  fail quietly: a filename that collides or escapes the folder, and a note that
+  lists the wrong paths.
 - **No merge, no `land`.** Recoverability is the checkpoint, not an unmerged
   branch.
 - **A history list, but no repository browser.** The uncommitted rail's lower

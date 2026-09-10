@@ -1,15 +1,16 @@
 import { randomUUID } from "node:crypto"
 import { fileURLToPath } from "node:url"
-import type {
-  Attachment,
-  ChatMode,
-  EffortLevel,
-  ModelSpend,
-  Project,
-  ProjectDoc,
-  RunDelta,
-  RunEventBody,
-  RunStatus,
+import {
+  isImageAttachment,
+  type Attachment,
+  type ChatMode,
+  type EffortLevel,
+  type ModelSpend,
+  type Project,
+  type ProjectDoc,
+  type RunDelta,
+  type RunEventBody,
+  type RunStatus,
 } from "@aide/protocol"
 import { sshConfigPath } from "@aide/protocol/node"
 import type { FollowUpTurn, RunAgentOptions } from "./agent.js"
@@ -610,13 +611,24 @@ export class ChatLane implements LiveChats {
     // pasted screenshots go in with them: a message that is half a sentence
     // and a picture reads as half a sentence without them, and the session
     // file that will hold the other copy does not exist yet at this point.
-    const images = opts.attachments.map((a) => ({ mediaType: a.mediaType, data: a.data }))
+    // Non-image files ride the same event under their own key — the transcript
+    // draws a named chip for those rather than an <img> of undrawable bytes.
+    const images = opts.attachments
+      .filter(isImageAttachment)
+      .map((a) => ({ mediaType: a.mediaType, data: a.data }))
+    const files = opts.attachments
+      .filter((a) => !isImageAttachment(a))
+      // The same fallback numbering the worker's `fileAttachmentNames` uses
+      // over the same subset, so the chip and the path agree on what a
+      // nameless file is called.
+      .map((a, i) => ({ name: a.name ?? `file-${i + 1}`, mediaType: a.mediaType, data: a.data }))
     this.log.append(runId, {
       type: "user.message",
       text: opts.text,
-      // Omitted rather than empty, so a turn with no screenshots logs the same
+      // Omitted rather than empty, so a turn with no attachments logs the same
       // line it always did.
       ...(images.length ? { images } : {}),
+      ...(files.length ? { files } : {}),
       // Written only when thinking was OFF, for the same reason: every log in
       // `~/.aide/runs` predates the toggle, and a turn that says nothing about
       // thinking is a turn that thought. This is the only record of it — the

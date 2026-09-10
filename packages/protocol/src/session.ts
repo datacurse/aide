@@ -14,8 +14,13 @@
  * be importable without starting an agent.
  *
  * Bump whenever those message types change shape.
+ *
+ * v2: `Attachment` grew `name` and non-image attachments became files on the
+ * agent's disk. An old agent handed one would put its bytes in an image block,
+ * which the API refuses — a turn that fails mid-flight instead of a mismatch
+ * named up front.
  */
-export const AGENT_PROTOCOL = 1
+export const AGENT_PROTOCOL = 2
 
 /**
  * Conversations.
@@ -152,21 +157,38 @@ export const chatModelLabel = (id: string): string =>
   CHAT_MODELS.find((m) => m.id === id)?.label ?? id
 
 /**
- * An image pasted into the composer.
+ * A file attached in the composer — a pasted screenshot, or anything picked
+ * from the clip button or dropped onto the box.
  *
- * Carried as base64 rather than written to disk: it belongs to one turn, the
- * Messages API wants base64 anyway, and a file on disk would be one more thing
- * to clean up when the turn is cancelled.
+ * Carried as base64 rather than written to disk HERE: it belongs to one turn,
+ * and for an image the Messages API wants base64 anyway. An image rides the
+ * message as a vision block; anything else has no block type to ride in, so
+ * the worker writes it to a temp folder on the machine that RUNS the agent —
+ * which for a remote project is the far machine, where a path written by the
+ * browser's machine would name nothing — and the message text carries the
+ * path. `isImageAttachment` is the split, shared so the web's chips, the log's
+ * event and the worker's routing cannot each draw the line differently.
  */
 export interface Attachment {
   /** Stable only within the composer, for removing one before sending. */
   id: string
-  /** e.g. "image/png". */
+  /** e.g. "image/png". "application/octet-stream" when the browser cannot tell. */
   mediaType: string
   /** Base64, without the data: URL prefix. */
   data: string
   bytes: number
+  /**
+   * The filename, when there was one. A picked or dropped file's is the handle
+   * the human knows it by and the name it gets on the agent's disk; a pasted
+   * screenshot's is browser noise. Optional because every draft saved before
+   * non-image files existed has none.
+   */
+  name?: string
 }
+
+/** Which side of the wire an attachment takes: a vision block, or a file on the agent's disk. */
+export const isImageAttachment = (a: { mediaType: string }): boolean =>
+  a.mediaType.startsWith("image/")
 
 /** How full the model's context is, as of the end of a turn. */
 export interface ContextUsage {
