@@ -98,6 +98,63 @@ const dedent = (code: string, by: number): string =>
 
 const str = (o: Record<string, unknown>, key: string): string | null =>
   typeof o[key] === "string" ? (o[key] as string) : null
+
+/** The daemon's cut marker — `clip` in agent.ts writes `…N chars…` on its own line. */
+const ELISION = /^…\d+ chars…$/
+
+/**
+ * Which colour a line of shell output would have worn in a real terminal.
+ * By line SHAPE, not content analysis — a `$ ` echo, a leading check mark
+ * (`√` included: Windows consoles transliterate `✓`), an error or warning
+ * word — so a wrong tint is possible but cheap, and the text stays the text.
+ */
+function shellTone(line: string): string | null {
+  if (/^\s*\$\s/.test(line)) return "text-fg"
+  if (/^\s*(✓|✔|√|ok\b|PASS\b|passed\b)/i.test(line)) return "text-ok"
+  if (/\b(error|failed|FAIL|ERR!)\b/i.test(line)) return "text-err"
+  if (/\bwarn(ing)?\b/i.test(line)) return "text-warn"
+  return null
+}
+
+/**
+ * Shell output, read the way a terminal would have shown it.
+ *
+ * The commands run headless, so the ANSI colour they would print in a live
+ * terminal is stripped before anything is recorded — this puts that reading
+ * back. Success rows green, failures red, warnings amber, command echoes
+ * bright, everything else muted; and the elision marker draws as a rule
+ * across the box rather than as three mystery words inside the output it
+ * cut. The tones are a reading aid over recorded text, never a verdict —
+ * the call's own ok/err stays the header's dot.
+ */
+function ShellOutput({ text, clamp }: { text: string; clamp: string }) {
+  return (
+    <pre className={`${PRE} ${clamp} bg-editor`}>
+      {text.split("\n").map((line, i) => {
+        if (ELISION.test(line.trim())) {
+          return (
+            <span
+              key={i}
+              className="flex items-center gap-2 py-0.5 text-[10px] text-fg-dim select-none"
+            >
+              <span className="h-px flex-1 bg-line" />
+              {line.trim()}
+              <span className="h-px flex-1 bg-line" />
+            </span>
+          )
+        }
+        const tone = shellTone(line)
+        return tone === null ? (
+          `${line}\n`
+        ) : (
+          <span key={i} className={tone}>
+            {`${line}\n`}
+          </span>
+        )
+      })}
+    </pre>
+  )
+}
 const num = (o: Record<string, unknown>, key: string): number | null =>
   typeof o[key] === "number" ? (o[key] as number) : null
 
@@ -268,11 +325,14 @@ export function CallBlocks({ call }: { call: CallDetailData }) {
       {call.summary !== "" && (
         <Labeled label="result">
           {/* A Read's result IS file content, so it reads in that file's
-              colours. Every other tool's result is output, and stays plain
-              — colouring a stack trace as TypeScript would be decoration
+              colours, and a Bash result reads like the terminal it never got
+              (`ShellOutput`). Every other tool's result stays plain —
+              colouring a stack trace as TypeScript would be decoration
               claiming to be meaning. */}
           {call.name === "Read" ? (
             <pre className={`${CODE} ${clamp}`}>{highlightCode(call.summary, langOfPath(call.target))}</pre>
+          ) : call.name === "Bash" ? (
+            <ShellOutput text={call.summary} clamp={clamp} />
           ) : (
             <pre className={`${PRE} ${clamp} bg-editor`}>{call.summary}</pre>
           )}
