@@ -22,6 +22,7 @@ import { Button, Empty, LOCKED, SELECTED } from "../ui.js"
 import { useKeyed } from "../useKeyed.js"
 import { useAutoGrow } from "../useAutoGrow.js"
 import { useRemembered } from "../useRemembered.js"
+import { OverlayScroller } from "../OverlayScroller.js"
 
 /**
  * The list of a project's conversations, and the rows in it.
@@ -1246,11 +1247,12 @@ export function ConversationList({
       {error && (
         <p className="border-b border-line px-3 py-1.5 font-sans text-[11px] text-err">{error}</p>
       )}
-      {/* The gutter is reserved whether or not there is enough to scroll:
-          folding the archived group usually takes the scrollbar with it, and
-          without this every row got 10px wider on the press — the whole list
-          shifted for a control that promised to only hide some rows. */}
-      <div className="flex-1 overflow-auto py-1 [scrollbar-gutter:stable]">
+      {/* Overlaid rather than native, because folding the archived group
+          usually takes the scrollbar with it: with a classic bar every row got
+          10px wider on the press, and reserving the gutter instead left a
+          permanent stripe of nothing. The rows are full width either way now,
+          and the bar floats over them only while there is something to scroll. */}
+      <OverlayScroller className="flex-1" contentClassName="py-1">
         {items === null && rows.length === 0 && <Empty>Reading the session store…</Empty>}
         {items !== null && rows.length === 0 && (
           <Empty>
@@ -1271,7 +1273,7 @@ export function ConversationList({
           />
         )}
         {!hideArchived && archived.map(render)}
-      </div>
+      </OverlayScroller>
     </div>
   )
 }
