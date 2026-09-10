@@ -1,4 +1,11 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react"
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from "react"
 import {
   buildTimeline,
   isRefusal,
@@ -165,7 +172,12 @@ function Dot({
         data-dotid={call.id}
         aria-label={`${call.tool} ${call.target}, message ${call.message}, ${state}`}
         title={`${call.tool} ${call.target}`.trim()}
-        onClick={onPick}
+        // No `onClick`: the CELL handles clicks, so a press on the dot bubbles
+        // up and lands on the same nearest-call path as a press beside it. Two
+        // click handlers for one dot would be two answers to one question, and
+        // the inner one would silently win. The keyboard keeps its own — a
+        // keypress has no coordinates for the cell to be nearest to, and this
+        // is how the grid is reachable without a mouse.
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault()
@@ -395,6 +407,44 @@ export function ToolTimeline({
   const callsIn = (m: number) => t.rows.reduce((n, r) => n + (cells.grid.get(r.key)?.get(m)?.length ?? 0), 0)
 
   const pick = (c: TimelineCall) => onSelect?.(selected === c.id ? null : c.id)
+
+  /**
+   * A click anywhere in a cell selects the call nearest the pointer.
+   *
+   * The cell is the target rather than the dot because a 15px dot on a 24px×24px
+   * cell leaves most of the row unclickable, and the empty part is not ambiguous:
+   * one row is one file and one column is one message, so there is only one thing
+   * a click in that space can mean. With several calls in one message the nearest
+   * wins, which puts the boundary exactly at the midpoint between neighbours.
+   *
+   * Measured off the rendered dots (`data-dotid`) rather than recomputed from
+   * DOT/GAP and the column width. That arithmetic already exists twice — once
+   * for the flex layout the browser performs, once for the connector's x
+   * positions — and a third copy deciding what you clicked would be the one that
+   * disagrees after a padding change, silently selecting the neighbour. One call
+   * in the cell skips the measuring entirely, which is nearly every cell.
+   */
+  const pickNearest = (e: ReactMouseEvent<HTMLTableCellElement>, cs: TimelineCall[]) => {
+    const only = cs[0]
+    if (!only) return
+    if (cs.length === 1) {
+      pick(only)
+      return
+    }
+    let best = only
+    let bestDist = Infinity
+    for (const c of cs) {
+      const el = e.currentTarget.querySelector(`[data-dotid="${CSS.escape(c.id)}"]`)
+      if (!el) continue
+      const r = el.getBoundingClientRect()
+      const d = Math.abs(e.clientX - (r.left + r.width / 2))
+      if (d < bestDist) {
+        bestDist = d
+        best = c
+      }
+    }
+    pick(best)
+  }
 
   return (
     <div className="my-1">
@@ -633,9 +683,20 @@ export function ToolTimeline({
                         style={{ width: cells.widths.get(m), minWidth: cells.widths.get(m) }}
                         onMouseEnter={() => setHover(m)}
                         onMouseLeave={() => setHover(null)}
-                        className={`relative h-6 p-0 ${recovery.has(m) ? "bg-warn/10" : ""} ${
-                          hover === m ? "bg-hover" : ""
-                        }`}
+                        // The whole CELL selects, not just the 15px dot in it.
+                        // A dot is a small target on a row that is mostly empty
+                        // space, and the empty space is unambiguous — this row
+                        // is one file, this column is one message, so a click
+                        // anywhere in the cell can only mean the call sitting
+                        // there. With several calls side by side the nearest
+                        // one wins, which splits the cell at the midpoint
+                        // between neighbours. `onPickAt` is undefined for an
+                        // empty cell, so those stay inert rather than becoming
+                        // a click target that does nothing.
+                        onClick={cs.length > 0 ? (e) => pickNearest(e, cs) : undefined}
+                        className={`relative h-6 p-0 ${cs.length > 0 ? "cursor-pointer" : ""} ${
+                          recovery.has(m) ? "bg-warn/10" : ""
+                        } ${hover === m ? "bg-hover" : ""}`}
                       >
                         {/* Keyed by row INDEX as well as column: gradient ids
                             are document-global, and every row in this column
