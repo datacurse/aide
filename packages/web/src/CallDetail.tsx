@@ -1,6 +1,18 @@
 import type { ReactNode } from "react"
 import { highlightCode, langOfPath } from "./highlight.js"
 import { X } from "./icons.js"
+import { useRemembered } from "./useRemembered.js"
+
+/**
+ * Whether a card's code and result blocks render WHOLE or clamp to a scroll
+ * box. Expanded by default: a card you opened to read is a card you meant to
+ * read, and a scrollbar three lines in was the wall the card existed to
+ * remove. Global, like the typing toggle — a reading preference, not a
+ * property of any chat — and edited from `settings` in the rail's foot.
+ */
+export const CARD_EXPAND_KEY = "aide.card.expand"
+
+const isBool = (v: unknown): v is boolean => typeof v === "boolean"
 
 /**
  * One tool call, structured — the card a clicked timeline dot opens.
@@ -31,11 +43,11 @@ export interface CallDetailData {
 }
 
 const PRE =
-  "max-h-48 overflow-auto rounded-sm p-2 text-[11px] leading-relaxed whitespace-pre-wrap text-fg-muted"
+  "overflow-auto rounded-sm p-2 text-[11px] leading-relaxed whitespace-pre-wrap text-fg-muted"
 
 /** Code blocks read in the editor's default fg, with the tokens coloured over it. */
 const CODE =
-  "max-h-48 overflow-auto rounded-sm bg-editor p-2 text-[11px] leading-relaxed whitespace-pre-wrap text-fg"
+  "overflow-auto rounded-sm bg-editor p-2 text-[11px] leading-relaxed whitespace-pre-wrap text-fg"
 
 function Labeled({
   label,
@@ -92,7 +104,7 @@ const num = (o: Record<string, unknown>, key: string): number | null =>
 /** The search knobs worth surfacing — the half of a Grep a JSON dump buries. */
 const SEARCH_FLAGS = ["path", "glob", "type", "output_mode", "-n", "-i", "-A", "-B", "-C"] as const
 
-function Body({ call }: { call: CallDetailData }) {
+function Body({ call, clamp }: { call: CallDetailData; clamp: string }) {
   if (call.input === null) {
     return <p className="font-sans text-[11px] text-fg-dim">arguments still streaming…</p>
   }
@@ -116,12 +128,12 @@ function Body({ call }: { call: CallDetailData }) {
             change itself was the hard thing to read. */}
         <div className="grid grid-cols-2 gap-1.5">
           <Labeled label="old" tone="text-diff-del-fg">
-            <pre className={`${CODE} border-l-2 border-diff-del-fg/70`}>
+            <pre className={`${CODE} ${clamp} border-l-2 border-diff-del-fg/70`}>
               {highlightCode(dedent(oldS, cut), lang)}
             </pre>
           </Labeled>
           <Labeled label="new" tone="text-diff-add-fg">
-            <pre className={`${CODE} border-l-2 border-diff-add-fg/70`}>
+            <pre className={`${CODE} border-l-2 border-diff-add-fg/70 ${clamp}`}>
               {highlightCode(dedent(newS, cut), lang)}
             </pre>
           </Labeled>
@@ -133,7 +145,7 @@ function Body({ call }: { call: CallDetailData }) {
     return (
       // The add border whole: a Write is all arrival, whatever it replaced.
       <Labeled label="content" tone="text-diff-add-fg">
-        <pre className={`${CODE} border-l-2 border-diff-add-fg/70`}>
+        <pre className={`${CODE} border-l-2 border-diff-add-fg/70 ${clamp}`}>
           {highlightCode(str(o, "content") ?? "", lang)}
         </pre>
       </Labeled>
@@ -143,7 +155,7 @@ function Body({ call }: { call: CallDetailData }) {
     return (
       // The header truncates a long command; this is the whole of it.
       <Labeled label="command">
-        <pre className={CODE}>{highlightCode(str(o, "command") ?? "", "sh")}</pre>
+        <pre className={`${CODE} ${clamp}`}>{highlightCode(str(o, "command") ?? "", "sh")}</pre>
       </Labeled>
     )
   }
@@ -167,7 +179,7 @@ function Body({ call }: { call: CallDetailData }) {
     return (
       <>
         <Labeled label="pattern">
-          <pre className={`${PRE} bg-editor text-syn-string`}>{str(o, "pattern") ?? ""}</pre>
+          <pre className={`${PRE} ${clamp} bg-editor text-syn-string`}>{str(o, "pattern") ?? ""}</pre>
         </Labeled>
         {flags.length > 0 && (
           <div className="flex flex-wrap gap-1">
@@ -183,7 +195,7 @@ function Body({ call }: { call: CallDetailData }) {
   }
   return (
     <Labeled label="arguments">
-      <pre className={CODE}>{highlightCode(JSON.stringify(call.input, null, 2), "json")}</pre>
+      <pre className={`${CODE} ${clamp}`}>{highlightCode(JSON.stringify(call.input, null, 2), "json")}</pre>
     </Labeled>
   )
 }
@@ -198,6 +210,8 @@ export function CallDetail({
   duration: string | null
   onClose: () => void
 }) {
+  const [expand] = useRemembered<boolean>(CARD_EXPAND_KEY, true, isBool)
+  const clamp = expand ? "" : "max-h-48"
   return (
     // The commit fold's box: bordered, because like a commit this is neither
     // the model talking nor a row in the flow — it is an inspection the reader
@@ -233,7 +247,7 @@ export function CallDetail({
         </button>
       </div>
       <div className="space-y-1.5 px-2 py-1.5">
-        <Body call={call} />
+        <Body call={call} clamp={clamp} />
         {call.summary !== "" && (
           <Labeled label="result">
             {/* A Read's result IS file content, so it reads in that file's
@@ -241,9 +255,9 @@ export function CallDetail({
                 — colouring a stack trace as TypeScript would be decoration
                 claiming to be meaning. */}
             {call.name === "Read" ? (
-              <pre className={CODE}>{highlightCode(call.summary, langOfPath(call.target))}</pre>
+              <pre className={`${CODE} ${clamp}`}>{highlightCode(call.summary, langOfPath(call.target))}</pre>
             ) : (
-              <pre className={`${PRE} bg-editor`}>{call.summary}</pre>
+              <pre className={`${PRE} ${clamp} bg-editor`}>{call.summary}</pre>
             )}
           </Labeled>
         )}

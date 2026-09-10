@@ -5,8 +5,12 @@ import {
   CHAT_MODE_LABEL,
   EFFORT_LEVELS,
 } from "@aide/protocol"
+import { CARD_EXPAND_KEY } from "./CallDetail.js"
 import { useChatDefaults } from "./chatSettings.js"
 import { useClickAway } from "./useClickAway.js"
+import { useRemembered } from "./useRemembered.js"
+
+const isBool = (v: unknown): v is boolean => typeof v === "boolean"
 
 /**
  * The defaults every chat starts on: mode, model, effort, thinking.
@@ -26,6 +30,7 @@ export function SettingsButton() {
   const [open, setOpen] = useState(false)
   const box = useClickAway(open, () => setOpen(false))
   const [defaults, patch] = useChatDefaults()
+  const [expand, setExpand] = useRemembered<boolean>(CARD_EXPAND_KEY, true, isBool)
 
   return (
     <div ref={box} className="relative">
@@ -97,6 +102,28 @@ export function SettingsButton() {
           <p className="border-t border-line px-3 py-1.5 text-[11px] leading-relaxed text-fg-dim">
             A control changed in a chat&rsquo;s own bar wins for that chat, and that chat only.
           </p>
+          {/* Below the chat defaults and their footer, because it is not one
+              of them: how a call card shows long code is a reading
+              preference, global like the typing toggle, and no chat
+              overrides it. */}
+          <div className="border-t border-line px-3 py-1.5">
+            <Row name="cards">
+              <Pill
+                on={expand}
+                title="A clicked call's card shows its code and result whole, however long"
+                onClick={() => setExpand(true)}
+              >
+                whole
+              </Pill>
+              <Pill
+                on={!expand}
+                title="Long code and results clamp to a scroll box inside the card"
+                onClick={() => setExpand(false)}
+              >
+                clamped
+              </Pill>
+            </Row>
+          </div>
         </div>
       )}
     </div>
