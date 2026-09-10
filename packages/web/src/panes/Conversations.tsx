@@ -83,19 +83,8 @@ function when(ms: number): string {
   return `${days}d ago`
 }
 
-/**
- * The same moment in full, for a hover. Locale-formatted, unlike the row: a
- * tooltip has no column to keep straight, so the reader's own format wins.
- */
-const fullDate = (ms: number) => new Date(ms).toLocaleString()
-
-/** Token counts, short enough for a tooltip: 940, 12.4k, 3.20M. */
-const compact = (n: number): string =>
-  n < 1000
-    ? String(n)
-    : n < 1_000_000
-      ? `${(n / 1000).toFixed(1)}k`
-      : `${(n / 1_000_000).toFixed(2)}M`
+/* `fullDate` and `compact` lived here, formatting the full timestamp and the
+ * token count for the row hovers. Both went with those hints — see `ChatRow`. */
 
 /** Coarse on purpose: a row is read at a glance, and 4m 12s is two facts. */
 function dur(ms: number): string {
@@ -109,8 +98,8 @@ function dur(ms: number): string {
  * Two decimals, and a floor rather than `$0.00`.
  *
  * Rounding a real spend down to nothing reads as "this was free", which is the
- * one thing a cost figure must never say — the same reason the whole line is
- * captioned as an estimate.
+ * one thing a cost figure must never say — the same reason the column is
+ * captioned `$ est.` in the order line above it.
  */
 const money = (usd: number) => (usd > 0 && usd < 0.01 ? "<$0.01" : `$${usd.toFixed(2)}`)
 
@@ -179,44 +168,36 @@ function UnstartedRow({
         selected ? `${SELECTED} text-fg` : "border-transparent text-fg-muted"
       }`}
     >
-      {/* What was actually parked, in full. The line above is a name a model
-          wrote once the request outgrew the column, so without this there is no
-          way to check it against your own words short of opening the chat. */}
-      <Hint hint={said || undefined}>
-        <button
-          type="button"
-          onClick={onOpen}
-          className="flex min-w-0 flex-1 flex-col gap-0.5 pr-1.5 text-left"
-        >
-          <span className="truncate text-[13px]">{preview || "New chat"}</span>
-          <div className="flex items-baseline gap-2 text-[10px] tabular-nums text-fg-dim">
-            {/* First in the line, the column a started chat puts its own time in —
-                a parked chat is the same list at an earlier age, and a date that
-                moves between the two would be a date you have to hunt for. Which
-                date follows the sort, for the same reason `born` gives: printing
-                one and ordering by the other reads as a broken sort. */}
-            <Hint
-              hint={
-                draft.updatedAt !== draft.createdAt
-                  ? `Parked ${fullDate(draft.createdAt)}\nLast edited ${fullDate(draft.updatedAt)}`
-                  : `Parked ${fullDate(draft.createdAt)}`
-              }
-            >
-              <span>{when(order === "activity" ? draft.updatedAt : draft.createdAt)}</span>
-            </Hint>
-            {/* The same lie as the blank title, in the line underneath: a chat
-                whose first turn is in flight has plainly been sent. It says so
-                until the handoff lands and this row becomes the conversation,
-                which is where the run mark takes over. */}
-            <span>{starting ? "starting…" : "not sent yet"}</span>
-            {draft.attachments.length > 0 && (
-              <span>
-                {draft.attachments.length} image{draft.attachments.length > 1 ? "s" : ""}
-              </span>
-            )}
-          </div>
-        </button>
-      </Hint>
+      {/* No hint on the row, deliberately — see the note above `ChatRow`. What
+          was parked used to hang off this as a `title`, and as a drawn box it
+          is the worst offender in the list: the parked text is a paragraph, so
+          it opens tall enough to cover several rows while you are reading past
+          it. Opening the chat is what shows you your own words. */}
+      <button
+        type="button"
+        onClick={onOpen}
+        className="flex min-w-0 flex-1 flex-col gap-0.5 pr-1.5 text-left"
+      >
+        <span className="truncate text-[13px]">{preview || "New chat"}</span>
+        <div className="flex items-baseline gap-2 text-[10px] tabular-nums text-fg-dim">
+          {/* First in the line, the column a started chat puts its own time in —
+              a parked chat is the same list at an earlier age, and a date that
+              moves between the two would be a date you have to hunt for. Which
+              date follows the sort, for the same reason `born` gives: printing
+              one and ordering by the other reads as a broken sort. */}
+          <span>{when(order === "activity" ? draft.updatedAt : draft.createdAt)}</span>
+          {/* The same lie as the blank title, in the line underneath: a chat
+              whose first turn is in flight has plainly been sent. It says so
+              until the handoff lands and this row becomes the conversation,
+              which is where the run mark takes over. */}
+          <span>{starting ? "starting…" : "not sent yet"}</span>
+          {draft.attachments.length > 0 && (
+            <span>
+              {draft.attachments.length} image{draft.attachments.length > 1 ? "s" : ""}
+            </span>
+          )}
+        </div>
+      </button>
       <Hint hint="Discard this chat">
         <button
           type="button"
@@ -609,15 +590,21 @@ function DoneCheck({
   ranLast: boolean
   onToggle: () => void
 }) {
+  // The one hint left in this list, and it earns it: an unlabelled square whose
+  // four states are drawn in colour alone. Kept to a SINGLE short line — the
+  // paragraph version opened a box tall enough to cover the rows above it,
+  // which is what got every other hint in this pane removed. See `ChatRow`.
   return (
     <Hint
       hint={
         working
           ? HAS_THE_REPO(heldSince)
           : ranLast
-            ? `The most recent run in this project happened here — the row you probably want next.\n\n${done ? "Served its purpose. Click to reopen it." : "Click to mark this chat done."}`
+            ? done
+              ? "Ran last here. Click to reopen"
+              : "Ran last here. Click to mark done"
             : done
-              ? "Served its purpose. Click to reopen it."
+              ? "Click to reopen"
               : "Mark this chat done"
       }
     >
@@ -703,25 +690,20 @@ function GroupLabel({
     ruled ? "mt-1 border-t border-line" : ""
   }`
   if (!onToggle) return <div className={base}>{line}</div>
+  // No hint: the heading already spells its own action as `show` / `hide` at
+  // the end of the row, so a box saying the same thing is a box over the list
+  // for nothing. See the note above `ChatRow`.
   return (
-    <Hint
-      hint={
-        folded
-          ? `${count} archived chat${count === 1 ? "" : "s"} hidden. Click to show them.`
-          : "Hide the archived chats. The heading and the count stay."
-      }
+    <button
+      type="button"
+      onClick={onToggle}
+      className={`${base} w-full text-left hover:text-fg-muted`}
     >
-      <button
-        type="button"
-        onClick={onToggle}
-        className={`${base} w-full text-left hover:text-fg-muted`}
-      >
-        {line}
-        <span className="ml-auto font-normal normal-case tracking-normal">
-          {folded ? "show" : "hide"}
-        </span>
-      </button>
-    </Hint>
+      {line}
+      <span className="ml-auto font-normal normal-case tracking-normal">
+        {folded ? "show" : "hide"}
+      </span>
+    </button>
   )
 }
 
@@ -770,6 +752,13 @@ function OrderPicker({
         "activity",
         "Most recently spoken-to first. The chat that just answered is the top row — and rows move when you speak to them.",
       )}
+      {/* The brief's rule: anything showing a cost figure has to say what kind
+          of number it is. Every `$` in the list below is one, and this used to
+          be said in a hint ON the figure — which is exactly the kind of box
+          that got hints removed from these rows. Said once, up here, where it
+          is readable without covering anything and applies to the whole
+          column. */}
+      <span className="ml-auto font-normal normal-case tracking-normal">$ est.</span>
     </div>
   )
 }
@@ -785,9 +774,28 @@ function OrderPicker({
  * that is genuinely surprising: an old task run in a worktree that no longer
  * exists.
  *
- * The branch and the directory moved into the row's hover title rather than
- * being deleted, because they are still the only place a conversation from
- * before the worktrees went says so.
+ * ## No hints on the rows of this list, and that is a rule rather than an
+ * omission
+ *
+ * The branch and the directory used to hang off the row as a native `title`,
+ * along with a date breakdown, a spend note and a cost disclaimer on the meta
+ * line. When those became drawn `Hint`s they stopped being ignorable: an OS
+ * tooltip is a thin line low and to the right of the pointer, and a themed box
+ * is opaque, wider and CENTRED above what it describes — so hovering a row in
+ * a 48px-pitch list put a panel over the three rows above it. In a pane whose
+ * entire job is scanning a list of chats, that is the pointer erasing the
+ * thing you are using it to read.
+ *
+ * The trade is different here than anywhere else in the app. Every one of
+ * those hints described something the row already prints, or something one
+ * click away in the chat itself — so they were paying with the list to say
+ * what the list was already saying. The only survivor is `DoneCheck`'s, on an
+ * unlabelled square whose four states are colour alone, and it is one short
+ * line for the same reason.
+ *
+ * What was genuinely lost is the branch and directory of a conversation from
+ * before the worktrees went, which nothing else prints. That is a handful of
+ * archived rows against every scan of the list, and the list wins.
  */
 function ChatRow({
   chat,
@@ -848,65 +856,58 @@ function ChatRow({
         selected ? SELECTED : "border-transparent"
       } ${selected || working ? "text-fg" : "text-fg-muted"}`}
     >
-      <Hint hint={chat.gitBranch ? `${chat.cwd} · ${chat.gitBranch}` : chat.cwd}>
-        <button
-          type="button"
-          onClick={onOpen}
-          // Just enough that a truncating title's ellipsis does not touch the
-          // plate beside it. The row's own gap used to be doing this, at four
-          // times the width.
-          className="flex min-w-0 flex-1 flex-col gap-0.5 pr-1.5 text-left"
-        >
-          <div className="flex items-baseline gap-2">
-            {chat.kind !== "chat" && (
-              <span className={`shrink-0 text-[10px] ${kindColor(chat)}`}>{kindLabel(chat)}</span>
-            )}
-            <span
-              className={`flex-1 truncate text-[13px] ${
-                closed ? "line-through decoration-1 opacity-60" : ""
-              }`}
-            >
-              {chat.title}
-            </span>
-          </div>
-          {/* Tabular figures, so the money column does not shuffle sideways as you
-              read down a list of costs that differ only in the cents. */}
-          <div className={`flex items-baseline gap-1.5 text-[10px] tabular-nums ${meta}`}>
-            {/* First, and only while a run is in flight: it is the one figure on
-                the line that is CHANGING, and the rest of the line is a record of
-                what the chat has already cost. It reads as the same kind of thing
-                as the numbers beside it — which it is — rather than as a badge
-                needing its own furniture. */}
-            <Hint hint={dateTitle(chat)}>
-              <span>{when(order === "activity" ? chat.lastModified : born(chat))}</span>
-            </Hint>
-            {spend && spend.activeMs > 0 && (
-              <>
-                <Dot />
-                <Hint hint={WORKING_TIME(spend.turns)}>
-                  <span>{dur(spend.activeMs)}</span>
-                </Hint>
-              </>
-            )}
-            {spend && spend.costUsd > 0 && (
-              <>
-                <Dot />
-                <Hint hint={COST_IS_AN_ESTIMATE}>
-                  <span>{money(spend.costUsd)}</span>
-                </Hint>
-              </>
-            )}
-            {spend && spend.usageShare > 0 && (
-              <>
-                <Dot />
-                <Hint hint={USAGE_SHARE(spend.tokens)}>
-                  <span>{share(spend.usageShare)}</span>
-                </Hint>
-              </>
-            )}
-          </div>
-        </button>
-      </Hint>
+      {/* No hint on a chat row, deliberately — see the note above `ChatRow`.
+          The rows are 48px apart in a list you read by scanning, so a box
+          opening over one covers the three above it. */}
+      <button
+        type="button"
+        onClick={onOpen}
+        // Just enough that a truncating title's ellipsis does not touch the
+        // plate beside it. The row's own gap used to be doing this, at four
+        // times the width.
+        className="flex min-w-0 flex-1 flex-col gap-0.5 pr-1.5 text-left"
+      >
+        <div className="flex items-baseline gap-2">
+          {chat.kind !== "chat" && (
+            <span className={`shrink-0 text-[10px] ${kindColor(chat)}`}>{kindLabel(chat)}</span>
+          )}
+          <span
+            className={`flex-1 truncate text-[13px] ${
+              closed ? "line-through decoration-1 opacity-60" : ""
+            }`}
+          >
+            {chat.title}
+          </span>
+        </div>
+        {/* Tabular figures, so the money column does not shuffle sideways as you
+            read down a list of costs that differ only in the cents. */}
+        <div className={`flex items-baseline gap-1.5 text-[10px] tabular-nums ${meta}`}>
+          {/* First, and only while a run is in flight: it is the one figure on
+              the line that is CHANGING, and the rest of the line is a record of
+              what the chat has already cost. It reads as the same kind of thing
+              as the numbers beside it — which it is — rather than as a badge
+              needing its own furniture. */}
+          <span>{when(order === "activity" ? chat.lastModified : born(chat))}</span>
+          {spend && spend.activeMs > 0 && (
+            <>
+              <Dot />
+              <span>{dur(spend.activeMs)}</span>
+            </>
+          )}
+          {spend && spend.costUsd > 0 && (
+            <>
+              <Dot />
+              <span>{money(spend.costUsd)}</span>
+            </>
+          )}
+          {spend && spend.usageShare > 0 && (
+            <>
+              <Dot />
+              <span>{share(spend.usageShare)}</span>
+            </>
+          )}
+        </div>
+      </button>
       {/* On `done`, not on `closed`: `closed` is a derivation that running
           outranks, and the box is the bit's own control. They used to differ on
           a ticked chat with a turn in flight — the box drew empty over a
@@ -998,42 +999,15 @@ function BridgeRow({
 /** Dimmer than what it separates, or the eye reads the list as dots. */
 const Dot = () => <span className="text-line-soft">·</span>
 
-/**
- * What the three figures mean, on hover.
- *
- * Out here because each of them is a sentence with a caveat in it, and a caveat
- * is the one thing a two-line row has no space for. The cost one is not
- * optional: the brief says anything that shows a cost figure has to say what
- * kind of number it is.
+/*
+ * `WORKING_TIME`, `COST_IS_AN_ESTIMATE`, `dateTitle` and `USAGE_SHARE` were
+ * here: the sentences behind the row's four hover figures. They went with the
+ * hints that carried them — see the note above `ChatRow` for why a box over
+ * this particular list is worse than the caveat is good. The one that was not
+ * merely nice to have is the cost disclaimer, which the brief requires; it is
+ * now printed in `OrderPicker`'s line as `$ est.`, above the list rather than
+ * over it, where it captions the whole column at once.
  */
-const WORKING_TIME = (turns: number) =>
-  `Time the turns were actually running, over ${turns} turn${turns === 1 ? "" : "s"} — not the hours you were somewhere else.`
-
-const COST_IS_AN_ESTIMATE =
-  "An estimate, from a price table bundled into the SDK at build time. Fine for a list, never for billing."
-
-/**
- * What the date on a row means, on hover.
- *
- * The row prints whichever date the list is ordered by — started under the
- * default order, last spoken to under activity — because printing one and
- * sorting by the other gives a list whose visible timestamps read as a broken
- * sort. Both dates are always here, so whichever one the row is not printing
- * is a hover away rather than dropped; the last-active one is the half that
- * answers "did my question go through", and it is a second line rather than a
- * second column because 320px was already full.
- *
- * A session whose first entry carried no timestamp has only its file's mtime.
- * Labelling that "started" would date a month-old conversation to the last
- * thing said in it, so that case says what it actually knows.
- */
-const dateTitle = (chat: ConversationRow) =>
-  chat.createdAt === null
-    ? `Last active ${fullDate(chat.lastModified)}. This session's first entry carried no date, so when it started is not recorded.`
-    : `Started ${fullDate(chat.createdAt)}\nLast active ${fullDate(chat.lastModified)}`
-
-const USAGE_SHARE = (tokens: number) =>
-  `${compact(tokens)} tokens, as a share of every token aide has spent on this machine. Not your plan's usage — that window counts every client at once.`
 
 /**
  * How a parked chat looks to the ordering the started ones use.

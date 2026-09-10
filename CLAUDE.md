@@ -548,6 +548,29 @@ Decisions already taken, which are not gaps to fill:
   composer's send survives unchanged and for the same reason: a disabled
   element emits no `pointerenter` either, so the sentence naming what has the
   repo would once again be the one thing on screen you cannot read.
+- **The chat list has no hints on its ROWS, and that is the first thing the
+  drawn ones cost.** Converting `title` to `Hint` was not neutral everywhere: a
+  native tooltip is a thin line the OS puts low and to the right of the
+  pointer, and a themed box is opaque, wider, and CENTRED above what it
+  describes. In `Conversations.tsx` the rows are 48px apart and the pane's
+  whole job is scanning them, so hovering one drew a panel over the three above
+  it — the pointer erasing the thing it was being used to read. Six went: the
+  chat row's `cwd · branch`, the parked row's full text (a paragraph, so the
+  worst of them), the date breakdown, the working-time and usage-share notes,
+  the cost disclaimer, and the archived group's fold toggle, which said in a
+  box what the row already prints as `show` / `hide`. What is left is
+  `DoneCheck`'s, on an unlabelled square whose four states are colour alone,
+  cut to one short line. Three things are worth knowing before adding one back.
+  The rule is about the LIST and not about hints — the same component is right
+  everywhere else, and the argument is density plus scanning, so it transfers
+  to any list that gets one. The cost caption was the one removal the brief
+  forbids outright (anything showing a cost figure must say what it is), so it
+  moved to `OrderPicker`'s line as `$ est.`, above the list rather than over
+  it, where it captions the whole column at once and covers nothing. And the
+  removals orphaned five module-level constants and two formatters —
+  `WORKING_TIME`, `COST_IS_AN_ESTIMATE`, `dateTitle`, `USAGE_SHARE`,
+  `fullDate`, `compact` — which `tsc` does NOT flag, so a hint deleted without
+  sweeping its sentence leaves dead prose that reads as live behaviour.
 - **File icons are drawn, not installed, and there are eight of them.** A pack
   (Seti, Material, vscode-icons) is a few thousand SVGs plus a font or sprite
   sheet, which is the trade `icons.tsx` already refused for Phosphor — so these
