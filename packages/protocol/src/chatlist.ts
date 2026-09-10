@@ -170,6 +170,14 @@ export const born = (r: { createdAt: number | null; lastModified: number }): num
   r.createdAt ?? r.lastModified
 
 /**
+ * The two dates a list can be ordered by: when a chat was started, or when it
+ * was last spoken to. A closed set rather than a comparator parameter, because
+ * the choice is persisted in localStorage and read back across versions — a
+ * string that has to be validated wants a type the validator can enumerate.
+ */
+export type ChatOrder = "created" | "activity"
+
+/**
  * Chat-list order: newest first, and nothing else.
  *
  * There used to be a status rank in front of the date — blocked, then running,
@@ -190,9 +198,18 @@ export const born = (r: { createdAt: number | null; lastModified: number }): num
  * none — `blocked` is only ever true of the run in flight, so pinning that alone
  * would make one row jump to the top and back down as permission prompts came
  * and went.
+ *
+ * `by` IS a parameter, and "activity" is the one other order there is: last
+ * spoken to first, which is the reading that answers "what just happened" at
+ * the cost of rows moving when you speak to them. It is a choice a human makes
+ * and keeps, never a default — "created" stays the default precisely because a
+ * list you write into must put what you just wrote where you were looking, and
+ * every caller that says nothing keeps that guarantee.
  */
 export function sortChats<T extends { createdAt: number | null; lastModified: number }>(
   rows: readonly T[],
+  by: ChatOrder = "created",
 ): T[] {
-  return [...rows].sort((a, b) => born(b) - born(a))
+  const key = by === "activity" ? (r: T) => r.lastModified : born
+  return [...rows].sort((a, b) => key(b) - key(a))
 }

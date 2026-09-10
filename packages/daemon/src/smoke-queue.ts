@@ -763,6 +763,34 @@ console.log("\nchat list order")
   ])
   check("a new prompt on an old chat leaves it below a newer one", spoken[0]?.id === "new")
 
+  // The one other order there is, and it is opt-in: last spoken to first. The
+  // default has to stay "created" — a caller that says nothing keeps the
+  // guarantee that a parked note lands where you are looking — so both the
+  // explicit spelling and the silence are pinned, not just the new word.
+  const active = sortChats(
+    [
+      { id: "old", ...at(100, 900), status: st(null) },
+      { id: "new", ...at(200), status: st(null) },
+    ],
+    "activity",
+  )
+  check(
+    "the activity order puts the chat you just spoke to first",
+    active[0]?.id === "old",
+    "an old chat that just answered outranks a newer silent one",
+  )
+  check(
+    "and asking for created by name is the default order",
+    sortChats(
+      [
+        { id: "old", ...at(100, 900), status: st(null) },
+        { id: "new", ...at(200), status: st(null) },
+      ],
+      "created",
+    )[0]?.id === "new",
+    "the two spellings of the default must not drift apart",
+  )
+
   // A session whose first entry carried no timestamp still has to land
   // somewhere, and its mtime is the only date it has.
   const undated = sortChats([

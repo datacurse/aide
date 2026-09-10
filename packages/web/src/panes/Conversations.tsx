@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import type { Attachment, ChatStatus } from "@aide/protocol"
+import type { Attachment, ChatOrder, ChatStatus } from "@aide/protocol"
 import { born, sortChats } from "@aide/protocol"
 import { api, type ConversationRow, type LockHolder } from "../api.js"
 import { collectAttachments } from "../attachments.js"
@@ -137,6 +137,7 @@ const kindColor = (c: Kinded) => (c.kind === "task" ? "text-diff-add-fg" : "text
  */
 function UnstartedRow({
   draft,
+  order,
   selected,
   blocked,
   onOpen,
@@ -144,6 +145,8 @@ function UnstartedRow({
   onDiscard,
 }: {
   draft: Draft
+  /** Which date the list is sorted by — the row prints that one. */
+  order: ChatOrder
   selected: boolean
   /** Why this cannot be started right now, or null. */
   blocked: string | null
@@ -187,8 +190,18 @@ function UnstartedRow({
         <div className="flex items-baseline gap-2 text-[10px] tabular-nums text-fg-dim">
           {/* First in the line, the column a started chat puts its own time in —
               a parked chat is the same list at an earlier age, and a date that
-              moves between the two would be a date you have to hunt for. */}
-          <span title={`Parked ${fullDate(draft.createdAt)}`}>{when(draft.createdAt)}</span>
+              moves between the two would be a date you have to hunt for. Which
+              date follows the sort, for the same reason `born` gives: printing
+              one and ordering by the other reads as a broken sort. */}
+          <span
+            title={
+              draft.updatedAt !== draft.createdAt
+                ? `Parked ${fullDate(draft.createdAt)}\nLast edited ${fullDate(draft.updatedAt)}`
+                : `Parked ${fullDate(draft.createdAt)}`
+            }
+          >
+            {when(order === "activity" ? draft.updatedAt : draft.createdAt)}
+          </span>
           {/* The same lie as the blank title, in the line underneath: a chat
               whose first turn is in flight has plainly been sent. It says so
               until the handoff lands and this row becomes the conversation,
@@ -658,6 +671,54 @@ function GroupLabel({
 }
 
 /**
+ * Which date the list is ordered by: started, or last spoken to.
+ *
+ * Two words, not a dropdown — there are exactly two orders and `ChatOrder` is a
+ * closed type, so a menu would be furniture around a toggle. The active word is
+ * underlined rather than the inactive ones hidden, because a control showing
+ * only the current state reads as a label; both choices visible is what says
+ * there is a choice.
+ *
+ * Styled as the group headings are: this is the same kind of line — a fact
+ * about how the list below is arranged, not a row in it.
+ */
+function OrderPicker({
+  order,
+  onChange,
+}: {
+  order: ChatOrder
+  onChange: (next: ChatOrder) => void
+}) {
+  const opt = (value: ChatOrder, label: string, hint: string) => (
+    <button
+      type="button"
+      onClick={() => onChange(value)}
+      title={hint}
+      className={`font-normal normal-case tracking-normal ${
+        order === value ? "text-fg-muted underline underline-offset-2" : "hover:text-fg-muted"
+      }`}
+    >
+      {label}
+    </button>
+  )
+  return (
+    <div className="flex items-baseline gap-2 border-b border-line px-3 py-1 font-sans text-[10px] font-semibold tracking-wide text-fg-dim uppercase">
+      <span>order</span>
+      {opt(
+        "created",
+        "created",
+        "Newest chat first, by when it was started. Speaking to a chat does not move its row, so the position you learned for one stays learned.",
+      )}
+      {opt(
+        "activity",
+        "activity",
+        "Most recently spoken-to first. The chat that just answered is the top row — and rows move when you speak to them.",
+      )}
+    </div>
+  )
+}
+
+/**
  * One conversation, as a row.
  *
  * Two lines: what it was about, and what it took. Nothing else fits in 320px
@@ -674,6 +735,7 @@ function GroupLabel({
  */
 function ChatRow({
   chat,
+  order,
   status,
   heldSince,
   ranLast,
@@ -682,6 +744,8 @@ function ChatRow({
   onToggleDone,
 }: {
   chat: ConversationRow
+  /** Which date the list is sorted by — the row prints that one. */
+  order: ChatOrder
   /**
    * The row's status as of NOW, which is not `chat.status` — see `withLock`.
    * Passed in rather than read off the chat so that the badge and the group the
@@ -757,7 +821,9 @@ function ChatRow({
               what the chat has already cost. It reads as the same kind of thing
               as the numbers beside it — which it is — rather than as a badge
               needing its own furniture. */}
-          <span title={dateTitle(chat)}>{when(born(chat))}</span>
+          <span title={dateTitle(chat)}>
+            {when(order === "activity" ? chat.lastModified : born(chat))}
+          </span>
           {spend && spend.activeMs > 0 && (
             <>
               <Dot />
@@ -814,11 +880,13 @@ const COST_IS_AN_ESTIMATE =
 /**
  * What the date on a row means, on hover.
  *
- * The row prints when the chat STARTED, because that is what it is ordered by.
- * When it was last spoken to is the fact that used to be printed there, so it
- * moved here rather than being dropped — it is the one that answers "did my
- * question go through", and it is a second line rather than a second column
- * because 320px was already full.
+ * The row prints whichever date the list is ordered by — started under the
+ * default order, last spoken to under activity — because printing one and
+ * sorting by the other gives a list whose visible timestamps read as a broken
+ * sort. Both dates are always here, so whichever one the row is not printing
+ * is a hover away rather than dropped; the last-active one is the half that
+ * answers "did my question go through", and it is a second line rather than a
+ * second column because 320px was already full.
  *
  * A session whose first entry carried no timestamp has only its file's mtime.
  * Labelling that "started" would date a month-old conversation to the last
@@ -1122,13 +1190,15 @@ export function ConversationList({
   /**
    * The chat the project's most recent run happened in.
    *
-   * The one row you almost always want next, and the list is deliberately no
-   * help in finding it: `sortChats` orders by when a chat STARTED and is
-   * emphatic about not reordering on activity, so the conversation that just
-   * answered you is wherever you first parked it — three screens down, beside
-   * whatever else you started that morning. Until this, the only thing pointing
-   * at it was the run mark, which goes out with the run: the one pointer to the
-   * row disappeared at exactly the moment there was finally something to read.
+   * The one row you almost always want next, and under the default order the
+   * list is deliberately no help in finding it: `sortChats` orders by when a
+   * chat STARTED and refuses to reorder on activity unless asked, so the
+   * conversation that just answered you is wherever you first parked it — three
+   * screens down, beside whatever else you started that morning. Until this,
+   * the only thing pointing at it was the run mark, which goes out with the
+   * run: the one pointer to the row disappeared at exactly the moment there was
+   * finally something to read. (The activity order surfaces that row by
+   * position too, but the mark stays: it is what says WHY the row is on top.)
    *
    * A run in flight wins over the dates, and that is not a preference — a
    * session file is only rewritten when a turn ENDS, so for the length of a turn
@@ -1155,8 +1225,22 @@ export function ConversationList({
   }, [items, running, holdingSession])
 
   /**
+   * Which date the list is ordered by. One preference for the app rather than
+   * one per project, on the fold's own reasoning: this is a way of reading the
+   * list, and a preference you set once should not have to be re-set in every
+   * project you visit.
+   */
+  const [order, setOrder] = useRemembered<ChatOrder>(
+    "aide.chats.order",
+    "created",
+    (v): v is ChatOrder => v === "created" || v === "activity",
+  )
+
+  /**
    * Every row this project has, in one order: newest first, whatever each one is
-   * doing. See `sortChats` — a chat you park has to appear where you are looking.
+   * doing. See `sortChats` — under the default order a chat you park has to
+   * appear where you are looking, and under `activity` the chat that just
+   * answered is the top row.
    *
    * Memoized because `sortChats` copies, and this list is re-rendered on the
    * app's poll: a fresh array every 1.5 seconds is a fresh identity for every
@@ -1170,28 +1254,32 @@ export function ConversationList({
    */
   const rows = useMemo<ListRow[]>(
     () =>
-      sortChats([
-        ...unstarted.map(
-          (d): ListRow => ({
-            kind: "draft",
-            draft: d,
-            status: PARKED,
-            createdAt: d.createdAt,
-            // Only ever the fallback, and a parked chat always has a createdAt.
-            lastModified: d.updatedAt,
-          }),
-        ),
-        ...(items ?? []).map(
-          (c): ListRow => ({
-            kind: "chat",
-            chat: c,
-            status: withLock(c.status, c.sessionId, holdingSession, holderBlocked),
-            createdAt: c.createdAt,
-            lastModified: c.lastModified,
-          }),
-        ),
-      ]),
-    [unstarted, items, holdingSession, holderBlocked],
+      sortChats(
+        [
+          ...unstarted.map(
+            (d): ListRow => ({
+              kind: "draft",
+              draft: d,
+              status: PARKED,
+              createdAt: d.createdAt,
+              // The activity key, as well as the fallback: a parked chat's last
+              // activity is the last time its words were edited.
+              lastModified: d.updatedAt,
+            }),
+          ),
+          ...(items ?? []).map(
+            (c): ListRow => ({
+              kind: "chat",
+              chat: c,
+              status: withLock(c.status, c.sessionId, holdingSession, holderBlocked),
+              createdAt: c.createdAt,
+              lastModified: c.lastModified,
+            }),
+          ),
+        ],
+        order,
+      ),
+    [unstarted, items, holdingSession, holderBlocked, order],
   )
 
   /**
@@ -1229,6 +1317,7 @@ export function ConversationList({
       <UnstartedRow
         key={row.draft.key}
         draft={row.draft}
+        order={order}
         selected={selectedDraft === idFromKey(row.draft.key)}
         blocked={startBlocked}
         onOpen={() => onSelectDraft(idFromKey(row.draft.key))}
@@ -1239,6 +1328,7 @@ export function ConversationList({
       <ChatRow
         key={row.chat.sessionId}
         chat={row.chat}
+        order={order}
         status={row.status}
         heldSince={row.chat.sessionId === holdingSession ? (holder?.startedAt ?? null) : null}
         ranLast={row.chat.sessionId === newest}
@@ -1256,6 +1346,10 @@ export function ConversationList({
       {error && (
         <p className="border-b border-line px-3 py-1.5 font-sans text-[11px] text-err">{error}</p>
       )}
+      {/* Only once there are two rows to order. On an empty or one-row list the
+          two orders agree, so the control would be a line spent saying nothing
+          — the same rule the group headings live by. */}
+      {rows.length > 1 && <OrderPicker order={order} onChange={setOrder} />}
       {/* Overlaid rather than native, because folding the archived group
           usually takes the scrollbar with it: with a classic bar every row got
           10px wider on the press, and reserving the gutter instead left a
