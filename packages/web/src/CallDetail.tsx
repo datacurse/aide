@@ -48,12 +48,41 @@ function Labeled({
   children: ReactNode
 }) {
   return (
-    <div>
+    // min-w-0 so a block can sit in a grid column: a grid item's min-width
+    // defaults to its content, and a pre full of code would push its column
+    // wider than the card instead of scrolling inside it.
+    <div className="min-w-0">
       <div className={`mb-0.5 font-sans text-[10px] tracking-wide uppercase ${tone}`}>{label}</div>
       {children}
     </div>
   )
 }
+
+/**
+ * The smallest leading indent across every non-blank line.
+ *
+ * An old_string is a fragment cut from the middle of a file, so it arrives
+ * wearing the file's indentation — twenty columns of nothing before every
+ * line, half the card spent rendering empty space. Measured over old and new
+ * TOGETHER and stripped equally from both, because dedenting each on its own
+ * would erase a re-indentation, which can be the entire change.
+ */
+function commonIndent(code: string): number {
+  let min = Infinity
+  for (const line of code.split("\n")) {
+    if (line.trim() === "") continue
+    min = Math.min(min, line.length - line.trimStart().length)
+  }
+  return Number.isFinite(min) ? min : 0
+}
+
+const dedent = (code: string, by: number): string =>
+  by === 0
+    ? code
+    : code
+        .split("\n")
+        .map((line) => (line.trim() === "" ? "" : line.slice(by)))
+        .join("\n")
 
 const str = (o: Record<string, unknown>, key: string): string | null =>
   typeof o[key] === "string" ? (o[key] as string) : null
@@ -71,25 +100,32 @@ function Body({ call }: { call: CallDetailData }) {
   const lang = langOfPath(call.target)
 
   if (call.name === "Edit") {
+    const oldS = str(o, "old_string") ?? ""
+    const newS = str(o, "new_string") ?? ""
+    const cut = commonIndent(`${oldS}\n${newS}`)
     return (
       <>
         {o["replace_all"] === true && (
           <p className="font-sans text-[10px] text-fg-dim">replaces every occurrence</p>
         )}
-        {/* The BORDER carries what left and what arrived; the text keeps the
-            editor's own syntax colours. Filled red and green backgrounds were
-            tried first and fought the tokens — the direction of the change
-            was loud and the change itself was the hard thing to read. */}
-        <Labeled label="old" tone="text-diff-del-fg">
-          <pre className={`${CODE} border-l-2 border-diff-del-fg/70`}>
-            {highlightCode(str(o, "old_string") ?? "", lang)}
-          </pre>
-        </Labeled>
-        <Labeled label="new" tone="text-diff-add-fg">
-          <pre className={`${CODE} border-l-2 border-diff-add-fg/70`}>
-            {highlightCode(str(o, "new_string") ?? "", lang)}
-          </pre>
-        </Labeled>
+        {/* Side by side — before and after are one comparison, and stacked
+            they could never be on screen at once. The BORDER carries what
+            left and what arrived; the text keeps the editor's own syntax
+            colours. Filled red and green backgrounds were tried first and
+            fought the tokens — the direction of the change was loud and the
+            change itself was the hard thing to read. */}
+        <div className="grid grid-cols-2 gap-1.5">
+          <Labeled label="old" tone="text-diff-del-fg">
+            <pre className={`${CODE} border-l-2 border-diff-del-fg/70`}>
+              {highlightCode(dedent(oldS, cut), lang)}
+            </pre>
+          </Labeled>
+          <Labeled label="new" tone="text-diff-add-fg">
+            <pre className={`${CODE} border-l-2 border-diff-add-fg/70`}>
+              {highlightCode(dedent(newS, cut), lang)}
+            </pre>
+          </Labeled>
+        </div>
       </>
     )
   }
