@@ -388,9 +388,20 @@ export function ToolTimeline({
         </span>
       </div>
 
-      {/* The overview strip: 3px per message, red for a failure, amber for
-          the recovery that followed it, blue for in flight. Dragging scrolls
-          the grid. Hidden while the grid fits. */}
+      {/* The overview strip: one tick per message, red for a failure, amber
+          for the recovery that followed it, blue for in flight. Dragging
+          scrolls the grid. Hidden while the grid fits.
+
+          The ticks SHARE the full width (`flex-1`, `basis-0`) rather than
+          claiming a fixed 3px each. Fixed-width ticks make the strip as long
+          as the turn happens to be — 61 messages drew ~244px of it — while the
+          window indicator over them is positioned in PERCENTAGES of the strip.
+          So the two disagreed about what "all the way across" meant: the
+          indicator was correct about a strip that stopped a fifth of the way
+          into the space it was describing, which reads as a scrollbar floating
+          loose above an unrelated minimap. Sharing the width also makes the
+          strip mean the same thing at every length, which is what lets it be
+          seeked by fraction. */}
       {win !== null && (
         <div
           ref={strip}
@@ -406,7 +417,10 @@ export function ToolTimeline({
           {t.messages.map((m) => (
             <span
               key={m}
-              className={`w-[3px] shrink-0 ${
+              // `min-w-0` so a long turn's ticks may go under a pixel wide
+              // rather than forcing the strip past its container and bringing
+              // back the overflow this is meant to remove.
+              className={`min-w-0 flex-1 basis-0 ${
                 failed.has(m)
                   ? "h-3.5 bg-err"
                   : recovery.has(m)
@@ -417,7 +431,7 @@ export function ToolTimeline({
               }`}
             />
           ))}
-          {composing && <span className="h-2 w-[3px] shrink-0 animate-pulse bg-info" />}
+          {composing && <span className="h-2 min-w-0 flex-1 basis-0 animate-pulse bg-info" />}
           <span
             className="pointer-events-none absolute -inset-y-0.5 border border-fg-dim bg-white/5"
             style={{ left: `${(win.left * 100).toFixed(2)}%`, width: `${(win.width * 100).toFixed(2)}%` }}
@@ -425,7 +439,17 @@ export function ToolTimeline({
         </div>
       )}
 
-      {/* pt-4 is the headroom the fail tags rise into on the first row. */}
+      {/* pt-4 is the headroom the fail tags rise into on the first row.
+
+          The native scrollbar is hidden because the strip above IS one, and a
+          better one: it appears under exactly the same condition (the grid
+          overflowing), it seeks by drag, and it says what is in the part you
+          cannot see — which failed, which is still running — where the native
+          bar only says how far along you are. Two bars for one axis, one of
+          them redundant, on a component whose whole job is to be read at a
+          glance. Scrolling itself is untouched: the wheel handler above, the
+          drag, and `scrollIntoView` all still work, so nothing here is a
+          scrollbar removed without a replacement. */}
       <div
         ref={wrap}
         onScroll={() => {
@@ -433,7 +457,7 @@ export function ToolTimeline({
           if (el) follow.current = el.scrollLeft + el.clientWidth >= el.scrollWidth - 4
           measure()
         }}
-        className="overflow-x-auto overflow-y-hidden pt-4 pb-1 [scrollbar-width:thin]"
+        className="overflow-x-auto overflow-y-hidden pt-4 pb-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       >
         <table className="border-collapse">
           <thead>

@@ -905,6 +905,26 @@ Decisions already taken, which are not gaps to fill:
   header slot: the model is thinking or composing, and without the mark a
   grid whose last column has settled is indistinguishable from a stale one.
   It sits in the header and draws no dot, because it claims no call.
+- **The overview strip is the grid's only scrollbar, and its ticks SHARE the
+  width.** It appears exactly when the grid overflows, seeks by drag, and says
+  what is in the part you cannot see — which message failed, which is still
+  running — where a native bar only says how far along you are. So the native
+  one is hidden: two bars for one axis on a component whose whole job is to be
+  read at a glance, and the redundant one was the less useful. Nothing is
+  removed without a replacement — the wheel handler, the drag and
+  `scrollIntoView` all still scroll it. The ticks are `flex-1 basis-0`
+  and not a fixed 3px, which is the bug worth remembering: fixed ticks make the
+  strip as long as the turn happens to be (61 messages drew ~244px), while the
+  window indicator over them is positioned in PERCENTAGES of the strip — so the
+  two disagreed about what "all the way across" meant, and the indicator was
+  correct about a strip that stopped a fifth of the way into the space it was
+  describing. On screen that reads as a scrollbar floating loose above an
+  unrelated minimap. `min-w-0` on the ticks lets a long turn's go under a pixel
+  rather than forcing the strip past its container and bringing back the
+  overflow it exists to remove. What is still slightly off and was left alone:
+  the row-label column is `sticky left-0`, so it covers a gutter the strip
+  spans, and correcting that means threading the label width into the strip's
+  geometry.
 - **A tool row is drawn when the call opens, not when its event arrives.**
   `tool.start` is read off the COMPLETED assistant message, so a call the model
   announces two sentences into a reply reaches the log only once it has stopped
