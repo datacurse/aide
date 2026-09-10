@@ -115,8 +115,28 @@ export function useStickToEnd(
     // does: a reply streaming in, a tool row opening, a fold being expanded, a
     // pasted screenshot finishing loading and the pane being dragged narrower
     // are all height changes with no scroll behind them.
-    const grow = new ResizeObserver(follow)
+    //
+    // `read` after `follow`, so the button's state reflects where the follow
+    // just left things rather than where they were a frame before it.
+    const settle = () => {
+      follow()
+      read()
+    }
+    const grow = new ResizeObserver(settle)
     grow.observe(body)
+    // The VIEWPORT as well as the content, because being at the end is a
+    // relation between the two boxes and either one can move it. Sending a
+    // message changes only the viewport: the working bar mounts and the
+    // composer collapses back, which together pull the scroller's bottom edge
+    // up past the end of the transcript — no content grew, no scroll fired,
+    // and the follower watching only `body` left the reader sitting short of
+    // the bottom until the reply's first streamed line. With a send queued
+    // behind a commit's checks that first line can be a minute away, which is
+    // how "I sent a message and had to scroll down myself" happens. (This is
+    // the observation the `body` comment above rules out for CONTENT growth —
+    // observing an `overflow-y-auto` element reports its viewport, which is
+    // exactly the half being covered here.)
+    grow.observe(el)
     return () => {
       el.removeEventListener("scroll", read)
       el.removeEventListener("mousedown", down)
