@@ -10,16 +10,21 @@ import { flushDrafts } from "./drafts.js"
  * `hotUpdate` hook there for why that is worth stopping.
  *
  * The other half is here, because the dev server can see that nothing is
- * running and cannot see whether anybody is looking. Those are different
- * questions at exactly the wrong moment: a turn ending is when the tab starts
- * ringing, and a reload one second later would silence the alarm that was
- * fetching you to a run that is now over.
+ * running and cannot see whether anybody is looking. The best moment to reload
+ * is when nobody is: a hidden tab takes it immediately, so what you switch
+ * back to is already the new code. The first version waited for focus instead,
+ * which protected the alarm and guaranteed the worst timing available — the
+ * turn finished while you were in another tab, and the reload landed one
+ * second after you came back, every time, which read as the app reloading in
+ * your face for no reason. The alarm was why hidden was off-limits then and is
+ * not now: a ring used to die with the document, and it carries itself across
+ * a reload today (see `carryAlarm` in chime.ts).
  *
- * And "looking" is not "free", which is the third question and the one that
- * cost a real message. What you do when the alarm fetches you is read the reply
- * and start typing the next thing — so the moment this page is most certain
- * somebody is here is the moment they are least able to be interrupted. See
- * `take`.
+ * A page that stays visible still waits, because "looking" is not "free" —
+ * the question that cost a real message. What you do when the alarm fetches
+ * you is read the reply and start typing the next thing — so the moment this
+ * page is most certain somebody is here is the moment they are least able to
+ * be interrupted. See `take`.
  */
 
 /** Also in `vite-daemon.ts`, which sends it. */
@@ -82,18 +87,13 @@ export function takeHeldReloads(): void {
     { passive: true, capture: true },
   )
 
-  const take = () => {
-    // Three questions, and the third is the one this used to be missing.
-    //
-    // Focus and a quiet alarm say a person is HERE — focus alone does not, since
-    // this window can hold it behind another one on a second monitor, and the
-    // alarm going quiet is the one signal that means somebody moved something.
-    // Neither says the person is FREE, and those came apart in the worst
-    // possible place: the alarm is silenced by any keydown, so the first
-    // character of the next prompt was itself the signal that released the
-    // reload, and the reload then ate the rest of the sentence.
-    if (alarmRinging() || !document.hasFocus()) return
-    if (Date.now() - lastTypedAt < COMPOSING_MS) return
+  let taken = false
+  const go = () => {
+    // Guarded because `take` has three callers now — the beat, the hiding of
+    // the tab, and the HELD message itself — and two firing inside the flush
+    // window would race a second reload against the first.
+    if (taken) return
+    taken = true
     window.clearInterval(timer)
     // On disk before the page goes. `saveDraft` batches for 400ms and the
     // `pagehide` backstop's transaction may never commit, so without this the
@@ -106,14 +106,44 @@ export function takeHeldReloads(): void {
     })
   }
 
+  const take = () => {
+    // A hidden tab is the one moment a reload is invisible: nobody is reading,
+    // nobody is typing, and the alarm — the old reason to wait for a person —
+    // now carries itself across a reload (see `carryAlarm` in chime.ts), so a
+    // ring resumes in the fresh page's title. Taken immediately, alarm or no
+    // alarm, because waiting used to convert the common case into the worst
+    // one: the turn finished while you were in another tab, and the reload
+    // held politely so it could land one second after you returned.
+    if (document.visibilityState === "hidden") return go()
+
+    // Visible: three questions, and the third is the one this used to be
+    // missing.
+    //
+    // Focus and a quiet alarm say a person is HERE — focus alone does not, since
+    // this window can hold it behind another one on a second monitor, and the
+    // alarm going quiet is the one signal that means somebody moved something.
+    // Neither says the person is FREE, and those came apart in the worst
+    // possible place: the alarm is silenced by any keydown, so the first
+    // character of the next prompt was itself the signal that released the
+    // reload, and the reload then ate the rest of the sentence.
+    if (alarmRinging() || !document.hasFocus()) return
+    if (Date.now() - lastTypedAt < COMPOSING_MS) return
+    go()
+  }
+
   import.meta.hot.on(HELD, () => {
     if (timer !== undefined) return
-    console.info("[aide] this page is behind the code — reloading once you are back and not typing")
+    console.info("[aide] this page is behind the code — reloading while you are away, or once you are back and not typing")
     // Polled rather than driven off `focus` and the alarm's own state. The
     // alarm stops inside a React commit, and a listener racing that ordering
     // would fire either a beat early or never; a second's delay on a reload you
     // are about to watch happen costs nothing.
     timer = window.setInterval(take, CHECK_MS)
+    // Hiding the tab, though, IS the trigger and not just a state the next
+    // beat notices: a hidden page's interval is throttled to once a minute,
+    // which is a minute the page could have spent already reloaded. Never
+    // removed — a take that fires replaces the whole document.
+    window.addEventListener("visibilitychange", take)
     take()
   })
 }

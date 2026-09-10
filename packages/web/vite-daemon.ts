@@ -351,11 +351,10 @@ export function daemonControl(port: number, webPort: number): Plugin {
    * Hand the page the reload we took off it, once nothing is answering.
    *
    * A custom message rather than Vite's own `full-reload`, because "nothing is
-   * running" is not yet "you are here". A turn ending is exactly when the tab
-   * starts ringing for you, and a reload landing on that alarm would take the
-   * sound and the title with it — and the run they were about is over, so
-   * nothing would ring a second time. The page holds the reload until somebody
-   * answers; see `src/reload.ts`.
+   * running" is not yet "now is a good moment". The page takes it while nobody
+   * is looking — a hidden tab, with the ringing alarm carried across the
+   * reload — or, if it stays visible, once somebody has answered and stopped
+   * typing; see `src/reload.ts`.
    */
   const releaseHeldReload = (): void => {
     if (!reloadHeld || turnsInFlight > 0 || dev === null) return

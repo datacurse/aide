@@ -852,10 +852,15 @@ Decisions already taken, which are not gaps to fill:
   the browser will not let the finish make a sound. So `hotUpdate` in
   `packages/web/vite-daemon.ts` applies nothing while `busy.chats` is above
   zero, and hands the reload to `packages/web/src/reload.ts`, which takes it
-  once the window has focus, the done alarm has been answered and nothing has
-  been typed for half a minute. That last condition is not politeness: the alarm
-  is silenced by any keydown, so without it the first character of your next
-  prompt was the signal that released the reload which then ate the sentence.
+  the moment the tab is hidden — a reload nobody can see, with the done alarm
+  carried across it in sessionStorage so a finish is still ringing on the
+  fresh page — or, if the page stays visible, once the window has focus, the
+  alarm has been answered and nothing has been typed for half a minute. The
+  hidden path is the fix for the reload that used to land one second after
+  every return to the tab, which read as the app reloading in your face for no
+  reason. The typing condition is not politeness: the alarm is silenced by any
+  keydown, so without it the first character of your next prompt was the
+  signal that released the reload which then ate the sentence.
   Drafts are flushed to IndexedDB and waited on before the page goes, because a
   `pagehide` transaction is not guaranteed to commit. Looking at the code you
   loaded with until the turn is over is the price, and it is the cheap half of

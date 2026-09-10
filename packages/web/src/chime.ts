@@ -126,6 +126,65 @@ let ringingNow = false
 export const alarmRinging = (): boolean => ringingNow
 
 /**
+ * The alarm, carried across a reload.
+ *
+ * `useDoneChime` below is edge-triggered — it rings only for a run it watched
+ * go from running to stopped — and a reload used to throw that edge away: the
+ * fresh document met the finished run cold and stayed silent, so a finish went
+ * unnoticed exactly when the dev server had reloaded the page. It matters more
+ * now that `reload.ts` takes a held reload while the tab is HIDDEN, which is
+ * precisely when a finish is waiting to be noticed. So the watch, and a ring
+ * nobody has answered, live in sessionStorage — per tab, like the alarm — and
+ * the first conversation pane of the next document picks them up: a carried
+ * ring resumes from mount (the title always works; the sound needs a gesture
+ * the fresh page has not had), and a carried watch means a finish that lands
+ * after the reload still rings. Only an acknowledgement clears the entry — a
+ * reload tears React down without running effect cleanups, which is what lets
+ * it survive one.
+ */
+const ALARM_CARRY = "aide.alarm"
+
+interface CarriedAlarm {
+  /** The run being watched. */
+  key: string
+  /** True once it stopped and rang, and nobody has answered yet. */
+  done: boolean
+}
+
+function carriedAlarm(): CarriedAlarm | null {
+  try {
+    const raw = window.sessionStorage.getItem(ALARM_CARRY)
+    if (raw === null) return null
+    const v = JSON.parse(raw) as Partial<CarriedAlarm> | null
+    return v && typeof v.key === "string" && typeof v.done === "boolean"
+      ? { key: v.key, done: v.done }
+      : null
+  } catch {
+    // Storage disabled, or the entry hand-mangled. The alarm still works — it
+    // just cannot survive a reload.
+    return null
+  }
+}
+
+function carryAlarm(v: CarriedAlarm | null): void {
+  try {
+    if (v === null) window.sessionStorage.removeItem(ALARM_CARRY)
+    else window.sessionStorage.setItem(ALARM_CARRY, JSON.stringify(v))
+  } catch {
+    // See carriedAlarm.
+  }
+}
+
+/**
+ * Read once, before React mounts, and claimed by the FIRST pane to call the
+ * hook. Later instances get nothing: a pane mounted by switching chats is a
+ * person navigating, not a document resuming, and handing it the boot value
+ * would resurrect a watch its predecessor already resolved.
+ */
+const carriedAtBoot = carriedAlarm()
+let carryClaimed = false
+
+/**
  * How far the pointer has to travel, in CSS pixels, before the alarm believes
  * you are back. One mousemove is not evidence of anybody: a desk bump, a
  * scrollbar under a still cursor, a window animation sliding the page — each
@@ -151,25 +210,47 @@ const ROUSED_PX = 80
  * own promise instead — it stops when somebody is there, and not before.
  */
 export function useDoneChime(active: boolean, key: string | null): void {
-  const watching = useRef<string | null>(null)
-  const [ringing, setRinging] = useState(false)
+  const claim = useRef<CarriedAlarm | null | undefined>(undefined)
+  if (claim.current === undefined) {
+    claim.current = carryClaimed ? null : carriedAtBoot
+    carryClaimed = true
+  }
+  const carried = claim.current
+  const watching = useRef<string | null>(
+    carried !== null && !carried.done ? carried.key : null,
+  )
+  const [ringing, setRinging] = useState(carried !== null && carried.done)
 
   useEffect(() => {
     if (active) {
       watching.current = key
+      carryAlarm(key === null ? null : { key, done: false })
       // A turn starting is the least ambiguous acknowledgement there is: you
       // are plainly here, and the thing the alarm was fetching you for is done.
       setRinging(false)
       return
     }
+    // No run on screen yet — the conversation is still loading, or never ran.
+    // The watch is kept: on the first render after a reload this branch runs
+    // before the data has arrived, and dropping the carried watch here is what
+    // would silence a finish that landed while the page was away.
+    if (key === null) return
     const was = watching.current
     watching.current = null
-    if (was !== null && was === key) setRinging(true)
+    if (was === null) return
+    if (was === key) {
+      carryAlarm({ key: was, done: true })
+      setRinging(true)
+    } else {
+      // A different run ending — one this page never saw start. Watch over.
+      carryAlarm(null)
+    }
   }, [active, key])
 
   useEffect(() => {
     if (!ringing) return
     if (!chimeEnabled()) {
+      carryAlarm(null)
       setRinging(false)
       return
     }
@@ -235,6 +316,10 @@ export function useDoneChime(active: boolean, key: string | null): void {
       window.clearInterval(timer)
       document.title = title
       ringingNow = false
+      // Answered, or the pane went away — and only a person navigating does
+      // the latter. A reload runs no cleanup, which is what lets the carried
+      // entry outlive one.
+      carryAlarm(null)
       window.removeEventListener("mousemove", onMove)
       window.removeEventListener("keydown", roused)
       window.removeEventListener("pointerdown", roused)
