@@ -81,13 +81,25 @@ function Dot({
 
 export function ToolTimeline({
   calls,
+  live = false,
   onOpenCall,
 }: {
   calls: TimelineCall[]
+  /** The turn is still running, so between messages the model is composing. */
+  live?: boolean
   /** A dot was clicked: open the steps and show this call. */
   onOpenCall?: (id: string) => void
 }) {
   const t = useMemo(() => buildTimeline(calls), [calls])
+  /**
+   * The turn is running and no call is open: the model is thinking, or writing
+   * the message that will become the next column. Without a mark for it, a
+   * grid whose last column has settled is indistinguishable from a stale one —
+   * so the next header slot gets a spinner instead of a number. It draws no
+   * dot and claims no call; the moment one opens, its own spinner takes over
+   * and this disappears.
+   */
+  const composing = live && !calls.some((c) => c.status === "busy")
   const [hover, setHover] = useState<number | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
   const wrap = useRef<HTMLDivElement>(null)
@@ -185,10 +197,13 @@ export function ToolTimeline({
           </span>
         </span>
         <span className="min-w-0 truncate">
-          {hover !== null &&
-            `message ${hover}, ${callsIn(hover)} call${callsIn(hover) === 1 ? "" : "s"}${
-              recovery.has(hover) ? ", recovery" : ""
-            }`}
+          {hover !== null
+            ? `message ${hover}, ${callsIn(hover)} call${callsIn(hover) === 1 ? "" : "s"}${
+                recovery.has(hover) ? ", recovery" : ""
+              }`
+            : composing
+              ? "thinking…"
+              : ""}
         </span>
         <span className="ml-auto shrink-0 text-fg-muted">
           {t.total} calls in {t.messages.length} message{t.messages.length === 1 ? "" : "s"}
@@ -230,6 +245,7 @@ export function ToolTimeline({
               }`}
             />
           ))}
+          {composing && <span className="h-2 w-[3px] shrink-0 animate-pulse bg-info" />}
           <span
             className="pointer-events-none absolute -inset-y-0.5 border border-fg-dim bg-white/5"
             style={{ left: `${(win.left * 100).toFixed(2)}%`, width: `${(win.width * 100).toFixed(2)}%` }}
@@ -281,6 +297,15 @@ export function ToolTimeline({
                   </th>
                 )
               })}
+              {composing && (
+                <th
+                  style={{ width: 24, minWidth: 24 }}
+                  className="h-5 p-0 text-center align-middle"
+                  title="Claude is thinking — the next message has not arrived"
+                >
+                  <span className="mx-auto block size-2.5 animate-spin rounded-full border-[1.5px] border-info border-t-transparent" />
+                </th>
+              )}
             </tr>
           </thead>
           <tbody>
@@ -336,6 +361,9 @@ export function ToolTimeline({
                       </td>
                     )
                   })}
+                  {/* The thinking column's body: empty on purpose. Nothing
+                      queued or predicted is ever drawn as a call. */}
+                  {composing && <td style={{ width: 24, minWidth: 24 }} className="p-0" />}
                 </tr>
               )
             })}

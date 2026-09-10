@@ -109,6 +109,13 @@ interface ToolLine {
    */
   message: number
   retry: boolean
+  /**
+   * The target a `tool.target` delta named, for a row whose event — and so
+   * whose `input` — has not arrived. It is what lets the live dot sit on its
+   * real file row, and the live flat row name its file, instead of both
+   * showing a placeholder until the message completes.
+   */
+  liveTarget?: string
 }
 /**
  * The snapshot taken before the agent was let near the working tree.
@@ -299,6 +306,13 @@ interface StepsLine {
     checks: number
     failed: boolean
   }
+  /**
+   * This fold is the live turn's, and it is the last thing in the transcript —
+   * the state in which the model is composing its next message and the grid
+   * would otherwise look identical to a stale one. Set by `foldSteps`; the
+   * timeline draws its thinking indicator from it.
+   */
+  live?: boolean
 }
 type Line =
   | ToolLine
@@ -360,7 +374,7 @@ function humanizeError(message: string): string {
  * this is the part that knows what a row looks like on screen.
  */
 function foldSteps(lines: Line[], live: boolean): Line[] {
-  return foldRows(lines, live).map((r) => {
+  const out = foldRows(lines, live).map((r) => {
     if (!r.folded) return r.row
     const rows = r.group.rows as Line[]
     const line: StepsLine = {
@@ -388,6 +402,12 @@ function foldSteps(lines: Line[], live: boolean): Line[] {
       },
     }
   })
+  // Only the LAST line, and only while the turn runs: the fold with rows still
+  // arriving under it is the one place "is that stale, or is Claude thinking"
+  // gets asked, and any fold above it is by definition settled.
+  const last = out[out.length - 1]
+  if (live && last !== undefined && last.kind === "steps" && !last.commit) last.live = true
+  return out
 }
 
 function toLines(
@@ -735,6 +755,8 @@ function toLines(
       // column the streaming message will become.
       message: 0,
       retry: false,
+      // Spread conditionally so absent stays absent rather than `undefined`.
+      ...(t.target !== undefined ? { liveTarget: t.target } : {}),
       ok: null,
       summary: "",
       startedAt: t.startedAt,
@@ -760,16 +782,18 @@ function toggleUnlessSelecting(setOpen: (f: (v: boolean) => boolean) => void) {
   setOpen((v) => !v)
 }
 
+/** Shorten one target for a one-line row: a command whole, a path to its tail. */
+function shortTarget(name: string, target: string): string {
+  const short = name === "Bash" ? target : target.split(/[/\\]/).slice(-2).join("/")
+  return short.length > 90 ? `${short.slice(0, 90)}…` : short
+}
+
 /** One-line preview of a tool's arguments — enough to know what it touched. */
 function describeInput(name: string, input: unknown): string {
   const o = (input ?? {}) as Record<string, unknown>
   const first =
     o["command"] ?? o["file_path"] ?? o["pattern"] ?? o["path"] ?? o["url"] ?? o["prompt"]
-  if (typeof first === "string") {
-    const short = name === "Bash" ? first : first.split(/[/\\]/).slice(-2).join("/")
-    return short.length > 90 ? `${short.slice(0, 90)}…` : short
-  }
-  return ""
+  return typeof first === "string" ? shortTarget(name, first) : ""
 }
 
 /**
@@ -864,7 +888,10 @@ function StepsRow({ line }: { line: StepsLine }) {
       id: s.toolUseId,
       message: s.message,
       tool: s.name,
-      target: toolTarget(s.name, s.input),
+      // A live row's input is null until its event lands; the target its
+      // delta named is what puts the dot on the right file row NOW rather
+      // than on a placeholder for the length of the call.
+      target: s.input !== null ? toolTarget(s.name, s.input) : (s.liveTarget ?? ""),
       status: s.ok === null ? "busy" : s.ok ? "ok" : "err",
       failTag: s.ok === false ? classifyFailure(s.name, s.summary) : null,
       retry: s.retry,
@@ -892,7 +919,9 @@ function StepsRow({ line }: { line: StepsLine }) {
 
   return (
     <div>
-      {gridCalls.length > 0 && <ToolTimeline calls={gridCalls} onOpenCall={openCall} />}
+      {gridCalls.length > 0 && (
+        <ToolTimeline calls={gridCalls} live={line.live ?? false} onOpenCall={openCall} />
+      )}
       {/* 11px, the same as the rows it stands for — a fold that shouted louder
           than its own contents would be the derivation getting MORE weight for
           being collapsed. A fold can hold no calls at all — a turn that
@@ -967,7 +996,12 @@ function ToolRow({ line }: { line: ToolLine }) {
             min-width:auto and refuses to shrink below its content, so without it
             the row grows to fit the command and drags the whole pane sideways. */}
         <span className="min-w-0 truncate text-[11px] text-syn-string">
-          {describeInput(line.name, line.input)}
+          {line.input !== null
+            ? describeInput(line.name, line.input)
+            : // The delta-named target, until the event brings the arguments.
+              line.liveTarget
+              ? shortTarget(line.name, line.liveTarget)
+              : ""}
         </span>
         {/* The same counter a running check gets, for the same reason: without it
             a Bash that hangs for a minute and a Read that returns instantly were

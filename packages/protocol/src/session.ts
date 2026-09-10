@@ -19,8 +19,14 @@
  * agent's disk. An old agent handed one would put its bytes in an image block,
  * which the API refuses — a turn that fails mid-flight instead of a mismatch
  * named up front.
+ *
+ * v3: `RunDelta` grew `tool.target`, the call's target named while its
+ * arguments still stream. An old agent simply never sends one — the live dot
+ * falls back to its placeholder row, which is v2 behaviour — but a browser fed
+ * an unknown delta kind would fall through to the usage branch and blank the
+ * token meter, so the skew is refused rather than half-worked around.
  */
-export const AGENT_PROTOCOL = 2
+export const AGENT_PROTOCOL = 3
 
 /**
  * Conversations.

@@ -18,6 +18,8 @@ import {
   SUMMARY_FENCE,
   isImageAttachment,
   parseTurnSummary,
+  partialToolTarget,
+  toolTarget,
   type Attachment,
   type ChatMode,
   type EffortLevel,
@@ -522,59 +524,107 @@ const CHAT_TO_SDK_MODE: Record<ChatMode, "plan" | "auto"> = {
 }
 
 /**
- * One `stream_event` into zero or more deltas.
+ * Stream events into deltas — a reader with state, one per query stream.
  *
  * The payload is a raw Messages API streaming event, so the shapes worth
  * handling are `content_block_delta` (text and thinking, arriving in pieces),
  * `content_block_start` for a tool call, and
  * `message_delta` (cumulative output tokens for the message in flight). The
- * rest â block starts and stops â carries nothing a reader needs that
- * the finished message will not say better.
+ * rest â block starts and stops â used to carry nothing a
+ * reader needs; a stop now completes a call's streaming arguments, which is
+ * where the fallback `tool.target` comes from.
  *
- * `message_start` is the exception, and it is deliberately not handled here: it
+ * `message_start` only clears the reader's state: it
  * carries no content, only the fact that the API has begun, which is a timestamp
  * rather than something to draw. The streaming loop turns it into an
  * `assistant.start` EVENT instead, so it survives in the log.
  */
-function toDeltas(message: unknown): RunDelta[] {
-  const event = (message as { event?: Record<string, unknown> }).event
-  if (!event) return []
+function makeDeltaReader(): (message: unknown) => RunDelta[] {
+  /**
+   * Tool blocks still streaming their arguments, by content-block index. A
+   * READER rather than a pure function, and this map is why: naming a call's
+   * target before its event means accumulating `input_json_delta` fragments
+   * across stream events. One reader per query stream; blocks are dropped at
+   * their own stop, and the map cleared at each message start as the backstop
+   * for a message that never closed one.
+   */
+  const open = new Map<number, { toolUseId: string; name: string; buf: string; sent: boolean }>()
 
-  // The one place a delta beats its own event to the browser rather than
-  // duplicating it early. A `tool.start` is read off the COMPLETED assistant
-  // message, so a call the model announces mid-reply stays invisible until it
-  // has finished writing that reply — which is after the tool has run. This
-  // fires when the model opens the block, so the row and its clock start with
-  // the call. See `RunDelta`.
-  if (event["type"] === "content_block_start") {
-    const block = event["content_block"] as Record<string, unknown> | undefined
-    if (block?.["type"] !== "tool_use") return []
-    const toolUseId = String(block["id"] ?? "")
-    const name = String(block["name"] ?? "")
-    // Both, or the row cannot be named now nor retired by the event later.
-    return toolUseId && name ? [{ kind: "tool", toolUseId, name }] : []
-  }
+  return (message: unknown): RunDelta[] => {
+    const event = (message as { event?: Record<string, unknown> }).event
+    if (!event) return []
+    const index = Number(event["index"] ?? -1)
 
-  if (event["type"] === "content_block_delta") {
-    const d = event["delta"] as Record<string, unknown> | undefined
-    if (d?.["type"] === "text_delta") {
-      const text = String(d["text"] ?? "")
-      return text ? [{ kind: "text", text }] : []
+    if (event["type"] === "message_start") {
+      open.clear()
+      return []
     }
-    if (d?.["type"] === "thinking_delta") {
-      const text = String(d["thinking"] ?? "")
-      return text ? [{ kind: "thinking", text }] : []
+
+    // The one place a delta beats its own event to the browser rather than
+    // duplicating it early. A `tool.start` is read off the COMPLETED assistant
+    // message, so a call the model announces mid-reply stays invisible until it
+    // has finished writing that reply — which is after the tool has run. This
+    // fires when the model opens the block, so the row and its clock start with
+    // the call. See `RunDelta`.
+    if (event["type"] === "content_block_start") {
+      const block = event["content_block"] as Record<string, unknown> | undefined
+      if (block?.["type"] !== "tool_use") return []
+      const toolUseId = String(block["id"] ?? "")
+      const name = String(block["name"] ?? "")
+      // Both, or the row cannot be named now nor retired by the event later.
+      if (!toolUseId || !name) return []
+      open.set(index, { toolUseId, name, buf: "", sent: false })
+      return [{ kind: "tool", toolUseId, name }]
     }
+
+    if (event["type"] === "content_block_delta") {
+      const d = event["delta"] as Record<string, unknown> | undefined
+      if (d?.["type"] === "text_delta") {
+        const text = String(d["text"] ?? "")
+        return text ? [{ kind: "text", text }] : []
+      }
+      if (d?.["type"] === "thinking_delta") {
+        const text = String(d["thinking"] ?? "")
+        return text ? [{ kind: "thinking", text }] : []
+      }
+      // The call's arguments, in pieces. The moment a target field's value is
+      // complete — which the model usually writes first, seconds before the
+      // rest of a big edit — the timeline's live dot can move to its real row.
+      if (d?.["type"] === "input_json_delta") {
+        const call = open.get(index)
+        if (!call || call.sent) return []
+        call.buf += String(d["partial_json"] ?? "")
+        const target = partialToolTarget(call.buf)
+        if (target === null) return []
+        call.sent = true
+        return [{ kind: "tool.target", toolUseId: call.toolUseId, target }]
+      }
+      return []
+    }
+
+    // The block is over, so the input is whole: the fallback for a call whose
+    // target field the early scan never saw complete — the model wrote it
+    // last, or wrote no recognised target field at all.
+    if (event["type"] === "content_block_stop") {
+      const call = open.get(index)
+      open.delete(index)
+      if (!call || call.sent) return []
+      try {
+        const target = toolTarget(call.name, JSON.parse(call.buf || "{}"))
+        return target ? [{ kind: "tool.target", toolUseId: call.toolUseId, target }] : []
+      } catch {
+        return []
+      }
+    }
+
+    if (event["type"] === "message_delta") {
+      const usage = event["usage"] as Record<string, unknown> | undefined
+      const out = Number(usage?.["output_tokens"] ?? 0)
+      return out > 0 ? [{ kind: "usage", outputTokens: out }] : []
+    }
+
     return []
   }
-
-  if (event["type"] === "message_delta") {
-    const usage = event["usage"] as Record<string, unknown> | undefined
-    const out = Number(usage?.["output_tokens"] ?? 0)
-    return out > 0 ? [{ kind: "usage", outputTokens: out }] : []
-  }
-
-  return []
 }
 
 export interface NormalizeContext {
@@ -1448,6 +1498,9 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
     },
   })
 
+  // Stateful on purpose — see makeDeltaReader. One per stream, never shared.
+  const readDeltas = makeDeltaReader()
+
   try {
     for await (const message of q) {
       while (pending.length) yield pending.shift()!
@@ -1469,7 +1522,7 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<RunEventB
         if ((message as { event?: { type?: string } }).event?.type === "message_start") {
           yield { type: "assistant.start" }
         }
-        for (const delta of toDeltas(message)) opts.onDelta(delta)
+        for (const delta of readDeltas(message)) opts.onDelta(delta)
         continue
       }
 

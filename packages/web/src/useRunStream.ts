@@ -14,6 +14,16 @@ function applyDelta(prev: LiveDraft, delta: RunDelta): LiveDraft {
     const started = { toolUseId: delta.toolUseId, name: delta.name, startedAt: Date.now() }
     return { ...prev, tools: [...prev.tools, started] }
   }
+  if (delta.kind === "tool.target") {
+    // May land after the event has already retired the row, in which case
+    // there is nothing left to name and this maps over nothing.
+    return {
+      ...prev,
+      tools: prev.tools.map((t) =>
+        t.toolUseId === delta.toolUseId ? { ...t, target: delta.target } : t,
+      ),
+    }
+  }
   return { ...prev, outputTokens: delta.outputTokens }
 }
 
@@ -30,6 +40,12 @@ export interface LiveTool {
   name: string
   /** By the browser's clock; see `applyDelta`. */
   startedAt: number
+  /**
+   * What the call is about, once enough of its arguments have streamed for the
+   * daemon to say — see the `tool.target` delta. Absent until then, which is
+   * usually a beat: the model writes the target field first.
+   */
+  target?: string
 }
 
 /** Text and thinking as they arrive, before the finished message replaces them. */

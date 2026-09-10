@@ -32,6 +32,7 @@ import {
   isChatModel,
   isImageAttachment,
   foldRows,
+  partialToolTarget,
   timelineMeta,
   toolTarget,
   formatLocation,
@@ -2036,5 +2037,34 @@ console.log("\nthe tool timeline")
   check("a shell call's target is its command", toolTarget("Bash", { command: "pnpm build" }) === "pnpm build")
   check("a file call's target is its path", toolTarget("Edit", { file_path: "src/a.ts" }) === "src/a.ts")
   check("no readable target is empty, not invented", toolTarget("Agent", { count: 3 }) === "")
+
+  // The live dot's early target: a COMPLETE string field inside JSON that is
+  // not. Wrong in either direction fails quietly — reading a value whose
+  // closing quote has not arrived names a truncated file, and refusing
+  // complete ones parks the dot on a placeholder row for the whole time the
+  // model spends writing a big edit's arguments.
+  check(
+    "an unfinished value is not a target",
+    partialToolTarget('{"file_path":"src/a') === null,
+  )
+  check(
+    "a complete first field is, before the JSON closes",
+    partialToolTarget('{"file_path":"src/a.ts","old_string":"x') === "src/a.ts",
+  )
+  check(
+    "escapes decode as JSON, not by hand",
+    partialToolTarget('{"command":"echo \\"hi\\""') === 'echo "hi"',
+  )
+  check(
+    "backslashes survive a Windows path",
+    partialToolTarget('{"file_path":"C:\\\\Users\\\\loki\\\\a.ts"') === "C:\\Users\\loki\\a.ts",
+  )
+  check("an empty target names no row", partialToolTarget('{"pattern":""') === null)
+  check(
+    "a target key INSIDE a string value cannot match",
+    partialToolTarget('{"old_string":"say \\"file_path\\": \\"trap\\"","file_path":"real.ts"') ===
+      "real.ts",
+    "inside a JSON string a quote can only appear escaped, so the pattern's real quotes miss it",
+  )
 }
 

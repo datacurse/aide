@@ -98,7 +98,7 @@ Decisions already taken, which are not gaps to fill:
   static import is hoisted and its output would print above `repo: <path>` — the
   run would still be correct and would read as though the sections had been
   shuffled. When changing any of this, the check that matters is that the
-  assertion count does not fall: `pnpm smoke` prints 771 `ok` lines as of
+  assertion count does not fall: `pnpm smoke` prints 777 `ok` lines as of
   2026-09-10, and a refactor that quietly drops some is the failure this number
   exists to catch.
   It fell once on purpose — the card view was removed and took ~30 of its own
@@ -807,7 +807,17 @@ Decisions already taken, which are not gaps to fill:
   become; a column exists only once the model has actually sent it, and
   nothing queued or predicted is ever drawn. Clicking a dot opens the flat
   list at that call: the transcript stays the conversation's one full
-  reading, and the grid indexes it rather than replacing it.
+  reading, and the grid indexes it rather than replacing it. Two live details
+  came from watching it. A call announced mid-stream now learns its TARGET
+  before its event — the `tool.target` delta, emitted the moment the target
+  field's closing quote arrives in the streaming JSON (`partialToolTarget`,
+  pinned: a complete string field is a filename whatever the JSON around it
+  is missing) — because until then the live dot sat on a placeholder row for
+  exactly the time the model spent writing a big edit's arguments, then
+  jumped. And a running turn with no call open draws a spinner in the NEXT
+  header slot: the model is thinking or composing, and without the mark a
+  grid whose last column has settled is indistinguishable from a stale one.
+  It sits in the header and draws no dot, because it claims no call.
 - **A tool row is drawn when the call opens, not when its event arrives.**
   `tool.start` is read off the COMPLETED assistant message, so a call the model
   announces two sentences into a reply reaches the log only once it has stopped

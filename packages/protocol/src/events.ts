@@ -507,9 +507,25 @@ export type RunDelta =
    *
    * No `input` here on purpose. The arguments arrive as `input_json_delta`
    * fragments, and half-parsed JSON is not a filename — the row draws its name
-   * now and picks up its arguments from the event a moment later.
+   * now, learns its target from `tool.target` below the moment that much is
+   * knowable, and picks up the rest from the event a moment later.
    */
   | { kind: "tool"; toolUseId: string; name: string }
+  /**
+   * Which file, command or pattern the call above is about — before its event.
+   *
+   * The rule against reading half-parsed JSON stands; this is the half of the
+   * input that is not half-parsed. The model writes `{"file_path":"…"` first
+   * and then spends seconds — for a big edit, most of the call's visible life —
+   * streaming the rest, and until this existed the live dot on the timeline
+   * sat on a placeholder row for exactly that stretch and jumped to the real
+   * file only when the event landed. A string field whose closing quote has
+   * arrived is complete whatever the JSON around it is missing, so the daemon
+   * sends the target the moment one is, or at block end parsed whole for a
+   * call whose target field comes last. Once per call, and ephemeral like
+   * every delta: the event still carries the full input.
+   */
+  | { kind: "tool.target"; toolUseId: string; target: string }
   /** Cumulative for the message in flight, straight off the API's message_delta. */
   | { kind: "usage"; outputTokens: number }
 
