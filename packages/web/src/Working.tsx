@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import { currentActivity, type RunEvent } from "@aide/protocol"
 import { Hint } from "./Hint.js"
+import { COLUMN } from "./ui.js"
 
 /**
  * What the turn is doing right now, in one line.
@@ -116,23 +117,30 @@ export function WorkingBar({
   const waiting = activity.startsWith("Waiting")
 
   return (
+    // The amber wash of a waiting turn is the whole pane's, not the column's:
+    // it is the pane changing state, and a tinted stripe inset from both edges
+    // would read as a banner inside the conversation rather than as the bar
+    // itself. The row inside takes the column, so the spinner starts where the
+    // prose above it does.
     <div
-      className={`flex shrink-0 items-center gap-2 border-t px-3 py-1.5 font-sans text-[11px] ${
+      className={`shrink-0 border-t px-3 py-1.5 font-sans text-[11px] ${
         waiting ? "border-warn bg-warn/5 text-warn" : "border-line bg-chrome text-fg-muted"
       }`}
     >
-      {!waiting && (
-        <span className="inline-block size-2.5 shrink-0 animate-spin rounded-full border border-info border-t-transparent" />
-      )}
-      <span className="min-w-0 truncate">{activity}</span>
-      <span className="shrink-0 text-fg-dim">
-        {seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`}
-      </span>
-      {outputTokens > 0 && (
-        <Hint hint="Output tokens in the message being written">
-          <span className="shrink-0 text-fg-dim">{outputTokens.toLocaleString()} tokens</span>
-        </Hint>
-      )}
+      <div className={`flex items-center gap-2 ${COLUMN}`}>
+        {!waiting && (
+          <span className="inline-block size-2.5 shrink-0 animate-spin rounded-full border border-info border-t-transparent" />
+        )}
+        <span className="min-w-0 truncate">{activity}</span>
+        <span className="shrink-0 text-fg-dim">
+          {seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`}
+        </span>
+        {outputTokens > 0 && (
+          <Hint hint="Output tokens in the message being written">
+            <span className="shrink-0 text-fg-dim">{outputTokens.toLocaleString()} tokens</span>
+          </Hint>
+        )}
+      </div>
     </div>
   )
 }

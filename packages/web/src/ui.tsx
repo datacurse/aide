@@ -62,6 +62,44 @@ export const heldBy = (title: string) =>
  */
 export const SELECTED = "border-accent"
 
+/**
+ * The conversation's reading column: centred, and the same width for the
+ * transcript, the working bar and the composer.
+ *
+ * The transcript is the flexible middle of a layout whose other three panes are
+ * fixed (256 + 320 + 256 = 832px of chrome), so before this the prose was the
+ * window minus that — around 88 characters per line at 1440px and 258 at 2560,
+ * against the 45–75 a century of typography converges on. Capping it alone was
+ * worse than leaving it: the column stayed hard against the left edge with the
+ * slack as one dead gutter on the right, which reads as a pane that failed to
+ * lay out rather than as a measure somebody chose.
+ *
+ * So the width is not a cap on the prose, it is a COLUMN, and the three things
+ * stacked in the pane share it. That is what makes it look deliberate: the
+ * composer's left edge lines up with the first character of every reply above
+ * it, and the empty space is symmetric — margin rather than remainder.
+ *
+ * 880px rather than the ~680 that 66 characters would ask for, on two counts
+ * about this pane specifically. The prose is dense technical writing full of
+ * inline code, paths and flags, scanned for a name as often as read along. And
+ * it shares the column with tool rows, diffs and the timeline, which are
+ * monospace and structural — a measure tuned for paragraphs squeezes those into
+ * horizontal scrolling to buy comfort the prose was not short of. It lands
+ * around 130 characters of 13px sans, above the typographic ideal and well
+ * under the 258 that prompted this.
+ *
+ * `px` and not the `ch` unit usually advised: `1ch` is the width of the current
+ * font's `0`, which self-corrects when the font can change. This one cannot —
+ * `--font-sans` is fixed in `index.css` — so `ch` would buy nothing and cost
+ * the next reader the ability to tell what the number means by reading it.
+ *
+ * Under ~1700px of window it changes nothing: the pane is already narrower, so
+ * the column engages only on the wide screens that created the problem, and
+ * `w-full` keeps it edge to edge below that rather than leaving a fixed column
+ * in a pane too narrow to want one.
+ */
+export const COLUMN = "mx-auto w-full max-w-[880px]"
+
 export function Button({
   children,
   onClick,

@@ -5,7 +5,7 @@ import { readDraft, saveDraft, useDraft } from "./drafts.js"
 import { File as FileGlyph, Lightning, Lock, Paperclip, X } from "./icons.js"
 import { Hint } from "./Hint.js"
 import { ImageViewer, useImageViewer } from "./ImageViewer.js"
-import { LOCKED } from "./ui.js"
+import { COLUMN, LOCKED } from "./ui.js"
 import { TYPING_KEY } from "./typing.js"
 import { useAutoGrow } from "./useAutoGrow.js"
 import { useClickAway } from "./useClickAway.js"
@@ -560,211 +560,234 @@ export function Composer({
         void takeFiles(e.dataTransfer.files)
       }}
     >
-      {attachments.length > 0 && (
-        <div className="mb-2 flex flex-wrap gap-1.5">
-          {attachments.map((a) => {
-            // Only the picture opens the viewer, not the whole chip. The chip
-            // already contains the remove button, and a button inside a button
-            // is markup the browser fixes by dropping the INNER one — so the ✕
-            // would go from visibly removing an attachment to silently doing
-            // nothing.
-            const seat = pictures.findIndex((p) => p.id === a.id)
-            return (
-              <span
-                key={a.id}
-                className="flex items-center gap-1.5 rounded border border-line bg-input px-1.5 py-0.5 font-sans text-[11px] text-fg-muted"
-              >
-                {seat >= 0 ? (
-                  <Hint hint="See what this is, full size">
+      {/* The border, the background and the drop target stay the full width of
+          the pane — a drop is aimed at the bar, and a highlight that stopped
+          short of the edges would be describing a smaller target than the one
+          that actually takes the file. Only the CONTENTS take the column, so
+          the box lines up with the prose above it. */}
+      <div className={COLUMN}>
+        {attachments.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {attachments.map((a) => {
+              // Only the picture opens the viewer, not the whole chip. The chip
+              // already contains the remove button, and a button inside a button
+              // is markup the browser fixes by dropping the INNER one — so the ✕
+              // would go from visibly removing an attachment to silently doing
+              // nothing.
+              const seat = pictures.findIndex((p) => p.id === a.id)
+              return (
+                <span
+                  key={a.id}
+                  className="flex items-center gap-1.5 rounded border border-line bg-input px-1.5 py-0.5 font-sans text-[11px] text-fg-muted"
+                >
+                  {seat >= 0 ? (
+                    <Hint hint="See what this is, full size">
+                      <button
+                        type="button"
+                        onClick={() => viewer.show(seat)}
+                        className="cursor-zoom-in"
+                      >
+                        <img
+                          src={`data:${a.mediaType};base64,${a.data}`}
+                          alt=""
+                          className="size-4 rounded-sm object-cover"
+                        />
+                      </button>
+                    </Hint>
+                  ) : (
+                    <FileGlyph className="size-3.5 shrink-0 text-fg-dim" />
+                  )}
+                  <span className="max-w-48 truncate">
+                    {a.name ?? a.mediaType.replace("image/", "")}
+                  </span>
+                  {kb(a.bytes)}
+                  <Hint hint="Remove">
                     <button
                       type="button"
-                      onClick={() => viewer.show(seat)}
-                      className="cursor-zoom-in"
+                      onClick={() => edit({ attachments: attachments.filter((x) => x.id !== a.id) })}
+                      className="text-fg-dim hover:text-err"
                     >
-                      <img
-                        src={`data:${a.mediaType};base64,${a.data}`}
-                        alt=""
-                        className="size-4 rounded-sm object-cover"
-                      />
+                      <X className="size-3" />
                     </button>
                   </Hint>
-                ) : (
-                  <FileGlyph className="size-3.5 shrink-0 text-fg-dim" />
-                )}
-                <span className="max-w-48 truncate">
-                  {a.name ?? a.mediaType.replace("image/", "")}
                 </span>
-                {kb(a.bytes)}
-                <Hint hint="Remove">
-                  <button
-                    type="button"
-                    onClick={() => edit({ attachments: attachments.filter((x) => x.id !== a.id) })}
-                    className="text-fg-dim hover:text-err"
-                  >
-                    <X className="size-3" />
-                  </button>
-                </Hint>
-              </span>
-            )
-          })}
-        </div>
-      )}
-      {viewer.open !== null && (
-        <ImageViewer
-          images={pictures}
-          index={viewer.open}
-          onIndex={viewer.show}
-          onClose={viewer.close}
-        />
-      )}
+              )
+            })}
+          </div>
+        )}
+        {viewer.open !== null && (
+          <ImageViewer
+            images={pictures}
+            index={viewer.open}
+            onIndex={viewer.show}
+            onClose={viewer.close}
+          />
+        )}
 
-      <textarea
-        ref={area}
-        value={text}
-        onChange={(e) => edit({ text: e.target.value })}
-        // Paste is the shortest path for a screenshot — clipboard straight into
-        // the turn, no file dialog — and a file copied in the OS shell pastes
-        // the same way. Drops are handled by the wrapper, whose dragOver made
-        // them legal here in the first place.
-        onPaste={(e) => {
-          const files = [...e.clipboardData.files]
-          if (files.length) {
-            e.preventDefault()
-            void takeFiles(files)
-          }
-        }}
-        onKeyDown={(e) => {
-          // Enter sends, Shift+Enter is a newline. This is a chat box, and the
-          // multi-line case is the rarer one.
-          if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-            e.preventDefault()
-            send()
-          }
-        }}
-        // Height comes from useAutoGrow, which measures the wrapped text. The
-        // row count this used to carry counted newlines, so a long message typed
-        // as one paragraph stayed two rows tall and scrolled its own beginning
-        // out of sight.
-        rows={2}
-        // "Commit first" was right back when a commit was the only way out of a
-        // block. It is not any more — a run holding the checkout clears by
-        // finishing — and a placeholder naming the wrong remedy is worse than
-        // one naming none, so it points at the sentence below instead.
-        placeholder={
-          busy
-            ? "Claude is working…"
-            : blocked
-              ? "Held — the line below says why."
-              : "Ask, or attach any kind of file — paste, drop, or the clip"
-        }
-        className="w-full resize-none rounded border border-line-soft bg-input px-2 py-1.5 font-sans text-[13px] leading-relaxed outline-none placeholder:text-fg-dim focus:border-accent"
-      />
+        {/* The box and its controls in ONE rounded shell, which is the whole of
+            what makes this read as a composer rather than as a form. The focus
+            ring is here rather than on the textarea for the same reason: typing
+            lights the whole control, so the send button and the pickers are
+            visibly part of the thing you are typing into.
 
-      {blocked && <p className="mt-1 font-sans text-[11px] text-warn">{blocked}</p>}
-      {note && <p className="mt-1 font-sans text-[11px] text-warn">{note}</p>}
+            `focus-within` and not `focus` — the ring has to survive the pointer
+            landing on the model picker inside it, or opening a menu blinks the
+            border off mid-gesture. */}
+        <div className="rounded-lg border border-line-soft bg-input px-2 py-1.5 transition-colors focus-within:border-accent">
+          <textarea
+            ref={area}
+            value={text}
+            onChange={(e) => edit({ text: e.target.value })}
+            // Paste is the shortest path for a screenshot — clipboard straight into
+            // the turn, no file dialog — and a file copied in the OS shell pastes
+            // the same way. Drops are handled by the wrapper, whose dragOver made
+            // them legal here in the first place.
+            onPaste={(e) => {
+              const files = [...e.clipboardData.files]
+              if (files.length) {
+                e.preventDefault()
+                void takeFiles(files)
+              }
+            }}
+            onKeyDown={(e) => {
+              // Enter sends, Shift+Enter is a newline. This is a chat box, and the
+              // multi-line case is the rarer one.
+              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault()
+                send()
+              }
+            }}
+            // Height comes from useAutoGrow, which measures the wrapped text. The
+            // row count this used to carry counted newlines, so a long message typed
+            // as one paragraph stayed two rows tall and scrolled its own beginning
+            // out of sight.
+            rows={2}
+            // "Commit first" was right back when a commit was the only way out of a
+            // block. It is not any more — a run holding the checkout clears by
+            // finishing — and a placeholder naming the wrong remedy is worse than
+            // one naming none, so it points at the sentence below instead.
+            placeholder={
+              busy
+                ? "Claude is working…"
+                : blocked
+                  ? "Held — the line below says why."
+                  : "Ask, or attach any kind of file — paste, drop, or the clip"
+            }
+            // No border or background of its own: the shell around it draws those
+            // for the box AND the controls together, so the two stop reading as a
+            // field with an unrelated toolbar under it. `field-sizing-content`
+            // is deliberately not used — `useAutoGrow` measures the wrapped text
+            // and is what the `rows={2}` floor is expressed against.
+            className="w-full resize-none bg-transparent px-1 font-sans text-[13px] leading-relaxed outline-none placeholder:text-fg-dim"
+          />
 
-      <div className="mt-1.5 flex items-center gap-3">
-        {/* The clip. The input is the machinery, the button is the furniture —
-            a bare file input draws its own filename label, which this bar has
-            chips for. Its value is cleared after every pick so choosing the
-            same file twice fires onChange twice; the FileList is copied first
-            because clearing the input empties the live list it handed over. */}
-        <input
-          ref={picker}
-          type="file"
-          multiple
-          className="hidden"
-          onChange={(e) => {
-            if (e.target.files?.length) void takeFiles([...e.target.files])
-            e.target.value = ""
-          }}
-        />
-        <Hint hint="Attach files of any kind — images go to the model as pictures, everything else lands on the agent's disk for it to read. Or drop them anywhere on this bar">
-          <button
-            type="button"
-            onClick={() => picker.current?.click()}
-            className="rounded p-1 text-fg-muted hover:bg-hover hover:text-fg"
-          >
-            <Paperclip className="size-3.5" />
-          </button>
-        </Hint>
-        <ModePicker
-          mode={mode}
-          effort={effort}
-          onMode={chooseMode}
-          onEffort={(e) => choose({ effort: e })}
-        />
-        <ModelPicker model={model} onModel={(m) => choose({ model: m })} />
-        <ThinkingToggle on={thinking} onToggle={() => choose({ thinking: !thinking })} />
-        <TypingToggle on={typewriter} onToggle={() => setTypewriter(!typewriter)} />
-        <ContextMeter usage={usage} />
-        <div className="ml-auto flex items-center gap-2">
-          {busy ? (
-            <button
-              type="button"
-              onClick={onInterrupt}
-              className="rounded-sm bg-diff-del-fg/85 px-2.5 py-1 font-sans text-xs text-white hover:bg-diff-del-fg"
-            >
-              stop
-            </button>
-          ) : (
-            <>
-              {/* Only on a conversation that has run. Before there is a
-                  session there is nothing to carry on with, and the press
-                  would be the chat's FIRST message — which is what names the
-                  row, so a list of chats called "proceed" is a list of
-                  nothing. */}
-              {sessionId && (
-                <Hint hint={blocked ?? `Send “${PROCEED}” — for when the answer is just carry on`}>
-                  <button
-                    type="button"
-                    // Locked on the same terms as `send` beside it. It did not
-                    // use to need this: `blocked` only ever landed on a chat
-                    // that had never run, and this button is drawn only on one
-                    // that has. A run holding the checkout refuses both, and
-                    // two buttons side by side refused by one thing must not
-                    // read as one blocked and one merely empty.
-                    //
-                    // `aria-disabled` rather than `disabled` when blocked, so
-                    // the hint saying WHY still opens: a disabled element emits
-                    // no `pointerenter`, so the one state whose explanation is
-                    // worth reading would be the one state with no hint.
-                    aria-disabled={blocked ? true : undefined}
-                    onClick={blocked ? undefined : proceed}
-                    disabled={blocked ? undefined : !canProceed}
-                    className={`inline-flex items-center gap-1 rounded-sm px-2.5 py-1 font-sans text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
-                      blocked ? LOCKED : "bg-input text-fg hover:bg-raised"
-                    }`}
-                  >
-                    {blocked && <Lock className="size-3 shrink-0" />}
-                    {PROCEED}
-                  </button>
-                </Hint>
-              )}
-              <Hint hint={blocked ?? "Enter to send, Shift+Enter for a newline"}>
+          {blocked && <p className="mt-1 font-sans text-[11px] text-warn">{blocked}</p>}
+          {note && <p className="mt-1 font-sans text-[11px] text-warn">{note}</p>}
+
+          <div className="mt-1 flex items-center gap-3">
+            {/* The clip. The input is the machinery, the button is the furniture —
+                a bare file input draws its own filename label, which this bar has
+                chips for. Its value is cleared after every pick so choosing the
+                same file twice fires onChange twice; the FileList is copied first
+                because clearing the input empties the live list it handed over. */}
+            <input
+              ref={picker}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                if (e.target.files?.length) void takeFiles([...e.target.files])
+                e.target.value = ""
+              }}
+            />
+            <Hint hint="Attach files of any kind — images go to the model as pictures, everything else lands on the agent's disk for it to read. Or drop them anywhere on this bar">
+              <button
+                type="button"
+                onClick={() => picker.current?.click()}
+                className="rounded p-1 text-fg-muted hover:bg-hover hover:text-fg"
+              >
+                <Paperclip className="size-3.5" />
+              </button>
+            </Hint>
+            <ModePicker
+              mode={mode}
+              effort={effort}
+              onMode={chooseMode}
+              onEffort={(e) => choose({ effort: e })}
+            />
+            <ModelPicker model={model} onModel={(m) => choose({ model: m })} />
+            <ThinkingToggle on={thinking} onToggle={() => choose({ thinking: !thinking })} />
+            <TypingToggle on={typewriter} onToggle={() => setTypewriter(!typewriter)} />
+            <ContextMeter usage={usage} />
+            <div className="ml-auto flex items-center gap-2">
+              {busy ? (
                 <button
                   type="button"
-                  // Locked by work in the way, merely disabled by an empty box.
-                  // The distinction is the whole point of the padlock: one is
-                  // something to go and clear, the other is something to type.
-                  //
-                  // Blocked is `aria-disabled` and not `disabled` so the hint
-                  // naming what is in the way still opens — a disabled element
-                  // emits no `pointerenter`, so the padlock would have nothing
-                  // to explain itself with.
-                  aria-disabled={blocked ? true : undefined}
-                  onClick={blocked ? undefined : send}
-                  disabled={blocked ? undefined : !canSend}
-                  className={`inline-flex items-center gap-1 rounded-sm px-3 py-1 font-sans text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
-                    blocked ? LOCKED : "bg-accent text-white hover:bg-accent-hover"
-                  }`}
+                  onClick={onInterrupt}
+                  className="rounded-sm bg-diff-del-fg/85 px-2.5 py-1 font-sans text-xs text-white hover:bg-diff-del-fg"
                 >
-                  {blocked && <Lock className="size-3 shrink-0" />}
-                  send
+                  stop
                 </button>
-              </Hint>
-            </>
-          )}
+              ) : (
+                <>
+                  {/* Only on a conversation that has run. Before there is a
+                      session there is nothing to carry on with, and the press
+                      would be the chat's FIRST message — which is what names the
+                      row, so a list of chats called "proceed" is a list of
+                      nothing. */}
+                  {sessionId && (
+                    <Hint hint={blocked ?? `Send “${PROCEED}” — for when the answer is just carry on`}>
+                      <button
+                        type="button"
+                        // Locked on the same terms as `send` beside it. It did not
+                        // use to need this: `blocked` only ever landed on a chat
+                        // that had never run, and this button is drawn only on one
+                        // that has. A run holding the checkout refuses both, and
+                        // two buttons side by side refused by one thing must not
+                        // read as one blocked and one merely empty.
+                        //
+                        // `aria-disabled` rather than `disabled` when blocked, so
+                        // the hint saying WHY still opens: a disabled element emits
+                        // no `pointerenter`, so the one state whose explanation is
+                        // worth reading would be the one state with no hint.
+                        aria-disabled={blocked ? true : undefined}
+                        onClick={blocked ? undefined : proceed}
+                        disabled={blocked ? undefined : !canProceed}
+                        className={`inline-flex items-center gap-1 rounded-sm px-2.5 py-1 font-sans text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                          blocked ? LOCKED : "bg-input text-fg hover:bg-raised"
+                        }`}
+                      >
+                        {blocked && <Lock className="size-3 shrink-0" />}
+                        {PROCEED}
+                      </button>
+                    </Hint>
+                  )}
+                  <Hint hint={blocked ?? "Enter to send, Shift+Enter for a newline"}>
+                    <button
+                      type="button"
+                      // Locked by work in the way, merely disabled by an empty box.
+                      // The distinction is the whole point of the padlock: one is
+                      // something to go and clear, the other is something to type.
+                      //
+                      // Blocked is `aria-disabled` and not `disabled` so the hint
+                      // naming what is in the way still opens — a disabled element
+                      // emits no `pointerenter`, so the padlock would have nothing
+                      // to explain itself with.
+                      aria-disabled={blocked ? true : undefined}
+                      onClick={blocked ? undefined : send}
+                      disabled={blocked ? undefined : !canSend}
+                      className={`inline-flex items-center gap-1 rounded-sm px-3 py-1 font-sans text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                        blocked ? LOCKED : "bg-accent text-white hover:bg-accent-hover"
+                      }`}
+                    >
+                      {blocked && <Lock className="size-3 shrink-0" />}
+                      send
+                    </button>
+                  </Hint>
+                </>
+              )}
+            </div>
+          </div>
         </div>
       </div>
     </div>

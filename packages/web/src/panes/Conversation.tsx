@@ -15,7 +15,7 @@ import { draftKey, markDraftSent, saveDraft } from "../drafts.js"
 import { ArrowDown } from "../icons.js"
 import { ProfileOverlay } from "../Profile.js"
 import { WorkingBar } from "../Working.js"
-import { Button, Empty, heldBy, PaneHeader } from "../ui.js"
+import { Button, COLUMN, Empty, heldBy, PaneHeader } from "../ui.js"
 import { useKeyed } from "../useKeyed.js"
 import { useRemembered } from "../useRemembered.js"
 import { useRunStream } from "../useRunStream.js"
@@ -697,7 +697,12 @@ export function ConversationPane({
             // not around the two empty states above because `Empty` centres
             // itself with `h-full`, which resolves against its parent and would
             // quietly become "as tall as the text" inside a wrapper.
-            <div ref={setBody}>
+            //
+            // `COLUMN` here rather than on the scrollport: the scrollbar
+            // belongs to the full width of the pane, and centring the box that
+            // scrolls would pull it in off the edge to float beside the
+            // content.
+            <div ref={setBody} className={COLUMN}>
               {(truncating || view?.truncated) && (
                 <div className="mb-2 border-b border-line pb-2 text-center font-sans text-[11px] text-fg-dim">
                   {view?.truncated
@@ -739,7 +744,11 @@ export function ConversationPane({
           <button
             type="button"
             onClick={toBottom}
-            className="absolute right-4 bottom-3 z-10 flex items-center gap-1.5 rounded-full border border-line bg-chrome px-3 py-1 font-sans text-[11px] text-fg-muted shadow-lg hover:text-fg"
+            // Centred, not `right-4`. Once the transcript is a centred column
+            // the pane's right edge is empty margin, and a pill parked out
+            // there floats beside the conversation instead of belonging to it
+            // — pointing at a column it is no longer over.
+            className="absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-line bg-chrome px-3 py-1 font-sans text-[11px] text-fg-muted shadow-lg hover:text-fg"
           >
             <ArrowDown className="size-3" />
             jump to latest
@@ -755,14 +764,19 @@ export function ConversationPane({
           made in: you read what went wrong, then you decide whether to send it
           again. */}
       {failedTurn && projectId && (
-        <div className="flex shrink-0 items-center gap-2 border-t border-line bg-chrome px-3 py-1.5 font-sans text-[11px] text-fg-muted">
-          <span className="min-w-0 flex-1">
-            That turn did not finish. Your message is still here — put it back in the box to try
-            again, or say something different.
-          </span>
-          <Button onClick={putBack} title="Copy that message, and anything pasted with it, back into the composer">
-            put it back
-          </Button>
+        <div className="shrink-0 border-t border-line bg-chrome px-3 py-1.5 font-sans text-[11px] text-fg-muted">
+          <div className={`flex items-center gap-2 ${COLUMN}`}>
+            <span className="min-w-0 flex-1">
+              That turn did not finish. Your message is still here — put it back in the box to try
+              again, or say something different.
+            </span>
+            <Button
+              onClick={putBack}
+              title="Copy that message, and anything pasted with it, back into the composer"
+            >
+              put it back
+            </Button>
+          </div>
         </div>
       )}
 

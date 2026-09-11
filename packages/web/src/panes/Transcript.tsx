@@ -1135,7 +1135,7 @@ function UserRow({ line }: { line: UserLine }) {
           ))}
         </div>
       )}
-      <Markdown text={line.text} measured />
+      <Markdown text={line.text} />
     </div>
   )
 }
@@ -1622,7 +1622,7 @@ function renderLine(line: Line): ReactNode {
       key={line.key}
       className={`px-1 ${line.nested ? "ml-4 border-l border-line pl-3" : ""}`}
     >
-      <Markdown text={line.text} measured />
+      <Markdown text={line.text} />
     </div>
   )
 }

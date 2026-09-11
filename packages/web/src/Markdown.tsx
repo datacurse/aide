@@ -80,22 +80,15 @@ const COMPONENTS: Components = {
       </code>
     )
   },
-  // `max-w-none` escapes the reading measure `measured` puts on the prose. A
-  // code block held to the prose column is the one place the measure is
-  // actively wrong: it is read by scanning for structure rather than left to
-  // right, and narrowing it only adds horizontal scrolling to lines that would
-  // otherwise have fit. Harmless without `measured`, where nothing caps it.
   pre: ({ children }) => (
-    <pre className="my-2 max-w-none overflow-x-auto rounded border border-line bg-chrome p-2.5 leading-relaxed">
+    <pre className="my-2 max-w-full overflow-x-auto rounded border border-line bg-chrome p-2.5 leading-relaxed">
       {children}
     </pre>
   ),
   table: ({ children }) => (
     // Wide tables scroll inside their own box rather than widening the
-    // pane, which would push the whole transcript sideways. `max-w-none` for
-    // the same reason as `pre` — a table is columns to compare, not a measure
-    // to read along.
-    <div className="my-2 max-w-none overflow-x-auto">
+    // pane, which would push the whole transcript sideways.
+    <div className="my-2 overflow-x-auto">
       <table className="w-full border-collapse text-[12px]">{children}</table>
     </div>
   ),
@@ -126,64 +119,17 @@ const PLUGINS = [remarkGfm]
  * seconds: without it, every message on screen is re-parsed by remark on every
  * tick, forever, to produce the identical tree it produced last time.
  */
-export const Markdown = memo(function Markdown({
-  text,
-  measured = false,
-}: {
-  text: string
-  /**
-   * Hold the prose to a reading measure. Opt-in, and the transcript is the only
-   * caller that asks for it.
-   *
-   * The transcript is the flexible middle of a layout whose other three panes
-   * are fixed (256 + 320 + 256 = 832px of chrome), so the prose is as wide as
-   * the window minus that — ~88 characters per line at 1440px, ~160 at 1920 and
-   * ~258 at 2560. The top of that range is three times the 45–75 character
-   * measure that typography converges on, and it is the width at which the eye
-   * loses the start of the next line on the return sweep.
-   *
-   * `MEASURE_PX` and not a `ch` value, though `ch` is the usual advice: `1ch` is
-   * the width of the current font's `0`, which self-corrects when the font can
-   * change. This one cannot — `--font-sans` is fixed in `index.css` — so `ch`
-   * would buy nothing and cost the next reader the ability to tell what the
-   * number means without computing it.
-   *
-   * It is NOT on by default, because the other caller is the profile dialog,
-   * whose document is mostly tables and stat rows inside a 832px modal: capping
-   * that is narrowing a document to 680px inside a box built to hold it.
-   */
-  measured?: boolean
-}) {
+export const Markdown = memo(function Markdown({ text }: { text: string }) {
   return (
     // `min-w-0` and `break-words` together are what keep a transcript inside its
     // pane. A long unbroken token — a Windows path, a flag, a URL — has no break
     // opportunity, so by default it widens its container rather than wrapping,
     // and the whole conversation gains a horizontal scrollbar because of one
     // line buried in it.
-    <div
-      className={`min-w-0 font-sans text-[13px] leading-relaxed break-words text-fg ${
-        measured ? MEASURE_PX : ""
-      }`}
-    >
+    <div className="min-w-0 font-sans text-[13px] leading-relaxed break-words text-fg">
       <ReactMarkdown remarkPlugins={PLUGINS} components={COMPONENTS}>
         {text}
       </ReactMarkdown>
     </div>
   )
 })
-
-/**
- * The reading measure, ~103 characters at 13px Segoe UI.
- *
- * Deliberately wider than the 66 characters typography would ask for, on two
- * counts that are about this transcript rather than about prose in general.
- * The text is dense technical writing full of inline `code`, paths and flags,
- * which is scanned for a name as often as it is read along. And it shares the
- * pane with tool rows, diffs and the timeline, which are full-width and
- * monospace — a 620px column of prose beside a full-width `pre` does not read
- * as a considered measure, it reads as a pane that failed to lay out.
- *
- * Under ~1500px of window it changes nothing: the pane is already narrower than
- * this, so the cap only engages on the wide screens that created the problem.
- */
-const MEASURE_PX = "max-w-[680px]"
