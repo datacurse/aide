@@ -308,28 +308,41 @@ export function ToolTimeline({
   const wheelAcc = useRef(0)
 
   /**
-   * The wheel, over the grid, does the thing the moment calls for.
+   * The wheel, over the STRIP, does the thing the moment calls for.
    *
    * With a card OPEN it scrubs: each notch steps the selection through the
    * calls in the order they happened, the card follows, and the grid pans
    * itself to keep the selected dot in view. The wheel is owned outright in
    * this mode, ends clamped — you are inspecting the grid, not the page.
-   * (This is also why "hover and wheel" seemed dead before: on a grid that
-   * fits its box, panning — the only thing the wheel did then — has nowhere
-   * to go.)
    *
    * With NOTHING selected it pans sideways — a horizontal scroller inside a
-   * vertical one has no wheel axis of its own — and stays polite: a grid
-   * that fits never takes the wheel, and one at either edge hands it back to
-   * the page instead of going dead under the pointer.
+   * vertical one has no wheel axis of its own — and stays polite: one at
+   * either edge hands the event back to the page instead of going dead under
+   * the pointer.
+   *
+   * It is bound to the strip and NOT to the grid, which is the whole point:
+   * the grid is a tall block in the middle of a transcript somebody is
+   * reading, so a wheel over it that pans or scrubs is the conversation
+   * refusing to scroll under the pointer for reasons nothing on screen
+   * explains — and the notch is spent on a sideways nudge nobody asked for.
+   * The strip IS this grid's scrollbar (see below), and a scrollbar is the
+   * one place a wheel unambiguously means "move this thing". Over the grid
+   * the event is simply not claimed, so `useSmoothWheel` on the transcript
+   * above sees it and the conversation scrolls as it does everywhere else.
    *
    * A manual non-passive listener, because React registers `onWheel`
    * passively and a passive listener cannot preventDefault — the page would
    * scroll along with whichever behaviour ran.
+   *
+   * `win` is in the deps because the strip only exists while the grid
+   * overflows: mounted on a later render, a `[]` effect would have run
+   * against a null ref and the strip's wheel would be dead for the life of
+   * the turn.
    */
   useEffect(() => {
     const el = wrap.current
-    if (!el) return
+    const st = strip.current
+    if (!el || !st) return
     // One selection step per standard mouse notch (~100px of delta);
     // trackpads accumulate their smaller deltas up to the same threshold.
     const STEP = 100
@@ -368,9 +381,9 @@ export function ToolTimeline({
       e.preventDefault()
       el.scrollLeft = next
     }
-    el.addEventListener("wheel", onWheel, { passive: false })
-    return () => el.removeEventListener("wheel", onWheel)
-  }, [])
+    st.addEventListener("wheel", onWheel, { passive: false })
+    return () => st.removeEventListener("wheel", onWheel)
+  }, [win !== null])
 
   const seek = (clientX: number) => {
     const el = wrap.current
@@ -547,7 +560,11 @@ export function ToolTimeline({
           into the space it was describing, which reads as a scrollbar floating
           loose above an unrelated minimap. Sharing the width also makes the
           strip mean the same thing at every length, which is what lets it be
-          seeked by fraction. */}
+          seeked by fraction.
+
+          It also takes the WHEEL, and it is the only part of this component
+          that does — hovering the grid and turning the wheel scrolls the
+          conversation, as it does over any other block of a transcript. */}
       {win !== null && (
         <div
           ref={strip}
@@ -558,7 +575,14 @@ export function ToolTimeline({
           onPointerMove={(e) => {
             if (e.buttons) seek(e.clientX)
           }}
-          className="relative mb-1 flex h-3.5 cursor-crosshair items-end gap-px select-none"
+          // `py-1 -my-1` widens what the pointer has to land on without moving
+          // a pixel of layout: the strip is 14px tall, and now that it is the
+          // ONLY thing here that takes the wheel, 14px is a target you have to
+          // aim at. The explicit `h-3.5` goes with it — under `border-box`,
+          // padding inside a fixed height eats the content box and squashes
+          // every tick — so the row's height comes from the tallest tick,
+          // which is `h-3.5` anyway.
+          className="relative -my-1 mb-0 flex cursor-crosshair items-end gap-px py-1 select-none"
         >
           {t.messages.map((m) => (
             <span
@@ -584,7 +608,12 @@ export function ToolTimeline({
           ))}
           {composing && <span className="h-2 min-w-0 flex-1 basis-0 animate-pulse bg-info" />}
           <span
-            className="pointer-events-none absolute -inset-y-0.5 border border-fg-dim bg-white/5"
+            // `inset-y-0.5` and not `-inset-y-0.5`: the box gained 4px of
+            // padding top and bottom to be a wheel target, so a negative inset
+            // measured against it would draw the window taller than the ticks
+            // it is describing. Half the padding back in puts its edges 2px
+            // outside the tallest tick, which is where they were.
+            className="pointer-events-none absolute inset-y-0.5 border border-fg-dim bg-white/5"
             style={{ left: `${(win.left * 100).toFixed(2)}%`, width: `${(win.width * 100).toFixed(2)}%` }}
           />
         </div>
@@ -598,8 +627,8 @@ export function ToolTimeline({
           cannot see — which failed, which is still running — where the native
           bar only says how far along you are. Two bars for one axis, one of
           them redundant, on a component whose whole job is to be read at a
-          glance. Scrolling itself is untouched: the wheel handler above, the
-          drag, and `scrollIntoView` all still work, so nothing here is a
+          glance. Scrolling itself is untouched: the strip's own wheel handler,
+          the drag, and `scrollIntoView` all still work, so nothing here is a
           scrollbar removed without a replacement. */}
       <div
         ref={wrap}

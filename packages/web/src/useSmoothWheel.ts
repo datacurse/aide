@@ -84,8 +84,8 @@ export function useSmoothWheel(
    * Off puts the native wheel back.
    *
    * For the case where smoothing would be wrong rather than as a preference:
-   * the timeline owns its wheel outright for scrubbing, so a scroller that
-   * contains one must not also smooth it.
+   * the timeline's strip owns its wheel outright for scrubbing, so a scroller
+   * that contains one must not also smooth it.
    */
   enabled = true,
 ): void {
@@ -162,11 +162,13 @@ export function useSmoothWheel(
 
     const onWheel = (e: WheelEvent) => {
       // Somebody inside already claimed this wheel and it is only passing
-      // through on its way up. The tool timeline does exactly that — it scrubs
-      // the selected call, or pans its own grid sideways, and preventDefaults
-      // when it does — and without this test the transcript containing it
-      // would smooth-scroll on the same notch, so one turn of the wheel both
-      // stepped the card and slid the conversation out from under it.
+      // through on its way up. The tool timeline's overview STRIP does exactly
+      // that — it scrubs the selected call, or pans the grid sideways, and
+      // preventDefaults when it does — and without this test the transcript
+      // containing it would smooth-scroll on the same notch, so one turn of
+      // the wheel both stepped the card and slid the conversation out from
+      // under it. The grid itself deliberately claims nothing, so a wheel over
+      // the body of a timeline scrolls the conversation like any other block.
       if (e.defaultPrevented) return
       // Left to the browser, all of it. Ctrl+wheel is zoom, shift+wheel is the
       // horizontal axis, and a non-vertical wheel is a horizontal scroller's

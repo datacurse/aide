@@ -468,10 +468,17 @@ Decisions already taken, which are not gaps to fill:
   `position: sticky` in the app; v5 is a Lenis wrapper. So there was nothing to
   buy: the same architecture, plus a dependency and somebody else's open bugs.
   (2) `defaultPrevented`
-  is tested first, because the tool timeline owns the wheel over its grid — it
-  scrubs the selected call, or pans sideways — and the transcript containing it
-  would otherwise smooth-scroll on the same notch, so one turn both stepped the
-  card and slid the conversation out from under it. (3) At an edge the event is
+  is tested first, because the tool timeline's overview strip owns the wheel
+  over itself — it scrubs the selected call, or pans the grid sideways — and
+  the transcript containing it would otherwise smooth-scroll on the same notch,
+  so one turn both stepped the card and slid the conversation out from under it.
+  The GRID claims nothing, and that is the correction rather than the original
+  design: the wheel was bound to the scrollport for a while, which made a tall
+  block in the middle of a conversation eat every notch aimed at reading past
+  it — the page stuck under the pointer, the notch spent on a sideways nudge
+  nobody asked for, and no way to tell that from the app being unresponsive.
+  A scrollbar is the one place a wheel unambiguously means "move this thing",
+  and the strip IS this grid's scrollbar, so it is the only part that takes it. (3) At an edge the event is
   handed back un-prevented, which is what keeps a nested list from going dead
   under the pointer. (4) `Scroller`'s content box is `min-h-full`, because
   several of these lists draw `Empty`, which centres itself with `h-full` against
@@ -1139,7 +1146,18 @@ Decisions already taken, which are not gaps to fill:
   one is hidden: two bars for one axis on a component whose whole job is to be
   read at a glance, and the redundant one was the less useful. Nothing is
   removed without a replacement — the wheel handler, the drag and
-  `scrollIntoView` all still scroll it. The ticks are `flex-1 basis-0`
+  `scrollIntoView` all still scroll it. Being the scrollbar is also what makes
+  it the one place the WHEEL is claimed: it is bound to the strip and not to
+  the grid, so hovering the body of a timeline and turning the wheel scrolls
+  the conversation like any other block (see the `defaultPrevented` note in the
+  wheel entry for what the other way round cost). The effect's dep is
+  `win !== null`, because the strip does not exist while the grid fits — a `[]`
+  effect would run against a null ref and the strip would be wheel-dead for the
+  life of the turn. The box carries `py-1 -my-1` for a wheelable target: the
+  explicit `h-3.5` had to go with it, since padding inside a fixed height under
+  `border-box` eats the content box and squashes every tick, and the window
+  indicator's `-inset-y-0.5` became `inset-y-0.5` so it stays sized to the ticks
+  rather than to the padded box. The ticks are `flex-1 basis-0`
   and not a fixed 3px, which is the bug worth remembering: fixed ticks make the
   strip as long as the turn happens to be (61 messages drew ~244px), while the
   window indicator over them is positioned in PERCENTAGES of the strip — so the
