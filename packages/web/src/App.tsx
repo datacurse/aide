@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { projectGates, type BridgedChat } from "@aide/protocol"
+import { projectGates, visibleHolder, type BridgedChat } from "@aide/protocol"
 import { api, type GitPending, type Health, type ProjectView } from "./api.js"
 import { CHIME_KEY } from "./chime.js"
 import { usePoll } from "./usePoll.js"
@@ -18,7 +18,7 @@ import { ConversationPane } from "./panes/Conversation.js"
 import { ConversationList } from "./panes/Conversations.js"
 import { PendingRail } from "./panes/Pending.js"
 import { RemotePicker } from "./RemotePicker.js"
-import { Button, Empty, heldBy, LOCKED, PaneHeader, SELECTED } from "./ui.js"
+import { Button, Empty, heldBy, heldByCommit, LOCKED, PaneHeader, SELECTED } from "./ui.js"
 
 /** While anything is in flight the lists need to move on their own. */
 const POLL_MS = 1500
@@ -412,78 +412,97 @@ export function App() {
           {projects.length === 0 ? (
             <Empty>No projects yet. Add a git repository to get started.</Empty>
           ) : (
-            projects.map((p) => (
-              // A row, with the name as its own button and `forget` as a second
-              // one beside it. NOT one button around both: a button inside a
-              // button is markup a browser fixes by dropping the inner one, so
-              // the ✕ would be silently unclickable rather than visibly wrong.
-              <div key={p.id} className="group relative flex items-center">
-                {/* Every row, so the answer is a hover away without opening the
-                    project. The line below is for the one you are working in. */}
-                <Hint hint={p.root}>
-                  <button
-                    type="button"
-                    onClick={() => navigate({ projectId: p.id })}
-                    // The same frame the chat list draws, because two lists side
-                    // by side that disagree about what "selected" looks like read
-                    // as one of them being broken. It also gets the same thing out
-                    // of the way here: the holder's name is `text-info`, and on a
-                    // filled navy row that was blue text on a blue plate.
-                    className={`flex w-full flex-col border py-[3px] pr-8 pl-3 text-left font-sans text-[13px] hover:bg-hover ${
-                      p.id === projectId ? `${SELECTED} text-fg` : "border-transparent text-fg-muted"
-                    }`}
-                  >
-                    <span className="flex w-full items-center gap-2">
-                      <span
-                        className={`inline-block size-1.5 shrink-0 rounded-full ${
-                          p.holder ? "bg-info animate-pulse" : "bg-fg-dim"
-                        }`}
-                      />
-                      <span className="flex-1 truncate">{p.name}</span>
-                      {/* Which conversation has the repo, not how many do — one
-                          project runs one agent, so a count would be a boolean
-                          wearing a number's clothes. The name is what you need
-                          when you are wondering what is in your way. */}
-                      {p.holder && (
-                        <Hint hint={`"${p.holder.title}" has this checkout`}>
-                          <span className="max-w-[8rem] truncate text-[10px] text-info">
-                            {p.holder.title}
-                          </span>
-                        </Hint>
-                      )}
-                    </span>
-                    {/* Where the work happens, which is the project root and
-                        nothing else — every run and every chat is in it, so it
-                        belongs to the project rather than to a conversation. It
-                        used to be a 22px bar along the foot of the transcript,
-                        and for a chat that had not run yet it could not even say
-                        the path: it read "runs in the project root". A row of
-                        window height for one line of text that is the same for
-                        every chat in a project is the same trade the title bar
-                        lost.
-
-                        Only under the selected row. On all of them the rail is a
-                        list of paths you have to read past to find a name. */}
-                    {p.id === projectId && (
-                      <span className="w-full truncate pl-[14px] text-[10px] text-fg-dim">
-                        {p.root}
+            projects.map((p) => {
+              // What this row may SAY is running — which is not `p.holder`. An
+              // auto-commit holds the checkout and is reported like any other
+              // run, and a rail that pulses for it spends the one indicator
+              // that means "an agent is working here" on background
+              // bookkeeping. See `visibleHolder`.
+              const shown = visibleHolder(p.holder)
+              return (
+                // A row, with the name as its own button and `forget` as a
+                // second one beside it. NOT one button around both: a button
+                // inside a button is markup a browser fixes by dropping the
+                // inner one, so the ✕ would be silently unclickable rather
+                // than visibly wrong.
+                <div key={p.id} className="group relative flex items-center">
+                  {/* Every row, so the answer is a hover away without opening the
+                      project. The line below is for the one you are working in. */}
+                  <Hint hint={p.root}>
+                    <button
+                      type="button"
+                      onClick={() => navigate({ projectId: p.id })}
+                      // The same frame the chat list draws, because two lists side
+                      // by side that disagree about what "selected" looks like read
+                      // as one of them being broken. It also gets the same thing out
+                      // of the way here: the holder's name is `text-info`, and on a
+                      // filled navy row that was blue text on a blue plate.
+                      className={`flex w-full flex-col border py-[3px] pr-8 pl-3 text-left font-sans text-[13px] hover:bg-hover ${
+                        p.id === projectId
+                          ? `${SELECTED} text-fg`
+                          : "border-transparent text-fg-muted"
+                      }`}
+                    >
+                      <span className="flex w-full items-center gap-2">
+                        <span
+                          className={`inline-block size-1.5 shrink-0 rounded-full ${
+                            shown ? "bg-info animate-pulse" : "bg-fg-dim"
+                          }`}
+                        />
+                        <span className="flex-1 truncate">{p.name}</span>
+                        {/* Which conversation has the repo, not how many do — one
+                            project runs one agent, so a count would be a boolean
+                            wearing a number's clothes. The name is what you need
+                            when you are wondering what is in your way. */}
+                        {shown && (
+                          <Hint hint={`"${shown.title}" has this checkout`}>
+                            <span className="max-w-[8rem] truncate text-[10px] text-info">
+                              {shown.title}
+                            </span>
+                          </Hint>
+                        )}
                       </span>
-                    )}
-                  </button>
-                </Hint>
-                {/* Absolutely placed over the row's right edge, which the row's
-                    own `pr-8` keeps clear. In the flex flow it would compete with
-                    the name for width and shorten every title by 24px to make room
-                    for something that is only visible on hover. */}
-                <div className="absolute top-1/2 right-1 -translate-y-1/2">
-                  <ForgetProject
-                    name={p.name}
-                    blocked={p.holder ? heldBy(p.holder.title) : null}
-                    onForget={() => void forgetProject(p.id)}
-                  />
+                      {/* Where the work happens, which is the project root and
+                          nothing else — every run and every chat is in it, so it
+                          belongs to the project rather than to a conversation. It
+                          used to be a 22px bar along the foot of the transcript,
+                          and for a chat that had not run yet it could not even say
+                          the path: it read "runs in the project root". A row of
+                          window height for one line of text that is the same for
+                          every chat in a project is the same trade the title bar
+                          lost.
+
+                          Only under the selected row. On all of them the rail is a
+                          list of paths you have to read past to find a name. */}
+                      {p.id === projectId && (
+                        <span className="w-full truncate pl-[14px] text-[10px] text-fg-dim">
+                          {p.root}
+                        </span>
+                      )}
+                    </button>
+                  </Hint>
+                  {/* Absolutely placed over the row's right edge, which the row's
+                      own `pr-8` keeps clear. In the flex flow it would compete with
+                      the name for width and shorten every title by 24px to make room
+                      for something that is only visible on hover. */}
+                  <div className="absolute top-1/2 right-1 -translate-y-1/2">
+                    {/* Reads the REAL holder, not `shown`. The daemon refuses a
+                        forget under any hold, a commit included — dropping the
+                        registry entry does not stop the run, it orphans it — so
+                        hiding the padlock here would leave a ✕ whose only outcome
+                        is a red line. What changes is the wording: a commit is
+                        not something to wait for or stop, and not worth naming. */}
+                    <ForgetProject
+                      name={p.name}
+                      blocked={
+                        p.holder ? (p.holder.held ? heldByCommit : heldBy(p.holder.title)) : null
+                      }
+                      onForget={() => void forgetProject(p.id)}
+                    />
+                  </div>
                 </div>
-              </div>
-            ))
+              )
+            })
           )}
         </div>
 

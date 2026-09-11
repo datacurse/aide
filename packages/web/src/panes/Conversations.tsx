@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import type { Attachment, BridgedChat, ChatOrder, ChatStatus } from "@aide/protocol"
-import { born, bridgedChats, isImageAttachment, sortChats } from "@aide/protocol"
+import { born, bridgedChats, isImageAttachment, sortChats, visibleHolder } from "@aide/protocol"
 import { api, type ConversationRow, type LockHolder } from "../api.js"
 import { collectAttachments } from "../attachments.js"
 import {
@@ -1326,10 +1326,21 @@ export function ConversationList({
    * Depending on the object below would rebuild and re-sort the whole list twice
    * a second; depending on what was actually read from it rebuilds only when the
    * lock genuinely moves.
+   *
+   * Read through `visibleHolder`, so an auto-commit is not a run as far as this
+   * list is concerned. It is the sharpest version of that leak anywhere: a
+   * commit is ATTRIBUTED to the chat whose turn it follows, so `holdingSession`
+   * is that chat's own id and every rule below fires on the row you were just
+   * reading. Its tick-box became `RunDial` with a clock counting up, its hint
+   * said an agent had the checkout, `newest` pinned it to the top as the live
+   * run, and the tick you pressed was forced back to false by `withLock` —
+   * a chat that answered you a minute ago, still apparently working, for as
+   * long as the daemon spent writing history.
    */
-  const holdingSession = holder?.sessionId ?? null
-  const holderBlocked = holder?.blocked ?? false
-  const running = holder !== null
+  const shown = visibleHolder(holder)
+  const holdingSession = shown?.sessionId ?? null
+  const holderBlocked = shown?.blocked ?? false
+  const running = shown !== null
 
   /**
    * The chat the project's most recent run happened in.
@@ -1503,7 +1514,7 @@ export function ConversationList({
         bridge={row.bridge}
         order={order}
         status={row.status}
-        heldSince={row.bridge.sessionId === holdingSession ? (holder?.startedAt ?? null) : null}
+        heldSince={row.bridge.sessionId === holdingSession ? (shown?.startedAt ?? null) : null}
         selected={row.bridge.sessionId === selected}
         onOpen={() => onSelect(row.bridge.sessionId)}
       />
@@ -1524,7 +1535,7 @@ export function ConversationList({
         chat={row.chat}
         order={order}
         status={row.status}
-        heldSince={row.chat.sessionId === holdingSession ? (holder?.startedAt ?? null) : null}
+        heldSince={row.chat.sessionId === holdingSession ? (shown?.startedAt ?? null) : null}
         ranLast={row.chat.sessionId === newest}
         selected={row.chat.sessionId === selected}
         onOpen={() => onSelect(row.chat.sessionId)}

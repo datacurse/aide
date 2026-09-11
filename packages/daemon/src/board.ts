@@ -226,7 +226,16 @@ export async function chatStatuses(
     // what the `{working, blocked}` projection this used to take was hiding: it
     // could be built with `working: false` over a live turn, and nothing would
     // have caught it.
-    const turn = live.turnForSession(sessionId)
+    const found = live.turnForSession(sessionId)
+    // A HELD record is the auto-commit attributed to this conversation, and it
+    // is not this conversation working. `turnForSession` prefers the chat turn
+    // and falls back to the commit, which is right for its other callers — the
+    // browser has to be able to find the run against a session — but reporting
+    // it here puts a "working" badge on a chat that answered minutes ago, for
+    // as long as the daemon spends writing history. Nobody asked for the
+    // commit and nothing waits on it; the whole point of automating it is that
+    // it does not appear as work in progress.
+    const turn = found?.held ? null : found
     out[sessionId] = {
       // Working outranks done: a chat you ticked off and then asked one more
       // thing of is running, whatever the tick says.

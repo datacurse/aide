@@ -54,6 +54,44 @@ export interface GateHolder {
   held?: boolean
 }
 
+/**
+ * The holder a surface may DRAW, which is not the holder the gates read.
+ *
+ * A commit is a run — it has a run id, it holds the checkout, and `holderFor`
+ * reports it — so every surface that drew "something is running here" off the
+ * lock drew the auto-commit too. That is the one thing committing was automated
+ * to stop doing. The rail pulsed a dot, named the run `committing what is
+ * uncommitted` in `text-info` and swapped `forget` for a padlock; the chat list
+ * turned the chat the commit is ATTRIBUTED to into a spinning dial with a clock
+ * on it. Nobody asked for any of it, nothing waits on it, and a send is queued
+ * rather than refused underneath it — so what the human sees is the work
+ * apparently still going, on a chat that answered a minute ago, with a lock over
+ * a button that did not need one.
+ *
+ * `liveCommit.ts` already says this for the conversation pane ("nothing about it
+ * is drawn while it is in flight") and `projectGates` already says it for the
+ * controls. This is the same sentence for everything that draws the lock, in one
+ * place for the reason the rest of this file is in one place: the rule was
+ * written twice and the two surfaces that never got it are the ones in the
+ * screenshot.
+ *
+ * The gates deliberately do NOT read this. `push` is blocked by a commit and
+ * must stay blocked — its tip is about to move — and it is the one control whose
+ * refusal is allowed to name a commit, because there a commit really is in the
+ * way.
+ *
+ * Generic over the holder rather than taking `GateHolder`, so a caller gets its
+ * own type back and the SAME object: the chat list depends on that identity —
+ * it extracts primitives off the holder precisely to avoid re-sorting on every
+ * poll, and a defensive copy here would restore the churn. The constraint is
+ * `object` rather than `{ held?: boolean }` because a `held`-less holder is a
+ * real case (a daemon older than the field), and against the narrower bound TS
+ * rejects one outright as having no properties in common.
+ */
+export function visibleHolder<T extends object>(holder: T | null): T | null {
+  return holder && (holder as { held?: boolean }).held ? null : holder
+}
+
 export interface ProjectGates {
   /**
    * Why a chat's first turn cannot be SENT here, or null — the ▶ on a parked

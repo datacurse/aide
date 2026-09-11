@@ -51,6 +51,7 @@ import {
   restartDecision,
   stripPartialTurnSummary,
   stripTurnSummary,
+  visibleHolder,
   type Health,
   type RunEvent,
   type RunEventBody,
@@ -994,6 +995,35 @@ console.log("\nwhat a project's gates refuse")
     "but it does hold the push",
     committing.push === held("a chat"),
     "pushing while a commit lands sends a branch whose tip is about to move",
+  )
+
+  // The gates say what a commit may BLOCK; `visibleHolder` says what it may be
+  // DRAWN as, which is nothing. Both were needed and only the first existed:
+  // the rail read `p.holder` directly and pulsed a dot, printed "committing
+  // what is uncommitted" in the colour reserved for a live agent, and put a
+  // padlock where `forget` goes — all for background bookkeeping nobody asked
+  // for. Same rule as `liveCommit.ts` states for the conversation pane, in one
+  // place so the next surface to draw the lock inherits it.
+  check(
+    "a commit is not a holder anything draws",
+    visibleHolder({ ...holder, held: true }) === null,
+    "the rail's pulse means an agent has your checkout — spending it on a commit makes it mean nothing",
+  )
+  const live = { ...holder, held: false }
+  check(
+    "a chat's turn still is",
+    visibleHolder(live) === live,
+    "and it is the SAME object, not a copy — the chat list depends on the identity to avoid re-sorting on every poll",
+  )
+  check(
+    "an absent holder stays absent",
+    visibleHolder(null) === null,
+    "a free project must not acquire one on the way through",
+  )
+  check(
+    "and a holder from a daemon that predates the field is drawn",
+    visibleHolder(holder) === holder,
+    "absent `held` means a turn — the same fail-toward-yesterday reading the gates take",
   )
 }
 

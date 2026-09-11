@@ -35,6 +35,24 @@ export const heldBy = (title: string) =>
   `"${title}" is working in this checkout. Wait for it to finish, or stop it.`
 
 /**
+ * The same lock, when what holds it is the auto-commit.
+ *
+ * Its own sentence because `heldBy`'s remedies are both wrong here: there is
+ * nothing to stop — a commit has no interrupt and no surface to press it on —
+ * and "wait for it to finish" asks for patience with something deliberately
+ * built to need none. It names no title either. The run is called "committing
+ * what is uncommitted", and printing that is how this leaked onto the rail in
+ * the first place: a conversation the human recognises is worth naming, the
+ * daemon's own bookkeeping is not.
+ *
+ * Only ONE control ever says this — `forget`, which the daemon refuses under
+ * any holder. Everything else either ignores a commit (the gates) or draws
+ * nothing for it (`visibleHolder`). A second caller appearing is the signal
+ * that something has started treating a commit as a run again.
+ */
+export const heldByCommit = "aide is committing this project. It will only be a moment."
+
+/**
  * How the row you have open is drawn, in every list there is: a frame, not a
  * fill. `list.focusOutline`, which is the key VS Code draws this with.
  *

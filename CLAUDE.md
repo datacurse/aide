@@ -98,8 +98,8 @@ Decisions already taken, which are not gaps to fill:
   static import is hoisted and its output would print above `repo: <path>` — the
   run would still be correct and would read as though the sections had been
   shuffled. When changing any of this, the check that matters is that the
-  assertion count does not fall: `pnpm smoke` prints 812 `ok` lines as of
-  2026-09-10, and a refactor that quietly drops some is the failure this number
+  assertion count does not fall: `pnpm smoke` prints 816 `ok` lines as of
+  2026-09-11, and a refactor that quietly drops some is the failure this number
   exists to catch.
   It has fallen twice on purpose, and both times the removal is what to check
   against. The card view went and took ~30 of its own assertions with it, leaving
@@ -761,6 +761,32 @@ Decisions already taken, which are not gaps to fill:
   awaiting the wait — a commit can outlast an HTTP timeout, and a browser that
   restores its draft over a turn the daemon still runs turns one message into
   two.
+- **A commit is not drawn, and `visibleHolder` is where that is decided for
+  every surface at once.** The rule was already written twice — `liveCommit.ts`
+  for the conversation pane, `projectGates` for the controls — and the two
+  surfaces nobody thought to sweep were still drawing it: the projects rail
+  pulsed the dot that means an agent has your checkout, printed `committing what
+  is uncommitted` in `text-info` beside the project name, and swapped `forget`
+  for a padlock; the chat list turned the attributed chat's tick-box into a
+  `RunDial` with a clock counting up, forced its `done` bit back to false and
+  pinned it to the top as `newest`. All of it for background bookkeeping that
+  queues sends rather than refusing them. So it is one function in protocol now,
+  and `chatStatuses` refuses to report a held record as `working` at the source
+  as well — the browser's `withLock` would have masked that, but a wire field
+  that says a finished chat is running is a second answer waiting to be believed.
+  Three things are decisions rather than details. (1) The GATES deliberately do
+  not read it: `push` is still blocked by a commit and must be, since its tip is
+  about to move, so it is the one control whose refusal may name one. (2)
+  `forget` keeps its padlock, from the REAL holder, because the daemon refuses a
+  forget under any hold — dropping the registry entry does not stop the run, it
+  orphans it — and a ✕ whose only outcome is a red line is worse than a lock that
+  explains itself; what changed is the wording, `heldByCommit`, since `heldBy`'s
+  "wait for it, or stop it" offers two remedies that do not exist for a commit.
+  (3) It returns the SAME object rather than a copy, because the chat list
+  extracts primitives off the holder precisely to avoid re-sorting twice a
+  second. Its constraint is `object` and not `{ held?: boolean }`: a holder with
+  no `held` at all is a real case (a daemon older than the field) and TS rejects
+  one against the narrower bound as sharing no properties with it.
 - **A queued turn means a conversation has TWO records, and `turnForSession`
   answers with the turn.** The auto-commit is attributed to the chat whose turn
   it follows, so typing into that chat while it lands leaves the lane holding

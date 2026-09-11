@@ -629,6 +629,43 @@ console.log("\ndone, and undone")
     "blocked is only ever true of the run in flight",
   )
 
+  // A commit attributed to a conversation is not that conversation working.
+  // `turnForSession` answers with the held record when it is the only one —
+  // right for the browser, which has to find the run against a session — so
+  // without the `held` test here the chat the auto-commit follows wears a
+  // "working" badge, with a dial and a clock counting up, for as long as the
+  // daemon spends writing history. Nobody asked for the commit and nothing
+  // waits on it; committing was automated precisely so it does not read as
+  // work in progress. Invisible to `tsc`, and the web's own `withLock` would
+  // mask it on the rows while `state` stayed wrong on the wire.
+  const committing = (sessionId: string): LiveChats => ({
+    turnForSession: (s) =>
+      s === sessionId
+        ? {
+            runId: "run-commit",
+            projectId: project.id,
+            sessionId,
+            startedAt: 0,
+            text: "committing what is uncommitted",
+            blocked: false,
+            held: true,
+          }
+        : null,
+    holderFor: () => null,
+  })
+
+  statuses = await chatStatuses(project, sessions, committing("sess-done"))
+  check(
+    "an auto-commit does not make the chat it is attributed to read as working",
+    statuses["sess-done"]?.state === "closed",
+    "committing is background work — it must not wear the badge that means an agent has your checkout",
+  )
+  check(
+    "and it is not blocked either",
+    statuses["sess-done"]?.blocked === false,
+    "a commit stops on nothing and asks nobody",
+  )
+
   await reopenChat(project, "sess-done")
   statuses = await chatStatuses(project, sessions, NO_TURNS)
   check(
