@@ -511,6 +511,33 @@ Decisions already taken, which are not gaps to fill:
   deliberately stale, so the drag arithmetic reads `metrics` instead — off the
   stale render, a drag halfway down a growing list tracked the pointer at the
   wrong speed.
+  **It was STILL jittery after all four, and the cause was never the animation
+  — it was what a `scroll` event costs in the transcript.** Worth knowing as a
+  general rule: smoothing the wheel converts a handful of scroll events per notch
+  into one per frame, so anything hanging off `scroll` gets its cost multiplied by
+  ~20 and every pre-existing sin on that path becomes a dropped frame. Three sat
+  on the chat's. (1) The bottom fade was `style={{opacity: below}}` from a
+  `useState`, QUANTIZED to 12 steps over 120px with a comment explaining that
+  live pixels "re-renders the entire transcript on every one of those frames".
+  Quantizing was treating the symptom — a step every 10px means one 100px notch
+  still fired ~10 full transcript re-renders — and it is a paint-only property, so
+  it is written to the node through a `fade` ref now and the ramp is continuous
+  rather than stepped. That also removed its `transition-opacity`, which on a
+  value written every frame is a filter lagging the scroll it tracks. (2)
+  `useStuckQuestion` ran `querySelectorAll` over the whole transcript plus a
+  `getBoundingClientRect` walk on EVERY scroll event — a DOM query and forced
+  synchronous layout inside the frame the wheel was trying to write a position in.
+  The rects are cached as content-relative offsets (`rect.bottom - portTop +
+  scrollTop`, which is what makes them scroll-independent) and rebuilt only from
+  the ResizeObserver and a row-count change, so the scroll path is now a
+  `scrollTop` read and a walk over numbers. (3) `Transcript` rebuilt every row's
+  element tree on every render, so the one `setAt` that DOES fire when a question
+  crosses the fold rebuilt hundreds of syntax-highlighted rows to move one pinned
+  header; the rows are a `useMemo` now, which required memoizing `shown` as well
+  — it was a bare `slice`, so a fresh identity every render would have made the
+  row memo pure decoration. The lesson that generalises past this page: before
+  smoothing a scrollport, audit what is subscribed to its `scroll` event, because
+  the smoothing is what makes an existing per-event cost unaffordable.
 - **There are no native tooltips left; `Hint` draws every one.** A `title`
   attribute is the one piece of UI the theme could never reach — the OS draws
   it, in its own font, in a light box on a dark app, after a delay nobody

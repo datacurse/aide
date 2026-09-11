@@ -584,7 +584,7 @@ export function ConversationPane({
    * chat and starting a turn both put you back at the end; a poll picking up a
    * line deliberately does not.
    */
-  const { atEnd, below, toBottom } = useStickToEnd(scroller, body, [sessionId, runId])
+  const { atEnd, fade, toBottom } = useStickToEnd(scroller, body, [sessionId, runId])
   /**
    * The wheel, eased. Reading a transcript is scrolling, and this is the box
    * that does most of it.
@@ -812,12 +812,19 @@ export function ConversationPane({
               does not need to swallow a tall block of text any more, only to
               soften the couple of lines actually passing under the box.
 
-              Opacity rather than swapping the gradient in and out, so it
-              ramps with the scroll instead of popping at a threshold, and a
-              `transition` covers the quantization steps. */}
+              Opacity rather than swapping the gradient in and out, so it ramps
+              with the scroll instead of popping at a threshold — and written
+              STRAIGHT TO THIS NODE by the hook rather than held in state, which
+              is what stopped a scroll near the bottom of a chat from
+              re-rendering the whole transcript ten times a notch. See the
+              `fade` ref. It carries no `transition` for the same reason it
+              needs none any more: the ramp is continuous now, and a 150ms
+              transition on a value being written every frame is a filter
+              lagging the scroll it is supposed to track. */}
           <div
-            className="h-14 shrink-0 bg-gradient-to-t from-editor via-editor/85 to-transparent transition-opacity duration-150"
-            style={{ opacity: below }}
+            ref={fade}
+            className="h-14 shrink-0 bg-gradient-to-t from-editor via-editor/85 to-transparent"
+            style={{ opacity: 0 }}
           />
           {/* `bg-editor` and not transparent: the gradient has reached full
               opacity by here, so this continues it behind the controls. Left

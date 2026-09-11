@@ -1187,6 +1187,8 @@ function StickyQuestion({ text }: { text: string }) {
 function useStuckQuestion(
   root: HTMLElement | null,
   scroller: RefObject<HTMLElement | null> | undefined,
+  /** How many rows are drawn, so the offset cache can be rebuilt when it changes. */
+  rowCount: number,
 ): number {
   const [at, setAt] = useState(-1)
 
@@ -1195,31 +1197,72 @@ function useStuckQuestion(
     if (!root || !port) return
 
     let frame = 0
+    /**
+     * The question rows, and their offsets INSIDE the scrolling content.
+     *
+     * Rebuilt only when the content or the port actually changes size — never
+     * on a plain scroll. The version that ran `querySelectorAll` plus a
+     * `getBoundingClientRect` walk on every scroll event was the most expensive
+     * thing on the wheel's critical path: a DOM query across a whole transcript
+     * followed by forced synchronous layout, inside the same frame the smoothed
+     * wheel was trying to write a scroll position in. On a long conversation
+     * that is what made the chat jitter and feel unresponsive.
+     *
+     * Stored as offsets into the CONTENT, not as viewport coordinates, which is
+     * what lets the cache survive scrolling: a viewport rect is invalidated by
+     * the very thing being tracked, so caching one would be caching nothing.
+     */
+    let rows: number[] = []
+    const index = () => {
+      // Measured as viewport rects and converted to content coordinates using
+      // the scroll position AT THIS MOMENT. One layout flush for the whole
+      // index, rather than one per scroll event, and the arithmetic is what
+      // makes the result scroll-independent: `rect.bottom - portTop` is the
+      // distance from the top of the port, and adding the current `scrollTop`
+      // turns that into a distance from the top of the content, which does not
+      // change when the content scrolls.
+      const portTop = port.getBoundingClientRect().top
+      const scrolled = port.scrollTop
+      rows = Array.from(root.querySelectorAll<HTMLElement>("[data-question]")).map(
+        (row) => row.getBoundingClientRect().bottom - portTop + scrolled,
+      )
+    }
     const measure = () => {
       frame = 0
-      // The fold is the top edge of the scrollport, not the top of the
-      // transcript: the pane has a header above it and padding inside it, and
-      // measuring against either puts the handover a few pixels out — which is
-      // one flicker of the wrong question at every question.
-      const fold = port.getBoundingClientRect().top
-      const rows = Array.from(root.querySelectorAll<HTMLElement>("[data-question]"))
+      // The fold is the top edge of the scrollport. Expressed as a scroll
+      // offset rather than a viewport coordinate, so it compares directly
+      // against the cached content offsets and needs NO layout read at all —
+      // the whole point of the cache. `scrollTop` is a cheap property read, not
+      // a forced reflow the way `getBoundingClientRect` is.
+      const fold = port.scrollTop
       // The first row still showing something; everything before it is past the
-      // fold. findIndex stops there, so this reads one rectangle more than it
-      // has to and no more.
-      const showing = rows.findIndex((row) => row.getBoundingClientRect().bottom > fold)
+      // fold. findIndex stops there, so this reads no further than it must.
+      const showing = rows.findIndex((bottom) => bottom > fold)
       setAt(showing === -1 ? rows.length - 1 : showing - 1)
     }
-    // One measurement per frame. Scroll fires far faster than the screen
-    // redraws, and each measurement reads layout back out of the browser.
+    // One measurement per frame, because scroll fires faster than the screen
+    // redraws. Cheap now: a `scrollTop` read and a walk over cached numbers.
     const schedule = () => {
       if (!frame) frame = requestAnimationFrame(measure)
     }
+    /**
+     * Re-index, then re-measure.
+     *
+     * This is the expensive path, and it is deliberately NOT on the scroll
+     * event: a reply streaming in, a tool row opened above, or the window
+     * resized all move a question relative to the content and invalidate the
+     * cache. Scrolling does not — it moves the content past the fold, which is
+     * what `measure` compares, so the cached offsets stay true.
+     */
+    const reindex = () => {
+      index()
+      schedule()
+    }
 
+    index()
     measure()
     port.addEventListener("scroll", schedule, { passive: true })
-    // Not on scroll alone: a reply streaming in, a tool row opened above, or the
-    // window resized all move a question across the fold without one.
-    const resize = new ResizeObserver(schedule)
+    const resize = new ResizeObserver(reindex)
     resize.observe(root)
     resize.observe(port)
     return () => {
@@ -1227,7 +1270,10 @@ function useStuckQuestion(
       port.removeEventListener("scroll", schedule)
       resize.disconnect()
     }
-  }, [root, scroller])
+    // `shown.length` so a transcript that grew or folded rebuilds the index even
+    // when nothing changed SIZE — a row replaced by one of equal height moves no
+    // box and fires no ResizeObserver, but it is a different question.
+  }, [root, scroller, rowCount])
 
   return at
 }
@@ -1689,7 +1735,13 @@ export function Transcript({
     () => foldSteps(toLines(events, live, timelineMeta(events)), busy ?? false),
     [events, live, busy],
   )
-  const shown = tail !== undefined && lines.length > tail ? lines.slice(-tail) : lines
+  // Memoized, not just computed: `slice` returns a fresh array on every render,
+  // and the row memo below keys off this identity — left bare, it would miss
+  // every time and the memo would be decoration.
+  const shown = useMemo(
+    () => (tail !== undefined && lines.length > tail ? lines.slice(-tail) : lines),
+    [lines, tail],
+  )
   /**
    * The transcript's own element, held as state rather than in a ref: it is not
    * rendered at all while the log is empty, and an effect that found a null ref
@@ -1699,8 +1751,19 @@ export function Transcript({
   // In the same order the rows are in the document, which is what lets the
   // measured position of the Nth row name the Nth question.
   const questions = shown.filter((l): l is UserLine => l.kind === "user")
-  const under = useStuckQuestion(root, scroller)
+  const under = useStuckQuestion(root, scroller, shown.length)
   const pinned = questions[under]
+
+  /**
+   * The rows, built once per change of the LINES rather than once per render.
+   *
+   * `useStuckQuestion` sets state whenever a question crosses the top of the
+   * scrollport, which is a render in the middle of a scroll — and without this
+   * that render rebuilt every row's element tree, hundreds of them with syntax
+   * highlighting inside, for a change that only moves one pinned header. The
+   * rows do not depend on `under`, so they are hoisted out of its way.
+   */
+  const rendered = useMemo(() => shown.map((line) => renderLine(line)), [shown])
 
   if (shown.length === 0) {
     if (!children) return <Empty>Nothing in this transcript.</Empty>
@@ -1710,7 +1773,7 @@ export function Transcript({
     <div ref={setRoot}>
       {pinned && <StickyQuestion text={pinned.text} />}
       <div className="space-y-1">
-        {shown.map((line) => renderLine(line))}
+        {rendered}
         {children}
       </div>
     </div>
