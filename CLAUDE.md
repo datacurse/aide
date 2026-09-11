@@ -453,7 +453,21 @@ Decisions already taken, which are not gaps to fill:
   has layout and behaviour of its own, and a wrapper would either re-parent them
   or add a second box on the same axis. `Scroller.tsx` is the wrapper for the
   plain `overflow-auto`-div-with-a-list case, and `OverlayScroller` calls the hook
-  DIRECTLY rather than nesting inside it, for that reason. (2) `defaultPrevented`
+  DIRECTLY rather than nesting inside it, for that reason. (1a) A LIBRARY was
+  considered and turned down on the research, not on principle. Lenis is the
+  battle-tested one and it works exactly this way — it hijacks the wheel and
+  writes real `scrollTop` every frame (`wrapper.scrollTo({behavior:'instant'})`,
+  no transform), so it has the identical fight with the follower, and it resyncs
+  to an external write only when it is NOT already animating; mid-animation your
+  write is overwritten on the next frame. It also carries an open issue (#443)
+  where `scrollTo` with `immediate: true` can leave scroll paused until the user
+  scrolls by hand. The scrollbar libraries — OverlayScrollbars, SimpleBar — do not
+  smooth scrolling at all by design ("does NOT implement a custom scroll
+  behaviour"); they restyle a bar, which is what `OverlayScroller` already does.
+  Locomotive v4 was the transform-based one and would have broken every
+  `position: sticky` in the app; v5 is a Lenis wrapper. So there was nothing to
+  buy: the same architecture, plus a dependency and somebody else's open bugs.
+  (2) `defaultPrevented`
   is tested first, because the tool timeline owns the wheel over its grid — it
   scrubs the selected call, or pans sideways — and the transcript containing it
   would otherwise smooth-scroll on the same notch, so one turn both stepped the
@@ -468,6 +482,35 @@ Decisions already taken, which are not gaps to fill:
   The jump-to-end pill is deliberately NOT smoothed: a glide through 5,000px of
   transcript is a long flight through content nobody asked to see, and the
   follower would cancel it mid-air the moment a streaming turn grew the box.
+  **The first version of this shipped GLITCHY, and the four causes are the whole
+  value of this entry** — every one is invisible to `tsc`, to `pnpm build` and to
+  reading the code, and three of them are the obvious way to write it. (1) The
+  interference test compared `el.scrollTop` against the value the element
+  reported after the last write, with 1px of slack. `scrollTop` is a float that
+  reads back SNAPPED to the device pixel grid — which at 125% zoom, this
+  project's own display, is not integers — so the loop's own rounding drift
+  tripped its own hijack test and called `stop()` partway through. The scroll
+  died early at a different random point on every notch: that was most of the
+  stutter. It now measures against `at`, the position the loop INTENDED, with 8px
+  of slack, because nothing legitimately competing for a scroller moves it by
+  less than a rounding error. (2) It advanced by reading `el.scrollTop` back each
+  frame instead of keeping its own float. The tail of every scroll is sub-pixel
+  steps, which round to NO MOVEMENT, repeatedly — so the scroll stalls short
+  while the loop believes it is still running. The animation's position is
+  authoritative in JS now and the element is written, never read. (3) The easing
+  was `gap * 0.18` PER FRAME, which is per-frame and therefore 2.4× faster on a
+  144Hz display than a 60Hz one. It is `rate ** dt` now, with `dt` capped at 50ms
+  so a late frame eases rather than teleports. (4) `OverlayScroller` held the
+  thumb's POSITION in React state and wrote it from the scroll handler. A
+  smoothed wheel fires `scroll` every animation frame, so that was a `setThumb`
+  and a re-render of the whole chat list 60–144 times a second — the native wheel
+  fired a handful per notch and got away with it. Whether the thumb EXISTS is
+  still state (it mounts a node, and only changes when the content crosses the
+  box height); where it sits is written straight to the node. The trap that
+  creates is real and worth knowing: the rendered `thumb` state is now
+  deliberately stale, so the drag arithmetic reads `metrics` instead — off the
+  stale render, a drag halfway down a growing list tracked the pointer at the
+  wrong speed.
 - **There are no native tooltips left; `Hint` draws every one.** A `title`
   attribute is the one piece of UI the theme could never reach — the OS draws
   it, in its own font, in a light box on a dark app, after a delay nobody

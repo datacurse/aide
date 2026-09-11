@@ -36,6 +36,32 @@ export function OverlayScroller({
   const [thumb, setThumb] = useState<{ top: number; height: number } | null>(null)
   useSmoothWheel(scroller)
 
+  /**
+   * The thumb's own node, so its POSITION can be written without a render.
+   *
+   * Whether the thumb exists at all is React's business — that mounts and
+   * unmounts a node, and it changes only when the content crosses the height of
+   * the box. Where it sits is not: it changes on every scroll event, and the
+   * smoothed wheel now fires one of those every animation frame. Held as state,
+   * that was a `setThumb` per frame re-rendering the whole chat list beneath it
+   * — 60 to 144 times a second — which is most of what "glitchy" was here. The
+   * native wheel fired a handful of events per notch and got away with it.
+   */
+  const bar = useRef<HTMLDivElement>(null)
+  /**
+   * The live numbers, for the drag and the track-press to do their sums with.
+   *
+   * The rendered `thumb` state goes stale by design now — `measure` stops calling
+   * `setThumb` once the bar is mounted — and the drag divides by the thumb's
+   * height. Read off a stale render, the grab ratio was out by however much the
+   * list had grown since, so a drag halfway down a streaming chat list tracked
+   * the pointer at the wrong speed.
+   */
+  const metrics = useRef<{ top: number; height: number } | null>(null)
+  /** Whether the bar is mounted, so `measure`'s closure can tell. */
+  const thumbUp = useRef(false)
+  thumbUp.current = thumb !== null
+
   const measure = () => {
     const el = scroller.current
     if (!el) return
@@ -48,6 +74,16 @@ export function OverlayScroller({
     // small to grab, and the native ones stop shrinking at about this size too.
     const height = Math.max(20, (clientHeight / scrollHeight) * clientHeight)
     const top = (scrollTop / (scrollHeight - clientHeight)) * (clientHeight - height)
+    // Straight to the node when it is already up, and to state only to bring it
+    // into existence or size it. `metrics` keeps the numbers the drag arithmetic
+    // reads, which must not go stale just because the render was skipped.
+    metrics.current = { top, height }
+    const node = bar.current
+    if (node && thumbUp.current) {
+      node.style.top = `${top}px`
+      node.style.height = `${height}px`
+      return
+    }
     setThumb({ top, height })
   }
 
@@ -65,15 +101,18 @@ export function OverlayScroller({
 
   const onTrackDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     const el = scroller.current
-    if (!el || !thumb) return
+    // `metrics`, not `thumb`: the rendered state is deliberately stale between
+    // mounts, and this arithmetic has to be about the thumb on screen now.
+    const m = metrics.current
+    if (!el || !m) return
     e.preventDefault()
     const y = e.clientY - e.currentTarget.getBoundingClientRect().top
-    const range = el.clientHeight - thumb.height
+    const range = el.clientHeight - m.height
     if (range <= 0) return
     // A press on the empty track jumps the thumb's centre to the pointer and
     // then behaves as a drag from there — one gesture, no paging.
-    if (y < thumb.top || y > thumb.top + thumb.height) {
-      const top = Math.min(range, Math.max(0, y - thumb.height / 2))
+    if (y < m.top || y > m.top + m.height) {
+      const top = Math.min(range, Math.max(0, y - m.height / 2))
       el.scrollTop = (top / range) * (el.scrollHeight - el.clientHeight)
     }
     drag.current = { y: e.clientY, scrollTop: el.scrollTop }
@@ -82,8 +121,9 @@ export function OverlayScroller({
 
   const onTrackMove = (e: ReactPointerEvent<HTMLDivElement>) => {
     const el = scroller.current
-    if (!el || !drag.current || !thumb) return
-    const range = el.clientHeight - thumb.height
+    const m = metrics.current
+    if (!el || !drag.current || !m) return
+    const range = el.clientHeight - m.height
     if (range <= 0) return
     const ratio = (el.scrollHeight - el.clientHeight) / range
     el.scrollTop = drag.current.scrollTop + (e.clientY - drag.current.y) * ratio
@@ -149,8 +189,14 @@ export function OverlayScroller({
         >
           {/* scrollbarSlider.background / .hoverBackground — the same pair
               index.css paints the native bars with, so this one is not a
-              different-looking scrollbar, just a floating one. */}
+              different-looking scrollbar, just a floating one.
+
+              `style` seeds the position for the first paint; `measure` writes
+              this node's `top`/`height` directly from then on, so a smooth
+              scroll moves the thumb without a render. React never re-renders it
+              with a changed style, so the two do not fight over the attribute. */}
           <div
+            ref={bar}
             style={{ top: thumb.top, height: thumb.height }}
             className="absolute right-0 w-full bg-[#79797966] hover:bg-[#646464b3]"
           />

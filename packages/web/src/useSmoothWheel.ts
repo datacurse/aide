@@ -1,23 +1,48 @@
 import { useEffect, type RefObject } from "react"
 
 /**
- * How much of the remaining distance is covered each frame, at 60fps.
+ * How much of the remaining distance is covered per SECOND, as a survival rate.
  *
- * 0.18 lands a standard 100px notch in ~9 frames (150ms) with the last few
- * pixels drifting in — long enough to read as motion rather than a jump, short
- * enough that a second notch feels like it went to the same place. Higher and
- * the ease is gone; lower and the list lags the wheel, which reads as the page
+ * Exponential decay, framed the way it has to be to survive a 144Hz monitor:
+ * the first version was `gap * 0.18` once per frame, which is 0.18 per frame
+ * and therefore 2.4× faster on a 144Hz display than on a 60Hz one — the same
+ * flick travelling a different distance on two machines, and on the fast one
+ * arriving so abruptly that the easing read as a stutter. This is the fraction
+ * of the gap still REMAINING after one second, applied as `rate ** dt`, so the
+ * curve is identical at any refresh rate.
+ *
+ * 0.0005 puts a 100px notch inside its last half-pixel in ~145ms. Lower and the
+ * ease is gone; higher and the list lags the wheel, which reads as the app
  * being slow rather than smooth.
  */
-const EASE = 0.18
+const RETAINED_PER_SEC = 0.0005
 /**
  * Below this the remainder is not worth another frame — snap and stop.
  *
- * Half a pixel rather than one: at fractional device-pixel-ratio (a 125%
- * Windows display, which is this project's own) a whole-pixel floor leaves a
- * visible seam at the end of every scroll.
+ * A whole pixel, not the half it was. Subpixel scroll positions are not
+ * addressable on every display: at fractional device-pixel-ratio (a 125%
+ * Windows display, which is this project's own) the browser snaps `scrollTop`
+ * to its own grid, so a 0.5px floor is a target the element can be unable to
+ * land on — the loop then spins frames forever against a gap it cannot close.
  */
-const DONE = 0.5
+const DONE = 1
+/**
+ * How far the element may be from where this loop put it before the loop
+ * concludes somebody else moved it.
+ *
+ * Generous on purpose, and the tightest of the three bugs that made the first
+ * version glitch. `scrollTop` is stored as a float and reported back snapped to
+ * the device pixel grid, which at 125% zoom is not integers — so a write of
+ * 847.3 reads back as something else entirely, and near the end of a scroll,
+ * where each step is under a pixel, a write can round to NO CHANGE AT ALL.
+ * Against a 1px threshold that drift read as interference: the loop called
+ * `stop()` partway through, so a scroll died early at a different random point
+ * on every notch. That is the stutter. Nothing legitimately competing for this
+ * scroller moves it by less than a rounding error — the stick-to-end follower
+ * jumps to the bottom, a thumb drag tracks a pointer — so the test only has to
+ * catch real motion, and 8px catches all of it while being deaf to rounding.
+ */
+const HIJACKED = 8
 /**
  * Multiplier on a line-based delta, for Firefox's `deltaMode === 1`.
  *
@@ -72,48 +97,66 @@ export function useSmoothWheel(
     let target: number | null = null
     let frame = 0
     /**
-     * The `scrollTop` this loop last wrote, rounded the way the browser does.
+     * The animation's own position, in full float precision.
      *
-     * The cancel test. A frame that finds the scroller somewhere OTHER than
-     * where it put it has been overruled by somebody else — the stick-to-end
-     * follower, a thumb drag, `scrollIntoView`, a keypress, a touch — and the
-     * only correct response is to stop steering, because continuing would
-     * drag the view back to a target chosen before that happened. Without
-     * this, a turn streaming into a transcript you had just wheeled upward
-     * fought the follower for as long as the turn lasted: the follower snapped
-     * to the bottom, this loop pulled back up, and the pane juddered between
-     * the two at 60fps.
+     * The loop advances THIS and writes it to the element, rather than reading
+     * `el.scrollTop` back each frame and advancing that. Reading it back means
+     * every frame inherits the browser's pixel-grid rounding, and at 125% zoom
+     * those errors compound: a slow tail where each step is a fraction of a
+     * pixel rounds to zero movement over and over, so the scroll visibly stalls
+     * short of its target while the loop believes it is still going.
+     *
+     * It is also the cancel test's reference — see `HIJACKED`. A frame finding
+     * the element far from here has been overruled by somebody else, and the
+     * only correct response is to stop steering: without that, a turn streaming
+     * into a transcript you had just wheeled up fought the stick-to-end
+     * follower for the length of the turn, the follower snapping to the bottom
+     * and this loop pulling back up at 60fps.
      */
-    let expected: number | null = null
+    let at = 0
+    /** The timestamp of the last frame, for a frame-rate-independent step. */
+    let last = 0
 
     const stop = () => {
       if (frame) cancelAnimationFrame(frame)
       frame = 0
       target = null
-      expected = null
     }
 
-    const step = () => {
+    const step = (now: number) => {
       frame = 0
       if (target === null) return
-      // Somebody else moved it. Their position wins, and this loop is done.
-      // Compared with a pixel of slack because a browser stores `scrollTop` as
-      // a float and reports it back rounded to the device pixel grid, so an
-      // exact test would read the browser's own rounding as interference.
-      if (expected !== null && Math.abs(el.scrollTop - expected) > 1) return stop()
+      // Somebody else moved it — the stick-to-end follower, a thumb drag,
+      // `scrollIntoView`. Their position wins and this loop is done, because
+      // continuing would drag the view back to a target chosen before it
+      // happened. Measured against what this loop last WROTE (`at`), not
+      // against what the element reported afterwards; see `HIJACKED`.
+      if (Math.abs(el.scrollTop - at) > HIJACKED) return stop()
 
       const max = el.scrollHeight - el.clientHeight
       // Re-clamped every frame, not once when the wheel arrived: the content
       // grows under a streaming turn, and a target pinned to the old maximum
       // stops short of a bottom that has since moved down.
       const to = Math.max(0, Math.min(max, target))
-      const gap = to - el.scrollTop
-      if (Math.abs(gap) < DONE) {
+      target = to
+
+      // Capped at 50ms. A frame that arrives late — a tab coming back to the
+      // foreground, a long render on the main thread — would otherwise apply
+      // one enormous decay step and teleport, which is the jump the easing
+      // exists to remove, appearing at exactly the worst moment.
+      const dt = Math.min(50, now - last) / 1000
+      last = now
+
+      if (Math.abs(to - at) < DONE) {
+        at = to
         el.scrollTop = to
         return stop()
       }
-      el.scrollTop = el.scrollTop + gap * EASE
-      expected = el.scrollTop
+      // Exponential decay toward the target, frame-rate independent: the gap
+      // retains `RETAINED_PER_SEC` of itself per second whatever the refresh
+      // rate, so 60Hz and 144Hz draw the same curve over the same wall clock.
+      at = to - (to - at) * RETAINED_PER_SEC ** dt
+      el.scrollTop = at
       frame = requestAnimationFrame(step)
     }
 
@@ -138,9 +181,9 @@ export function useSmoothWheel(
 
       const delta = e.deltaMode === 1 ? e.deltaY * LINE : e.deltaY
       // From where the wheel is STEERING, not from where the view currently
-      // is, so a flick of several notches adds up to their full travel. Taken
-      // from `scrollTop` when no animation is running, which is also what
-      // makes a notch after an interruption start from what is on screen.
+      // is, so a flick of several notches adds up to their full travel rather
+      // than each notch restarting from a view still catching up with the last.
+      // Falls back to the live position when no animation is running.
       const from = target ?? el.scrollTop
       const to = Math.max(0, Math.min(max, from + delta))
 
@@ -153,12 +196,18 @@ export function useSmoothWheel(
 
       e.preventDefault()
       target = to
-      // The first step runs on the NEXT frame rather than now. Writing
-      // `scrollTop` synchronously inside the handler would move the view a
-      // fraction of the delta immediately and then ease the rest, which reads
-      // as a jolt followed by a glide.
       if (!frame) {
-        expected = el.scrollTop
+        // Seeded from the element, because this is the first notch of a new
+        // gesture and the element is the only thing that knows where the view
+        // actually is — a `stop()` may have left `at` somewhere stale, and a
+        // thumb drag or the follower may have moved it since.
+        at = el.scrollTop
+        // `performance.now()` and not the next frame's stamp: the first step
+        // must measure from HERE, or its `dt` spans the whole gap since
+        // whatever frame ran last — which for a wheel arriving on an idle
+        // scroller is unbounded, and the cap would then eat the first 50ms of
+        // the curve as one jump.
+        last = performance.now()
         frame = requestAnimationFrame(step)
       }
     }
