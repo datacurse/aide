@@ -1,6 +1,17 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
 
 /**
+ * How far below the fold counts as "fully hidden" for the fade, in pixels.
+ *
+ * Roughly the height of the gradient it drives: the fade should be at full
+ * strength once there is a gradient's worth of content underneath it, and
+ * proportionally weaker as the last of it comes into view.
+ */
+const FADE_OVER = 120
+/** Quantization of that ramp. See `below`. */
+const FADE_STEPS = 12
+
+/**
  * Stick to the end while you are at the end, and stay out of the way when you
  * are not.
  *
@@ -12,8 +23,8 @@ import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
  * while nothing ever scrolled it, so a streaming turn wrote off the bottom of the
  * box while the visible rows sat still.
  *
- * Returns whether the end is currently in view — what draws a jump button — and
- * a way back down.
+ * Returns whether the end is currently in view — what draws a jump button —
+ * how much is hidden below the fold, and a way back down.
  *
  * There used to be an unconditional follower in the pane and it was removed,
  * because a transcript that moves while you are dragging a cursor across it
@@ -47,7 +58,7 @@ export function useStickToEnd(
    * Anything arriving while you are scrolled up is the button's business.
    */
   reset: unknown[] = [],
-): { atEnd: boolean; toBottom: () => void } {
+): { atEnd: boolean; below: number; toBottom: () => void } {
   const toBottom = useCallback(() => {
     const el = scroller.current
     if (el) el.scrollTop = el.scrollHeight
@@ -55,6 +66,22 @@ export function useStickToEnd(
 
   /** Whether the last line is on screen: what draws the jump button. */
   const [atEnd, setAtEnd] = useState(true)
+  /**
+   * How much content is left below the viewport, 0..1 over `FADE_OVER` pixels.
+   *
+   * What this is FOR: the pane's foot floats over the transcript behind a
+   * gradient, and a gradient that is always on dims the last lines of a
+   * conversation you have scrolled to the bottom of — text greyed out to hide
+   * content that is not there. So the fade follows this instead.
+   *
+   * QUANTIZED, and that is the whole reason this is a number rather than the
+   * raw pixel distance: `scroll` fires per frame, and state holding a live
+   * pixel count re-renders the entire transcript on every one of those frames.
+   * Snapped to `FADE_STEPS`, a flick from the middle of a long log to the
+   * bottom sets state a handful of times, and the ramp is still visually
+   * continuous because it is driving an opacity rather than a position.
+   */
+  const [below, setBelow] = useState(0)
   /**
    * The same fact, where the follower can read it.
    *
@@ -87,9 +114,16 @@ export function useStickToEnd(
     // pixel short of the end, and an exact test would leave the pill on screen
     // for a view that is plainly already at the bottom.
     const read = () => {
-      const end = el.scrollHeight - el.scrollTop - el.clientHeight < 24
+      const gap = el.scrollHeight - el.scrollTop - el.clientHeight
+      const end = gap < 24
       following.current = end
       setAtEnd(end)
+      // Rounded to a step so this sets state a handful of times across a long
+      // scroll rather than once per frame. `Math.max(0, …)` because overscroll
+      // on a trackpad reports a negative gap, which would otherwise drive a
+      // negative opacity.
+      const ramp = Math.min(1, Math.max(0, gap) / FADE_OVER)
+      setBelow(Math.round(ramp * FADE_STEPS) / FADE_STEPS)
     }
     // A drag that has actually taken text, which is the only kind worth pausing
     // for. A click is a mouse-down too, and dropping the follow at every click
@@ -186,9 +220,13 @@ export function useStickToEnd(
   useEffect(() => {
     following.current = true
     setAtEnd(true)
+    // The jump back down lands at the end, so the fade has nothing left to
+    // cover — clearing it here as well as in `read` keeps it from drawing for
+    // the frame between opening a chat and the first scroll reading.
+    setBelow(0)
     toBottom()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [toBottom, ...reset])
 
-  return { atEnd, toBottom }
+  return { atEnd, below, toBottom }
 }

@@ -583,7 +583,7 @@ export function ConversationPane({
    * chat and starting a turn both put you back at the end; a poll picking up a
    * line deliberately does not.
    */
-  const { atEnd, toBottom } = useStickToEnd(scroller, body, [sessionId, runId])
+  const { atEnd, below, toBottom } = useStickToEnd(scroller, body, [sessionId, runId])
 
   /**
    * Answers whether the turn actually started.
@@ -671,16 +671,19 @@ export function ConversationPane({
           // selected shoves the grid you are clicking instead of growing the
           // card downward. Appends land at the bottom here, so anchoring was
           // buying nothing.
-          // `pb-40` and not the composer's real height: the whole foot of the
+          // `pb-32` and not the composer's real height: the whole foot of the
           // pane floats over this scroller, so without trailing room the last
           // line sits under the box and cannot be read. It is a MARGIN rather
           // than a measured offset because the composer grows with what you
           // type and the working bar comes and goes — matching exactly would
           // mean observing that stack and feeding its height back in here, and
           // being a few pixels short is a line you cannot reach, while being
-          // generous costs only slack under the last message. It has to clear
-          // the gradient as well as the box, which is most of the number.
-          className="relative flex-1 overflow-x-hidden overflow-y-auto px-3 pt-2 pb-40 font-mono text-xs leading-relaxed [overflow-anchor:none]"
+          // generous costs only slack under the last message.
+          //
+          // It clears the BOX, not the fade: the gradient goes transparent as
+          // the end comes into view, so the last line no longer has to be
+          // scrolled past it — only out from under the pill.
+          className="relative flex-1 overflow-x-hidden overflow-y-auto px-3 pt-2 pb-32 font-mono text-xs leading-relaxed [overflow-anchor:none]"
         >
           {/* Only when there is nothing on screen to keep. `view` is addressed
               by session id, so a new chat's first turn arrives at a key that has
@@ -758,11 +761,11 @@ export function ConversationPane({
             // there floats beside the conversation instead of belonging to it
             // — pointing at a column it is no longer over.
             //
-            // `bottom-28` and `z-20`: the foot of the pane is an overlay now,
+            // `bottom-24` and `z-20`: the foot of the pane is an overlay now,
             // so at `bottom-3` this sat underneath the composer and at the same
             // z-index it lost the stacking order to it. It has to ride ABOVE
             // the fade, which is where the content it points at stops.
-            className="absolute bottom-28 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-line bg-chrome px-3 py-1 font-sans text-[11px] text-fg-muted shadow-lg hover:text-fg"
+            className="absolute bottom-24 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-line bg-chrome px-3 py-1 font-sans text-[11px] text-fg-muted shadow-lg hover:text-fg"
           >
             <ArrowDown className="size-3" />
             jump to latest
@@ -787,12 +790,24 @@ export function ConversationPane({
             own colour — going transparent upward, so it dissolves the last few
             lines into the background instead of covering them with a panel. */}
         <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex flex-col">
-          {/* Tall, and it starts fully transparent: a short or abrupt ramp is
-              still a visible edge, which is the hard line this exists to get
-              rid of. `via-editor/85` puts most of the opacity in the lower
-              half, so the fade is gentle where the text is and solid by the
-              time it reaches the box. */}
-          <div className="h-24 shrink-0 bg-gradient-to-t from-editor via-editor/85 to-transparent" />
+          {/* Only as strong as there is something to hide. An always-on fade
+              greys out the last lines of a conversation you have scrolled to
+              the bottom of — dimming text to conceal content that is not
+              there, which is unreadable for no reason. `below` is the hook's
+              reading of how much is left underneath, so at the true end this
+              is fully transparent and the last line is as crisp as the rest.
+
+              Shorter than it was (h-24 → h-14) because the job changed: it
+              does not need to swallow a tall block of text any more, only to
+              soften the couple of lines actually passing under the box.
+
+              Opacity rather than swapping the gradient in and out, so it
+              ramps with the scroll instead of popping at a threshold, and a
+              `transition` covers the quantization steps. */}
+          <div
+            className="h-14 shrink-0 bg-gradient-to-t from-editor via-editor/85 to-transparent transition-opacity duration-150"
+            style={{ opacity: below }}
+          />
           {/* `bg-editor` and not transparent: the gradient has reached full
               opacity by here, so this continues it behind the controls. Left
               transparent, a line of transcript would show through the gap
