@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import { api, type Profile as ProfileDoc } from "./api.js"
 import { Markdown } from "./Markdown.js"
+import { Scroller } from "./Scroller.js"
 import { Button } from "./ui.js"
 
 /**
@@ -100,7 +101,7 @@ export function ProfileOverlay({
           </div>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+        <Scroller className="flex-1" contentClassName="px-4 py-3">
           {error ? (
             <p className="font-sans text-[11px] text-err">{error}</p>
           ) : doc === null ? (
@@ -117,7 +118,7 @@ export function ProfileOverlay({
           ) : (
             <Markdown text={doc.markdown} />
           )}
-        </div>
+        </Scroller>
       </div>
     </div>
   )

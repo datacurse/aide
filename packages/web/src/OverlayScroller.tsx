@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import type { PointerEvent as ReactPointerEvent, ReactNode, WheelEvent } from "react"
+import { useSmoothWheel } from "./useSmoothWheel.js"
 
 /**
  * A scroller whose scrollbar floats over the content instead of taking a column.
@@ -33,6 +34,7 @@ export function OverlayScroller({
   const scroller = useRef<HTMLDivElement>(null)
   const content = useRef<HTMLDivElement>(null)
   const [thumb, setThumb] = useState<{ top: number; height: number } | null>(null)
+  useSmoothWheel(scroller)
 
   const measure = () => {
     const el = scroller.current
@@ -91,6 +93,35 @@ export function OverlayScroller({
     drag.current = null
   }
 
+  /**
+   * A wheel over the track's 10px, re-aimed at the scroller underneath.
+   *
+   * Re-DISPATCHED rather than applied as a `scrollBy`, which is what this used
+   * to do: the scroller's own wheel is smoothed now (`useSmoothWheel`), and a
+   * direct write would make the right-hand 10px of every list the one strip
+   * where the wheel still steps. Sending the event on means both strips go
+   * through the one easing, so there is no seam to feel for.
+   *
+   * `cancelable: false`, because this synthetic event must not be
+   * preventDefaulted into swallowing the page scroll at an edge — the real
+   * event is already past its own default by the time this runs, and the hook
+   * hands an edge wheel back by NOT preventing it.
+   */
+  const onTrackWheel = (e: WheelEvent) => {
+    const el = scroller.current
+    if (!el) return
+    el.dispatchEvent(
+      new WheelEvent("wheel", {
+        deltaY: e.deltaY,
+        deltaMode: e.deltaMode,
+        shiftKey: e.shiftKey,
+        ctrlKey: e.ctrlKey,
+        bubbles: false,
+        cancelable: false,
+      }),
+    )
+  }
+
   return (
     <div className={`relative min-h-0 ${className ?? ""}`}>
       <div
@@ -113,7 +144,7 @@ export function OverlayScroller({
           onPointerMove={onTrackMove}
           onPointerUp={onTrackEnd}
           onPointerCancel={onTrackEnd}
-          onWheel={(e: WheelEvent) => scroller.current?.scrollBy({ top: e.deltaY })}
+          onWheel={onTrackWheel}
           className="absolute top-0 right-0 bottom-0 w-[10px]"
         >
           {/* scrollbarSlider.background / .hoverBackground — the same pair

@@ -41,6 +41,7 @@ record. They are all rows in the same list, in that order of urgency.
 | The project's files, one directory at a time | `packages/web/src/panes/Files.tsx` |
 | What kind of file a name is, and its colour | `packages/web/src/filetypes.ts` |
 | Every hover hint in the app, and where it lands | `packages/web/src/Hint.tsx`, `packages/protocol/src/hint.ts` |
+| How every scrollable thing moves under the wheel | `packages/web/src/useSmoothWheel.ts`, `Scroller.tsx` |
 | Where the graph's lines go, and the SVG that draws them | `packages/web/src/graph.ts`, `packages/web/src/GitGraph.tsx` |
 | Branch, history and lanes, read off the repo | `packages/daemon/src/repo.ts` |
 | Which machine a git call lands on, and batching them | `packages/daemon/src/git.ts` |
@@ -430,6 +431,43 @@ Decisions already taken, which are not gaps to fill:
   slash putting `src2/`'s files under `src`, a deleted file left as a row that
   opens nothing, a rename showing under both names, and a collapsed folder that
   fails to mark a change three levels below it.
+- **The wheel is eased; every programmatic scroll is instant. That split is the
+  whole design.** Native wheel scrolling on Windows is a step — one notch
+  teleports ~100px, which on a list of 48px rows is two rows appearing where two
+  others were — so `useSmoothWheel` claims the wheel on a scrollport and walks
+  `scrollTop` toward a target over a handful of frames. What it must NOT do is
+  ease the writes, and `scroll-behavior: smooth` is exactly the trap here: it is
+  a property of the ELEMENT, so it eases every `scrollTop = …` too, and the
+  writes in this app are precisely the ones that have to land at once.
+  `useStickToEnd`'s follower assigns from a ResizeObserver as a turn streams, and
+  an eased follower is a permanent chase it can never win — it re-targets every
+  frame, each time from further behind, so a streaming transcript trails its own
+  last line forever. Same shape for `OverlayScroller`'s thumb, which would lag
+  the pointer, and the timeline's `scrollIntoView`. So the easing lives on the
+  wheel only, and the hook CANCELS itself the instant it finds the scroller
+  somewhere other than where it left it (`expected`) — one writer at a time,
+  always, with the other writer winning. Without that cancel, a turn streaming
+  into a transcript you had just wheeled up juddered between the follower and the
+  animation at 60fps for the length of the turn. Four more things are decisions
+  rather than details. (1) A hook, not a wrapper: every scrollport here already
+  has layout and behaviour of its own, and a wrapper would either re-parent them
+  or add a second box on the same axis. `Scroller.tsx` is the wrapper for the
+  plain `overflow-auto`-div-with-a-list case, and `OverlayScroller` calls the hook
+  DIRECTLY rather than nesting inside it, for that reason. (2) `defaultPrevented`
+  is tested first, because the tool timeline owns the wheel over its grid — it
+  scrubs the selected call, or pans sideways — and the transcript containing it
+  would otherwise smooth-scroll on the same notch, so one turn both stepped the
+  card and slid the conversation out from under it. (3) At an edge the event is
+  handed back un-prevented, which is what keeps a nested list from going dead
+  under the pointer. (4) `Scroller`'s content box is `min-h-full`, because
+  several of these lists draw `Empty`, which centres itself with `h-full` against
+  its PARENT — in a content wrapper with no height that collapses to the height
+  of its own text and the message jams under the header. `OverlayScroller` has
+  the same latent shape and was deliberately left as it was; its `Empty` sits at
+  the top of the chat list and reads fine there.
+  The jump-to-end pill is deliberately NOT smoothed: a glide through 5,000px of
+  transcript is a long flight through content nobody asked to see, and the
+  follower would cancel it mid-air the moment a streaming turn grew the box.
 - **There are no native tooltips left; `Hint` draws every one.** A `title`
   attribute is the one piece of UI the theme could never reach — the OS draws
   it, in its own font, in a light box on a dark app, after a delay nobody

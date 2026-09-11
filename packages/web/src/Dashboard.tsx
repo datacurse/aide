@@ -3,6 +3,7 @@ import type { ActivityDay, HourCell, ProjectActivity } from "@aide/protocol"
 import { api, type Activity } from "./api.js"
 import { Hint } from "./Hint.js"
 import { ArrowClockwise } from "./icons.js"
+import { Scroller } from "./Scroller.js"
 import { Button, Empty, money } from "./ui.js"
 
 /**
@@ -987,7 +988,7 @@ export function Dashboard({
         </div>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto p-3">
+      <Scroller className="flex-1" contentClassName="p-3">
         {error ? (
           <p className="font-sans text-[11px] text-err">{error}</p>
         ) : !activity ? (
@@ -1092,7 +1093,7 @@ export function Dashboard({
             </footer>
           </div>
         )}
-      </div>
+      </Scroller>
     </main>
   )
 }

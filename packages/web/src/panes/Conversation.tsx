@@ -19,6 +19,7 @@ import { Button, COLUMN, Empty, heldBy, PaneHeader } from "../ui.js"
 import { useKeyed } from "../useKeyed.js"
 import { useRemembered } from "../useRemembered.js"
 import { useRunStream } from "../useRunStream.js"
+import { useSmoothWheel } from "../useSmoothWheel.js"
 import { useStickToEnd } from "../useStickToEnd.js"
 import { TYPING_KEY, useTyped } from "../typing.js"
 import { isCommitRun } from "../liveCommit.js"
@@ -584,6 +585,16 @@ export function ConversationPane({
    * line deliberately does not.
    */
   const { atEnd, below, toBottom } = useStickToEnd(scroller, body, [sessionId, runId])
+  /**
+   * The wheel, eased. Reading a transcript is scrolling, and this is the box
+   * that does most of it.
+   *
+   * It shares its scrollport with the follower above, which is the pairing the
+   * hook is built around: the follower's writes are instant and CANCEL the
+   * easing, so a turn streaming into a view you have wheeled up does not fight
+   * you for the scroll position. See `useSmoothWheel`.
+   */
+  useSmoothWheel(scroller)
 
   /**
    * Answers whether the turn actually started.

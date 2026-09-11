@@ -4,6 +4,7 @@ import { api } from "../api.js"
 import { lookOf } from "../filetypes.js"
 import { Hint } from "../Hint.js"
 import { CaretRight, Folder } from "../icons.js"
+import { Scroller } from "../Scroller.js"
 import { useKeyed } from "../useKeyed.js"
 
 /**
@@ -284,7 +285,7 @@ export function FileTree({
           so a hiccup is commoner than an outage. */}
       {error && <p className="shrink-0 px-3 pb-1 font-sans text-[11px] text-err">{error}</p>}
 
-      <div className="min-h-0 flex-1 overflow-auto py-1">
+      <Scroller className="flex-1" contentClassName="py-1">
         {!rows ? (
           error ? null : (
             <p className="px-3 py-2 font-sans text-[11px] text-fg-dim">Reading the tree…</p>
@@ -303,7 +304,7 @@ export function FileTree({
             onToggle={toggle}
           />
         )}
-      </div>
+      </Scroller>
     </>
   )
 }

@@ -18,6 +18,7 @@ import { ConversationPane } from "./panes/Conversation.js"
 import { ConversationList } from "./panes/Conversations.js"
 import { PendingRail } from "./panes/Pending.js"
 import { RemotePicker } from "./RemotePicker.js"
+import { Scroller } from "./Scroller.js"
 import { Button, Empty, heldBy, heldByCommit, LOCKED, PaneHeader, SELECTED } from "./ui.js"
 
 /** While anything is in flight the lists need to move on their own. */
@@ -408,7 +409,7 @@ export function App() {
             stats
           </Button>
         </PaneHeader>
-        <div className="flex-1 overflow-auto py-1">
+        <Scroller className="flex-1" contentClassName="py-1">
           {projects.length === 0 ? (
             <Empty>No projects yet. Add a git repository to get started.</Empty>
           ) : (
@@ -504,7 +505,7 @@ export function App() {
               )
             })
           )}
-        </div>
+        </Scroller>
 
         {/* Below the projects rather than above every pane: this is where you
             look when something is not answering, and it is the only thing on

@@ -15,6 +15,7 @@ import { useCallback, useEffect, useState } from "react"
 import type { SshHost, SshListing } from "@aide/protocol"
 import { api } from "./api"
 import { Hint } from "./Hint"
+import { Scroller } from "./Scroller"
 import { Button } from "./ui"
 
 /** The parent of a POSIX path, or null at the root. */
@@ -149,7 +150,7 @@ export function RemotePicker({
           </div>
         )}
 
-        <div className="flex-1 overflow-auto p-1">
+        <Scroller className="flex-1" contentClassName="p-1">
           {error && (
             <div className="m-2 rounded-sm bg-diff-del-fg/15 px-2 py-1.5">
               <p className="text-[11px] leading-relaxed text-diff-del-fg">{error}</p>
@@ -245,7 +246,7 @@ export function RemotePicker({
               ))}
             </>
           )}
-        </div>
+        </Scroller>
 
         <div className="flex shrink-0 items-center justify-between border-t border-line px-3 py-2">
           <span className="text-[11px] text-fg-dim">{busy ? "listing…" : ""}</span>

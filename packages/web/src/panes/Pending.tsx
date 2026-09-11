@@ -12,6 +12,7 @@ import { api, type GitHistory } from "../api.js"
 import { GraphCell, ROW_H, graphWidth } from "../GitGraph.js"
 import { Hint } from "../Hint.js"
 import { ArrowDown, ArrowUp, Tag } from "../icons.js"
+import { Scroller } from "../Scroller.js"
 import { Button, Empty, PaneHeader } from "../ui.js"
 import { useKeyed } from "../useKeyed.js"
 import { usePoll } from "../usePoll.js"
@@ -211,11 +212,11 @@ export function PendingRail({
                   outright: a run that touched sixty files must not push the
                   history off the bottom of the rail, and two uncommitted files
                   must not hold half a column of nothing open to prove it. */}
-              <div className="max-h-[45%] shrink-0 overflow-auto py-1">
+              <Scroller className="max-h-[45%] shrink-0" contentClassName="py-1">
                 {files.map((f) => (
                   <PendingRow key={`${f.code} ${f.path}`} file={f} />
                 ))}
-              </div>
+              </Scroller>
             </>
           )}
 
@@ -521,7 +522,7 @@ function Commits({
   const rows = new Map<string, GitGraphRow>(log.graph.map((r) => [r.sha, r]))
 
   return (
-    <div className="min-h-0 flex-1 overflow-auto pb-1">
+    <Scroller className="flex-1" contentClassName="pb-1">
       {log.commits.map((c, i) => (
         <CommitRow
           key={c.sha}
@@ -571,7 +572,7 @@ function Commits({
             history continues past here
           </p>
         ))}
-    </div>
+    </Scroller>
   )
 }
 
