@@ -671,15 +671,16 @@ export function ConversationPane({
           // selected shoves the grid you are clicking instead of growing the
           // card downward. Appends land at the bottom here, so anchoring was
           // buying nothing.
-          // `pb-6` and not the composer's real height: the box floats over this
-          // scroller, so without trailing room the last line stops exactly
-          // under it and cannot be read. It is a MARGIN rather than a measured
-          // offset because the composer grows with what you type — matching it
-          // exactly would mean measuring that box and feeding its height back
-          // in, and being a few pixels short there is a line you cannot reach,
-          // while being generous costs nothing but slack under the last
-          // message. The pane still scrolls to the true end.
-          className="relative flex-1 overflow-x-hidden overflow-y-auto px-3 pt-2 pb-6 font-mono text-xs leading-relaxed [overflow-anchor:none]"
+          // `pb-40` and not the composer's real height: the whole foot of the
+          // pane floats over this scroller, so without trailing room the last
+          // line sits under the box and cannot be read. It is a MARGIN rather
+          // than a measured offset because the composer grows with what you
+          // type and the working bar comes and goes — matching exactly would
+          // mean observing that stack and feeding its height back in here, and
+          // being a few pixels short is a line you cannot reach, while being
+          // generous costs only slack under the last message. It has to clear
+          // the gradient as well as the box, which is most of the number.
+          className="relative flex-1 overflow-x-hidden overflow-y-auto px-3 pt-2 pb-40 font-mono text-xs leading-relaxed [overflow-anchor:none]"
         >
           {/* Only when there is nothing on screen to keep. `view` is addressed
               by session id, so a new chat's first turn arrives at a key that has
@@ -756,74 +757,112 @@ export function ConversationPane({
             // the pane's right edge is empty margin, and a pill parked out
             // there floats beside the conversation instead of belonging to it
             // — pointing at a column it is no longer over.
-            className="absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-line bg-chrome px-3 py-1 font-sans text-[11px] text-fg-muted shadow-lg hover:text-fg"
+            //
+            // `bottom-28` and `z-20`: the foot of the pane is an overlay now,
+            // so at `bottom-3` this sat underneath the composer and at the same
+            // z-index it lost the stacking order to it. It has to ride ABOVE
+            // the fade, which is where the content it points at stops.
+            className="absolute bottom-28 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-line bg-chrome px-3 py-1 font-sans text-[11px] text-fg-muted shadow-lg hover:text-fg"
           >
             <ArrowDown className="size-3" />
             jump to latest
           </button>
         )}
-      </div>
 
-      {watching && (
-        <WorkingBar events={turnEvents} runId={runId} outputTokens={draft.outputTokens} />
-      )}
+        {/* The foot of the pane, OVER the transcript rather than beside it.
+            These used to be flex siblings below the scroller, which meant they
+            took their own row and the scrollport simply ended above them — so
+            the last line was cut off against an invisible edge with a hard
+            horizontal seam, which is the "clear cut" this replaces.
 
-      {/* Between the transcript and the box, which is the order the decision is
-          made in: you read what went wrong, then you decide whether to send it
-          again.
+            Absolute, so the scroller runs the full height of the pane and the
+            conversation genuinely passes underneath. `pointer-events-none` on
+            the stack with `auto` on each child, or this invisible box would
+            swallow clicks and text selection across the bottom of every
+            transcript.
 
-          Carded rather than barred, for the reason the composer below it is: a
-          full-width slab with a top rule would draw the line the floating box
-          exists to avoid. */}
-      {failedTurn && projectId && (
-        <div className="shrink-0 px-3 pt-1 font-sans text-[11px] text-fg-muted">
-          <div className={`flex items-center gap-2 rounded-md bg-chrome px-2 py-1.5 ${COLUMN}`}>
-            <span className="min-w-0 flex-1">
-              That turn did not finish. Your message is still here — put it back in the box to try
-              again, or say something different.
-            </span>
-            <Button
-              onClick={putBack}
-              title="Copy that message, and anything pasted with it, back into the composer"
-            >
-              put it back
-            </Button>
+            The gradient above it is what makes the overlap legible: text has to
+            FADE into the pill rather than disappear at a line, or the eye reads
+            the seam as the end of the content. It is `bg-editor` — the pane's
+            own colour — going transparent upward, so it dissolves the last few
+            lines into the background instead of covering them with a panel. */}
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex flex-col">
+          {/* Tall, and it starts fully transparent: a short or abrupt ramp is
+              still a visible edge, which is the hard line this exists to get
+              rid of. `via-editor/85` puts most of the opacity in the lower
+              half, so the fade is gentle where the text is and solid by the
+              time it reaches the box. */}
+          <div className="h-24 shrink-0 bg-gradient-to-t from-editor via-editor/85 to-transparent" />
+          {/* `bg-editor` and not transparent: the gradient has reached full
+              opacity by here, so this continues it behind the controls. Left
+              transparent, a line of transcript would show through the gap
+              between the working bar and the pill. */}
+          <div className="flex flex-col bg-editor">
+            {watching && (
+              <div className="pointer-events-auto">
+                <WorkingBar events={turnEvents} runId={runId} outputTokens={draft.outputTokens} />
+              </div>
+            )}
+
+            {/* Between the transcript and the box, which is the order the
+                decision is made in: you read what went wrong, then you decide
+                whether to send it again. */}
+            {failedTurn && projectId && (
+              <div className="pointer-events-auto shrink-0 px-3 pt-1 font-sans text-[11px] text-fg-muted">
+                <div
+                  className={`flex items-center gap-2 rounded-md bg-chrome px-2 py-1.5 ${COLUMN}`}
+                >
+                  <span className="min-w-0 flex-1">
+                    That turn did not finish. Your message is still here — put it back in the box to
+                    try again, or say something different.
+                  </span>
+                  <Button
+                    onClick={putBack}
+                    title="Copy that message, and anything pasted with it, back into the composer"
+                  >
+                    put it back
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {projectId && (
+              <div className="pointer-events-auto">
+                <Composer
+                  // `watching`, not `busy`: an adopted commit run must not put
+                  // the box into its working state — a send under a commit
+                  // queues, and a stop button for a run nothing on screen shows
+                  // is a control with no visible referent.
+                  busy={watching}
+                  usage={usage}
+                  sessionId={sessionId}
+                  // The open chat's box, whether it has a session yet or not: an
+                  // unstarted one is addressed by its draft id, and losing that
+                  // would hand every unstarted chat the same box.
+                  draftKey={draftKey(projectId, sessionId ?? draftId ?? "")}
+                  inheritedMode={summary?.lastMode ?? null}
+                  // Stated in `projectGates` rather than here, so every box
+                  // refuses on the same terms. See that file for why the holder
+                  // is compared by RUN ID rather than by session.
+                  blocked={
+                    projectGates({
+                      holder,
+                      openRunId: runId,
+                      held: heldBy,
+                    }).send
+                  }
+                  autoSend={autoSend}
+                  onAutoSent={onAutoSent}
+                  onSend={send}
+                  onInterrupt={() => {
+                    if (runId) void api.interruptChat(runId).catch(() => {})
+                  }}
+                />
+              </div>
+            )}
           </div>
         </div>
-      )}
-
-      {projectId && (
-        <Composer
-          // `watching`, not `busy`: an adopted commit run must not put the box
-          // into its working state — a send under a commit queues, and a stop
-          // button for a run nothing on screen shows is a control with no
-          // visible referent.
-          busy={watching}
-          usage={usage}
-          sessionId={sessionId}
-          // The open chat's box, whether it has a session yet or not: an
-          // unstarted one is addressed by its draft id, and losing that would
-          // hand every unstarted chat the same box.
-          draftKey={draftKey(projectId, sessionId ?? draftId ?? "")}
-          inheritedMode={summary?.lastMode ?? null}
-          // Stated in `projectGates` rather than here, so every box refuses on
-          // the same terms. See that file for why the holder is compared by RUN
-          // ID rather than by session.
-          blocked={
-            projectGates({
-              holder,
-              openRunId: runId,
-              held: heldBy,
-            }).send
-          }
-          autoSend={autoSend}
-          onAutoSent={onAutoSent}
-          onSend={send}
-          onInterrupt={() => {
-            if (runId) void api.interruptChat(runId).catch(() => {})
-          }}
-        />
-      )}
+      </div>
     </section>
   )
 }

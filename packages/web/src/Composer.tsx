@@ -547,7 +547,7 @@ export function Composer({
     // to this bar's height so the last message can still be scrolled clear of
     // it — content passes behind the box rather than stopping short of a rule.
     <div
-      className={`relative z-10 shrink-0 px-3 pt-1 pb-3 ${
+      className={`relative z-10 shrink-0 px-3 pt-1 pb-5 ${
         dragOver ? "outline-accent -outline-offset-2 outline-2 outline-dashed" : ""
       }`}
       onDragOver={(e) => {
