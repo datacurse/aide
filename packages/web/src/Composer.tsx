@@ -537,8 +537,17 @@ export function Composer({
   const viewer = useImageViewer()
 
   return (
+    // No panel: no top border, no `bg-chrome`, no rule across the pane. The bar
+    // used to be a solid slab welded to the bottom edge, which put a hard
+    // horizontal line under every conversation and made the box read as a
+    // separate piece of furniture rather than as the end of the thread.
+    //
+    // It FLOATS over the transcript instead. The pane's own `bg-editor` shows
+    // through the padding, and the scroller below carries bottom padding equal
+    // to this bar's height so the last message can still be scrolled clear of
+    // it — content passes behind the box rather than stopping short of a rule.
     <div
-      className={`shrink-0 border-t border-line bg-chrome px-3 py-2 ${
+      className={`relative z-10 shrink-0 px-3 pt-1 pb-3 ${
         dragOver ? "outline-accent -outline-offset-2 outline-2 outline-dashed" : ""
       }`}
       onDragOver={(e) => {
@@ -633,7 +642,12 @@ export function Composer({
             `focus-within` and not `focus` — the ring has to survive the pointer
             landing on the model picker inside it, or opening a menu blinks the
             border off mid-gesture. */}
-        <div className="rounded-lg border border-line-soft bg-input px-2 py-1.5 transition-colors focus-within:border-accent">
+        {/* Opaque, and it has to be: the transcript scrolls BEHIND this box,
+            so a translucent fill would draw the tail of the conversation
+            through the text you are typing. `shadow` for the same reason —
+            it is the only thing that says the box is above the thread rather
+            than a gap in it. */}
+        <div className="rounded-xl border border-line-soft bg-input px-2 py-1.5 shadow-lg shadow-black/30 transition-colors focus-within:border-accent">
           <textarea
             ref={area}
             value={text}

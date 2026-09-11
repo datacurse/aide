@@ -117,29 +117,33 @@ export function WorkingBar({
   const waiting = activity.startsWith("Waiting")
 
   return (
-    // The amber wash of a waiting turn is the whole pane's, not the column's:
-    // it is the pane changing state, and a tinted stripe inset from both edges
-    // would read as a banner inside the conversation rather than as the bar
-    // itself. The row inside takes the column, so the spinner starts where the
-    // prose above it does.
-    <div
-      className={`shrink-0 border-t px-3 py-1.5 font-sans text-[11px] ${
-        waiting ? "border-warn bg-warn/5 text-warn" : "border-line bg-chrome text-fg-muted"
-      }`}
-    >
+    // No slab and no rule. This sits directly above the floating composer, so a
+    // full-width tinted bar with a top border would put back exactly the hard
+    // horizontal line the composer stopped drawing — two of them, stacked.
+    //
+    // The waiting state is carried by the ROW instead: it keeps the amber, in a
+    // rounded pill sized to its own content, so the bar reads as a status
+    // attached to the conversation rather than as another piece of chrome.
+    <div className="shrink-0 px-3 pt-1 font-sans text-[11px]">
       <div className={`flex items-center gap-2 ${COLUMN}`}>
-        {!waiting && (
-          <span className="inline-block size-2.5 shrink-0 animate-spin rounded-full border border-info border-t-transparent" />
-        )}
-        <span className="min-w-0 truncate">{activity}</span>
-        <span className="shrink-0 text-fg-dim">
-          {seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`}
-        </span>
-        {outputTokens > 0 && (
-          <Hint hint="Output tokens in the message being written">
-            <span className="shrink-0 text-fg-dim">{outputTokens.toLocaleString()} tokens</span>
-          </Hint>
-        )}
+        <div
+          className={`flex min-w-0 items-center gap-2 rounded-md px-2 py-1 ${
+            waiting ? "bg-warn/10 text-warn" : "text-fg-muted"
+          }`}
+        >
+          {!waiting && (
+            <span className="inline-block size-2.5 shrink-0 animate-spin rounded-full border border-info border-t-transparent" />
+          )}
+          <span className="min-w-0 truncate">{activity}</span>
+          <span className="shrink-0 text-fg-dim">
+            {seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`}
+          </span>
+          {outputTokens > 0 && (
+            <Hint hint="Output tokens in the message being written">
+              <span className="shrink-0 text-fg-dim">{outputTokens.toLocaleString()} tokens</span>
+            </Hint>
+          )}
+        </div>
       </div>
     </div>
   )

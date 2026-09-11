@@ -671,7 +671,15 @@ export function ConversationPane({
           // selected shoves the grid you are clicking instead of growing the
           // card downward. Appends land at the bottom here, so anchoring was
           // buying nothing.
-          className="relative flex-1 overflow-x-hidden overflow-y-auto px-3 py-2 font-mono text-xs leading-relaxed [overflow-anchor:none]"
+          // `pb-6` and not the composer's real height: the box floats over this
+          // scroller, so without trailing room the last line stops exactly
+          // under it and cannot be read. It is a MARGIN rather than a measured
+          // offset because the composer grows with what you type — matching it
+          // exactly would mean measuring that box and feeding its height back
+          // in, and being a few pixels short there is a line you cannot reach,
+          // while being generous costs nothing but slack under the last
+          // message. The pane still scrolls to the true end.
+          className="relative flex-1 overflow-x-hidden overflow-y-auto px-3 pt-2 pb-6 font-mono text-xs leading-relaxed [overflow-anchor:none]"
         >
           {/* Only when there is nothing on screen to keep. `view` is addressed
               by session id, so a new chat's first turn arrives at a key that has
@@ -762,10 +770,14 @@ export function ConversationPane({
 
       {/* Between the transcript and the box, which is the order the decision is
           made in: you read what went wrong, then you decide whether to send it
-          again. */}
+          again.
+
+          Carded rather than barred, for the reason the composer below it is: a
+          full-width slab with a top rule would draw the line the floating box
+          exists to avoid. */}
       {failedTurn && projectId && (
-        <div className="shrink-0 border-t border-line bg-chrome px-3 py-1.5 font-sans text-[11px] text-fg-muted">
-          <div className={`flex items-center gap-2 ${COLUMN}`}>
+        <div className="shrink-0 px-3 pt-1 font-sans text-[11px] text-fg-muted">
+          <div className={`flex items-center gap-2 rounded-md bg-chrome px-2 py-1.5 ${COLUMN}`}>
             <span className="min-w-0 flex-1">
               That turn did not finish. Your message is still here — put it back in the box to try
               again, or say something different.
